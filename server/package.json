@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "npm run build && node dist/src/server.js",
+    "start": "node dist/src/server.js",
     "build": "npm run db:generate && tsc -p tsconfig.build.json",
     "typecheck": "npm run db:generate && tsc --noEmit -p tsconfig.build.json",
     "test": "vitest run --maxWorkers=1 --no-file-parallelism",
