@@ -9,10 +9,10 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "npm run build && node dist/src/server.js",
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit -p tsconfig.build.json",
+    "build": "npm run db:generate && tsc -p tsconfig.build.json",
+    "typecheck": "npm run db:generate && tsc --noEmit -p tsconfig.build.json",
     "test": "vitest run --maxWorkers=1 --no-file-parallelism",
-    "db:generate": "prisma generate",
+    "db:generate": "prisma generate --config prisma.config.ts",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
