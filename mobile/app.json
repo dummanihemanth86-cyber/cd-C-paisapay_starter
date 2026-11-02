@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "PaisaPay",
+    "slug": "paisapay",
+    "scheme": "paisapay",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/paisapay-neon-logo.png",
+      "imageWidth": 220,
+      "resizeMode": "contain",
+      "backgroundColor": "#080F1F"
+    },
+    "android": {
+      "package": "com.paisapay.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/paisapay-neon-logo.png",
+        "backgroundColor": "#080F1F"
+      }
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications"
+    ],
+    "icon": "./assets/paisapay-neon-logo.png"
+  }
+}

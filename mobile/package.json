@@ -1,0 +1,53 @@
+{
+  "name": "paisapay-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start --go --lan --clear",
+    "test:bird": "node --test src/bird/assistantEngine.test.cjs",
+    "start:dev-client": "expo start --dev-client --tunnel --clear",
+    "android": "expo run:android",
+    "prebuild:android": "expo prebuild --platform android",
+    "android:dev": "expo run:android",
+    "web": "expo start --web",
+    "ios": "expo run:ios",
+    "postinstall": "node ./scripts/patch-metro-image-size.cjs"
+  },
+  "dependencies": {
+    "expo": "~54.0.0",
+    "expo-clipboard": "~8.0.8",
+    "expo-dev-client": "~6.0.21",
+    "expo-image-manipulator": "~14.0.8",
+    "expo-image-picker": "~17.0.11",
+    "expo-notifications": "~0.32.17",
+    "expo-secure-store": "~15.0.8",
+    "expo-status-bar": "~3.0.8",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-cashfree-pg-sdk": "^2.5.0",
+    "react-native-qrcode-svg": "6.3.15",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-svg": "15.12.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.10",
+    "typescript": "~5.9.2"
+  },
+  "expo": {
+    "doctor": {
+      "reactNativeDirectoryCheck": {
+        "exclude": [
+          "react-native-cashfree-pg-sdk"
+        ]
+      }
+    }
+  },
+  "overrides": {
+    "image-size": "2.0.4",
+    "postcss": "8.5.32",
+    "metro": "0.83.4",
+    "metro-config": "0.83.4",
+    "metro-transform-worker": "0.83.4"
+  }
+}

@@ -1,0 +1,676 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  PENDING_PROFILE
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum PaymentMethod {
+  UPI
+  MOBIKWIK
+  PAYTM
+  PHONEPE
+  NAVI
+  CASHFREE
+}
+
+enum DepositStatus {
+  CREATED
+  PENDING_PAYMENT
+  PAYMENT_PROCESSING
+  PAYMENT_VERIFIED
+  COMPLETED
+  FAILED
+  CANCELLED
+  EXPIRED
+  REFUNDED
+  REVERSED
+}
+
+enum OrderKind {
+  BUY
+  SELL
+}
+
+enum OrderStatus {
+  AVAILABLE
+  RESERVED
+  PAYMENT_SUBMITTED
+  PAYMENT_UNDER_REVIEW
+  PAYMENT_VERIFIED
+  SETTLED
+  EXPIRED
+  CANCELLED
+  PAYMENT_REJECTED
+  DISPUTED
+  REFUNDED
+}
+
+enum WithdrawalStatus {
+  REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+  FAILED
+  CANCELLED
+}
+
+enum LedgerAccountType {
+  AVAILABLE
+  PENDING
+  RESERVED
+  WITHDRAWAL_PENDING
+  DEPOSIT_CLEARING
+  SETTLEMENT_CASH
+  PAYMENT_SUSPENSE
+  REWARD_FUND
+}
+
+enum AdminRole {
+  SUPPORT
+  OPERATIONS
+  FINANCE
+  ADMIN
+  SUPER_ADMIN
+}
+
+model User {
+  id                           String               @id @default(uuid()) @db.Uuid
+  publicId                     String?              @unique @map("public_id") @db.VarChar(10)
+  phoneE164                    String               @unique @map("phone_e164")
+  upiId                        String?              @map("upi_id")
+  upiDisplayName               String?              @map("upi_display_name") @db.VarChar(100)
+  upiIdVerifiedAt              DateTime?            @map("upi_id_verified_at")
+  passwordHash                 String?              @map("password_hash")
+  loginFailedAttempts          Int                  @default(0) @map("login_failed_attempts")
+  loginLockedUntil             DateTime?            @map("login_locked_until")
+  displayName                  String?              @map("display_name")
+  avatarId                     String?              @map("avatar_id") @db.VarChar(24)
+  status                       UserStatus           @default(PENDING_PROFILE)
+  welcomeBonusEligible         Boolean              @default(false) @map("welcome_bonus_eligible")
+  referralCode                 String               @unique @default(cuid()) @map("referral_code")
+  referredById                 String?              @map("referred_by_id") @db.Uuid
+  referredBy                   User?                @relation("UserReferrals", fields: [referredById], references: [id])
+  referrals                    User[]               @relation("UserReferrals")
+  sessions                     Session[]
+  ledgerAccounts               LedgerAccount[]
+  deposits                     Deposit[]
+  sellOrders                   Order[]              @relation("SellerOrders")
+  buyOrders                    Order[]              @relation("BuyerOrders")
+  withdrawals                  Withdrawal[]
+  bankAccounts                 BankAccount[]
+  wallets                      WalletAccount[]
+  referralsGiven               Referral[]           @relation("ReferralSource")
+  referralReceived             Referral?            @relation("ReferralTarget")
+  commissions                  CommissionEntry[]
+  tickets                      SupportTicket[]
+  notifications                Notification[]
+  auditLogs                    AuditLog[]
+  adminRole                    AdminUser?
+  submittedManualPaymentClaims ManualPaymentClaim[] @relation("ManualPaymentClaimSubmitter")
+  reviewedManualPaymentClaims  ManualPaymentClaim[] @relation("ManualPaymentClaimReviewer")
+  p2pWithdrawalOffers          P2pWithdrawalOffer[] @relation("P2pOfferCreator")
+  p2pMatchedOffers             P2pWithdrawalOffer[] @relation("P2pOfferBuyer")
+  p2pBoughtOrders              P2pDepositOrder[] @relation("P2pDepositBuyer")
+  p2pSoldOrders                P2pDepositOrder[] @relation("P2pDepositSeller")
+  submittedP2pPaymentClaims    P2pPaymentClaim[] @relation("P2pClaimSubmitter")
+  reviewedP2pPaymentClaims     P2pPaymentClaim[] @relation("P2pClaimReviewer")
+  createdAt                    DateTime             @default(now()) @map("created_at")
+  updatedAt                    DateTime             @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model OtpChallenge {
+  id               String    @id @default(uuid()) @db.Uuid
+  phoneE164        String    @map("phone_e164")
+  purpose          String    @default("LOGIN")
+  referralCode     String?   @map("referral_code")
+  codeHash         String    @map("code_hash")
+  expiresAt        DateTime  @map("expires_at")
+  resendAt         DateTime  @map("resend_at")
+  attempts         Int       @default(0)
+  consumedAt       DateTime? @map("consumed_at")
+  gatewayRequestId String?   @unique @map("gateway_request_id")
+  gatewaySmsId     BigInt?   @map("gateway_sms_id")
+  deliveryStatus   String?   @map("delivery_status")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([phoneE164, createdAt])
+  @@map("otp_challenges")
+}
+
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessTokenHash  String    @unique @map("access_token_hash")
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  accessExpiresAt  DateTime  @map("access_expires_at")
+  refreshExpiresAt DateTime  @map("refresh_expires_at")
+  deviceLabel      String?   @map("device_label")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
+}
+
+model LedgerAccount {
+  id        String            @id @default(uuid()) @db.Uuid
+  userId    String?           @map("user_id") @db.Uuid
+  user      User?             @relation(fields: [userId], references: [id])
+  type      LedgerAccountType
+  currency  String            @default("INR") @db.Char(3)
+  entries   LedgerEntry[]
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  @@unique([userId, type, currency])
+  @@map("ledger_accounts")
+}
+
+model LedgerTransaction {
+  id             String        @id @default(uuid()) @db.Uuid
+  eventType      String        @map("event_type")
+  referenceType  String        @map("reference_type")
+  referenceId    String        @map("reference_id")
+  idempotencyKey String        @unique @map("idempotency_key")
+  actorUserId    String?       @map("actor_user_id") @db.Uuid
+  metadata       Json          @default("{}")
+  entries        LedgerEntry[]
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  @@index([referenceType, referenceId])
+  @@map("ledger_transactions")
+}
+
+model LedgerEntry {
+  id            String            @id @default(uuid()) @db.Uuid
+  transactionId String            @map("transaction_id") @db.Uuid
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id])
+  accountId     String            @map("account_id") @db.Uuid
+  account       LedgerAccount     @relation(fields: [accountId], references: [id])
+  debitPaise    BigInt            @default(0) @map("debit_paise")
+  creditPaise   BigInt            @default(0) @map("credit_paise")
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  @@index([accountId, createdAt])
+  @@map("ledger_entries")
+}
+
+model Deposit {
+  id                  String              @id @default(uuid()) @db.Uuid
+  userId              String              @map("user_id") @db.Uuid
+  user                User                @relation(fields: [userId], references: [id])
+  amountPaise         BigInt              @map("amount_paise")
+  currency            String              @default("INR") @db.Char(3)
+  method              PaymentMethod
+  status              DepositStatus       @default(CREATED)
+  merchantReference   String              @unique @map("merchant_reference")
+  idempotencyKey      String              @unique @map("idempotency_key")
+  providerReference   String?             @unique @map("provider_reference")
+  paymentSessionId    String?             @map("payment_session_id")
+  expiresAt           DateTime?           @map("expires_at")
+  ledgerTransactionId String?             @unique @map("ledger_transaction_id") @db.Uuid
+  manualPaymentClaim  ManualPaymentClaim?
+  createdAt           DateTime            @default(now()) @map("created_at")
+  updatedAt           DateTime            @updatedAt @map("updated_at")
+
+  @@index([userId, createdAt])
+  @@map("deposits")
+}
+
+model ManualPaymentClaim {
+  id                   String    @id @default(uuid()) @db.Uuid
+  depositId            String    @unique @map("deposit_id") @db.Uuid
+  deposit              Deposit   @relation(fields: [depositId], references: [id], onDelete: Restrict)
+  userId               String    @map("user_id") @db.Uuid
+  user                 User      @relation("ManualPaymentClaimSubmitter", fields: [userId], references: [id], onDelete: Restrict)
+  transactionReference String?   @unique @map("transaction_reference")
+  status               String    @default("PENDING_REVIEW")
+  reviewedByUserId     String?   @map("reviewed_by_user_id") @db.Uuid
+  reviewedBy           User?     @relation("ManualPaymentClaimReviewer", fields: [reviewedByUserId], references: [id], onDelete: Restrict)
+  reviewReason         String?   @map("review_reason")
+  evidenceReference    String?   @map("evidence_reference")
+  evidenceImage        Bytes?    @map("evidence_image")
+  evidenceMimeType     String?   @map("evidence_mime_type")
+  verifiedAmountPaise  BigInt?   @map("verified_amount_paise")
+  verifiedCurrency     String?   @map("verified_currency") @db.Char(3)
+  receiverConfirmed    Boolean   @default(false) @map("receiver_confirmed")
+  reviewedAt           DateTime? @map("reviewed_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@map("manual_payment_claims")
+}
+
+model PaymentProviderEvent {
+  id                String    @id @default(uuid()) @db.Uuid
+  provider          String
+  providerEventId   String    @map("provider_event_id")
+  payloadHash       String    @map("payload_hash")
+  signatureVerified Boolean   @default(false) @map("signature_verified")
+  status            String    @default("RECEIVED")
+  receivedAt        DateTime  @default(now()) @map("received_at")
+  processedAt       DateTime? @map("processed_at")
+
+  @@unique([provider, providerEventId])
+  @@map("payment_provider_events")
+}
+
+model Order {
+  id             String               @id @default(uuid()) @db.Uuid
+  kind           OrderKind
+  sellerId       String               @map("seller_id") @db.Uuid
+  seller         User                 @relation("SellerOrders", fields: [sellerId], references: [id])
+  buyerId        String?              @map("buyer_id") @db.Uuid
+  buyer          User?                @relation("BuyerOrders", fields: [buyerId], references: [id])
+  amountPaise    BigInt               @map("amount_paise")
+  currency       String               @default("INR") @db.Char(3)
+  method         PaymentMethod
+  status         OrderStatus          @default(AVAILABLE)
+  expiresAt      DateTime             @map("expires_at")
+  idempotencyKey String?              @unique @map("idempotency_key")
+  history        OrderStatusHistory[]
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  @@index([status, expiresAt])
+  @@index([sellerId, createdAt])
+  @@index([buyerId, createdAt])
+  @@map("orders")
+}
+
+model OrderStatusHistory {
+  id        String      @id @default(uuid()) @db.Uuid
+  orderId   String      @map("order_id") @db.Uuid
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  actorId   String?     @map("actor_id") @db.Uuid
+  reason    String?
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+model Withdrawal {
+  id                  String           @id @default(uuid()) @db.Uuid
+  userId              String           @map("user_id") @db.Uuid
+  user                User             @relation(fields: [userId], references: [id])
+  amountPaise         BigInt           @map("amount_paise")
+  currency            String           @default("INR") @db.Char(3)
+  destinationToken    String           @map("destination_token")
+  status              WithdrawalStatus @default(REQUESTED)
+  idempotencyKey      String           @unique @map("idempotency_key")
+  payoutReference     String?          @unique @map("payout_reference")
+  ledgerTransactionId String?          @unique @map("ledger_transaction_id") @db.Uuid
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  @@index([userId, createdAt])
+  @@map("withdrawals")
+}
+
+model P2pWithdrawalOffer {
+  id             String           @id @default(uuid()) @db.Uuid
+  referenceId    String           @unique @map("reference_id")
+  userId         String           @map("user_id") @db.Uuid
+  user           User             @relation("P2pOfferCreator", fields: [userId], references: [id])
+  amountPaise    BigInt           @map("amount_paise")
+  currency       String           @default("INR") @db.Char(3)
+  paymentMethod  String           @default("UPI") @map("payment_method")
+  payeeVpa       String           @map("payee_vpa")
+  payeeName      String?          @map("payee_name") @db.VarChar(100)
+  status         String           @default("OPEN")
+  expiresAt      DateTime         @map("expires_at") @db.Timestamptz(3)
+  idempotencyKey String           @unique @map("idempotency_key")
+  matchedBuyerId String?          @map("matched_buyer_id") @db.Uuid
+  matchedBuyer   User?            @relation("P2pOfferBuyer", fields: [matchedBuyerId], references: [id])
+  orders         P2pDepositOrder[]
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  @@index([status, amountPaise, createdAt])
+  @@index([userId, createdAt])
+  @@map("p2p_withdrawal_offers")
+}
+
+model P2pDepositOrder {
+  id                String                 @id @default(uuid()) @db.Uuid
+  referenceId       String                 @unique @map("reference_id")
+  buyerUserId       String                 @map("buyer_user_id") @db.Uuid
+  buyer             User                   @relation("P2pDepositBuyer", fields: [buyerUserId], references: [id])
+  sellerUserId      String                 @map("seller_user_id") @db.Uuid
+  seller            User                   @relation("P2pDepositSeller", fields: [sellerUserId], references: [id])
+  withdrawalOfferId String                 @map("withdrawal_offer_id") @db.Uuid
+  withdrawalOffer   P2pWithdrawalOffer     @relation(fields: [withdrawalOfferId], references: [id])
+  amountPaise       BigInt                 @map("amount_paise")
+  currency          String                 @default("INR") @db.Char(3)
+  status            String                 @default("MATCHED")
+  idempotencyKey    String                 @unique @map("idempotency_key")
+  providerReference String?                @unique @map("provider_reference")
+  expiresAt         DateTime?               @map("expires_at") @db.Timestamptz(3)
+  paymentDetailsShownAt DateTime?            @map("payment_details_shown_at") @db.Timestamptz(3)
+  paymentHandoffStartedAt DateTime?          @map("payment_handoff_started_at") @db.Timestamptz(3)
+  cancellationRequestedAt DateTime?          @map("cancellation_requested_at") @db.Timestamptz(3)
+  claims            P2pPaymentClaim[]
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  @@index([buyerUserId, createdAt])
+  @@index([sellerUserId, createdAt])
+  @@index([status, createdAt])
+  @@index([withdrawalOfferId, createdAt])
+  @@index([status, expiresAt])
+  @@map("p2p_deposit_orders")
+}
+
+model P2pPaymentClaim {
+  id                   String         @id @default(uuid()) @db.Uuid
+  orderId              String         @map("order_id") @db.Uuid
+  order                P2pDepositOrder @relation(fields: [orderId], references: [id])
+  userId               String         @map("user_id") @db.Uuid
+  user                 User           @relation("P2pClaimSubmitter", fields: [userId], references: [id])
+  transactionReference String?        @unique @map("transaction_reference")
+  claimedAmountPaise   BigInt?        @map("claimed_amount_paise")
+  claimedPaidAt        DateTime?      @map("claimed_paid_at") @db.Timestamptz(3)
+  evidenceImage        Bytes?         @map("evidence_image")
+  evidenceMimeType     String?        @map("evidence_mime_type")
+  status               String         @default("PENDING_REVIEW")
+  reviewedByUserId     String?        @map("reviewed_by_user_id") @db.Uuid
+  reviewedBy           User?          @relation("P2pClaimReviewer", fields: [reviewedByUserId], references: [id])
+  reviewReason         String?        @map("review_reason")
+  evidenceReference    String?        @map("evidence_reference")
+  verifiedAmountPaise  BigInt?        @map("verified_amount_paise")
+  verifiedCurrency     String?        @map("verified_currency") @db.Char(3)
+  receiverConfirmed    Boolean        @default(false) @map("receiver_confirmed")
+  reviewedAt           DateTime?      @map("reviewed_at")
+  createdAt            DateTime       @default(now()) @map("created_at")
+  updatedAt            DateTime       @updatedAt @map("updated_at")
+  adminPushEvents      AdminPushEvent[]
+
+  @@index([orderId, createdAt])
+  @@index([status, createdAt])
+  @@map("p2p_payment_claims")
+}
+
+model BankAccount {
+  id                      String    @id @default(uuid()) @db.Uuid
+  userId                  String    @map("user_id") @db.Uuid
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountHolderName       String    @map("account_holder_name")
+  bankName                String?   @map("bank_name")
+  accountNumberCiphertext String    @map("account_number_ciphertext")
+  accountNumberNonce      String    @map("account_number_nonce")
+  accountNumberTag        String    @map("account_number_tag")
+  accountNumberHash       String    @map("account_number_hash")
+  accountLast4            String    @map("account_last4") @db.Char(4)
+  ifsc                    String    @db.VarChar(11)
+  verificationStatus      String    @default("UNVERIFIED") @map("verification_status")
+  verifiedAt              DateTime? @map("verified_at")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  @@unique([userId, accountNumberHash])
+  @@index([userId, createdAt])
+  @@map("bank_accounts")
+}
+
+model WalletAccount {
+  id          String        @id @default(uuid()) @db.Uuid
+  userId      String        @map("user_id") @db.Uuid
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  method      PaymentMethod
+  reference   String?
+  status      String        @default("UNAVAILABLE")
+  buyEnabled  Boolean       @default(false) @map("buy_enabled")
+  sellEnabled Boolean       @default(false) @map("sell_enabled")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  @@unique([userId, method])
+  @@map("wallet_accounts")
+}
+
+model Referral {
+  id           String   @id @default(uuid()) @db.Uuid
+  referrerId   String   @map("referrer_id") @db.Uuid
+  referrer     User     @relation("ReferralSource", fields: [referrerId], references: [id])
+  inviteeId    String   @unique @map("invitee_id") @db.Uuid
+  invitee      User     @relation("ReferralTarget", fields: [inviteeId], references: [id])
+  referralCode String   @map("referral_code")
+  status       String   @default("PENDING")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("referrals")
+}
+
+model CommissionEntry {
+  id                  String   @id @default(uuid()) @db.Uuid
+  userId              String   @map("user_id") @db.Uuid
+  user                User     @relation(fields: [userId], references: [id])
+  qualifyingReference String   @unique @map("qualifying_reference")
+  amountPaise         BigInt   @map("amount_paise")
+  fundingReference    String   @map("funding_reference")
+  status              String   @default("PENDING")
+  kind                String   @default("DIRECT_COMMISSION")
+  level               Int      @default(1)
+  sourceUserId        String?  @map("source_user_id") @db.Uuid
+  qualifyingAmountPaise BigInt? @map("qualifying_amount_paise")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@index([userId, kind, createdAt])
+  @@map("commission_entries")
+}
+
+model ReferralProgramConfig {
+  id             Int      @id @default(1)
+  directRateBps  Int      @default(40) @map("direct_rate_bps")
+  indirectRateBps Int     @default(10) @map("indirect_rate_bps")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("referral_program_config")
+}
+
+model ReferralMilestoneRule {
+  id                       String   @id @default(uuid()) @db.Uuid
+  key                      String   @unique
+  requiredReferrals        Int      @map("required_referrals")
+  qualifyingTopUpPaise     BigInt?  @map("qualifying_top_up_paise")
+  rewardAmountPaise        BigInt   @map("reward_amount_paise")
+  enabled                  Boolean  @default(true)
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  @@map("referral_milestone_rules")
+}
+
+model RewardRule {
+  id            String   @id @default(uuid()) @db.Uuid
+  name          String
+  eligibility   Json
+  amountPaise   BigInt   @default(0) @map("amount_paise")
+  fundingSource String?  @map("funding_source")
+  enabled       Boolean  @default(false)
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("reward_rules")
+}
+
+model SupportTicket {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  user      User             @relation(fields: [userId], references: [id])
+  subject   String
+  status    String           @default("OPEN")
+  messages  SupportMessage[]
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  @@index([userId, createdAt])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id        String        @id @default(uuid()) @db.Uuid
+  ticketId  String        @map("ticket_id") @db.Uuid
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId  String?       @map("author_id") @db.Uuid
+  message   String
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
+}
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+model AdminUser {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @unique @map("user_id") @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      AdminRole
+  createdAt DateTime  @default(now()) @map("created_at")
+  pushDevices AdminPushDevice[]
+
+  @@map("admin_users")
+}
+
+model AdminPushDevice {
+  id              String        @id @default(uuid()) @db.Uuid
+  adminUserId     String        @map("admin_user_id") @db.Uuid
+  adminUser       AdminUser     @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  expoPushToken   String        @unique @map("expo_push_token") @db.VarChar(255)
+  platform        String        @db.VarChar(16)
+  revokedAt       DateTime?     @map("revoked_at") @db.Timestamptz(3)
+  lastRegisteredAt DateTime     @default(now()) @map("last_registered_at") @db.Timestamptz(3)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  deliveries      AdminPushDelivery[]
+
+  @@index([adminUserId, revokedAt])
+  @@map("admin_push_devices")
+}
+
+model AdminPushEvent {
+  id                    String              @id @default(uuid()) @db.Uuid
+  eventKey              String              @unique @map("event_key") @db.VarChar(180)
+  type                  String              @db.VarChar(60)
+  title                 String              @db.VarChar(120)
+  body                  String              @db.VarChar(240)
+  claimId               String              @map("claim_id") @db.Uuid
+  claim                 P2pPaymentClaim     @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  deliveriesPreparedAt  DateTime?           @map("deliveries_prepared_at") @db.Timestamptz(3)
+  createdAt             DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  deliveries            AdminPushDelivery[]
+
+  @@index([type, createdAt])
+  @@map("admin_push_events")
+}
+
+model AdminPushDelivery {
+  id             String         @id @default(uuid()) @db.Uuid
+  eventId        String         @map("event_id") @db.Uuid
+  event          AdminPushEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  deviceId       String         @map("device_id") @db.Uuid
+  device         AdminPushDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  status         String         @default("PENDING") @db.VarChar(24)
+  attemptCount   Int            @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime       @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  lockedAt       DateTime?      @map("locked_at") @db.Timestamptz(3)
+  acceptedAt     DateTime?      @map("accepted_at") @db.Timestamptz(3)
+  lastError      String?        @map("last_error") @db.VarChar(500)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([eventId, deviceId])
+  @@index([status, nextAttemptAt])
+  @@map("admin_push_deliveries")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @map("actor_id") @db.Uuid
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String
+  target    String
+  reason    String?
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+model IdempotencyKey {
+  id           String   @id @default(uuid()) @db.Uuid
+  scope        String
+  key          String
+  requestHash  String   @map("request_hash")
+  responseJson Json?    @map("response_json")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([scope, key])
+  @@map("idempotency_keys")
+}
+
+model ReconciliationRecord {
+  id                String   @id @default(uuid()) @db.Uuid
+  provider          String
+  providerReference String   @map("provider_reference")
+  internalReference String   @map("internal_reference")
+  amountPaise       BigInt   @map("amount_paise")
+  currency          String   @default("INR") @db.Char(3)
+  status            String   @default("PENDING_REVIEW")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@unique([provider, providerReference])
+  @@map("reconciliation_records")
+}
+
+model VipLevel {
+  id          String   @id @default(uuid()) @db.Uuid
+  levelNumber Int      @unique @map("level_number")
+  displayName String   @map("display_name")
+  eligibility Json
+  benefits    Json
+  enabled     Boolean  @default(false)
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("vip_levels")
+}
+
+model PaymentMethodConfiguration {
+  id               String        @id @default(uuid()) @db.Uuid
+  method           PaymentMethod @unique
+  buyEnabled       Boolean       @default(false) @map("buy_enabled")
+  sellEnabled      Boolean       @default(false) @map("sell_enabled")
+  providerApproved Boolean       @default(false) @map("provider_approved")
+  enabled          Boolean       @default(false)
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  @@map("payment_method_configurations")
+}

@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: paisapay-api
+    runtime: node
+    plan: starter
+    region: singapore
+    rootDir: server
+    buildCommand: npm ci && npm run db:generate && npm run build
+    preDeployCommand: npm run db:deploy
+    startCommand: node dist/src/server.js
+    healthCheckPath: /ready
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.2
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_DATABASE_URL
+        sync: false
+      - key: SESSION_HASH_SECRET
+        sync: false
+      - key: BANK_ACCOUNT_ENCRYPTION_KEY
+        sync: false
+      - key: OTP_PROVIDER
+        value: renflair-v1
+      - key: RENFLAIR_API_KEY
+        sync: false
+      - key: PAYMENT_PROVIDER
+        value: disabled
+      - key: UPI_DEPOSIT_REWARD_ENABLED
+        value: "false"
+      - key: WELCOME_BONUS_ENABLED
+        value: "false"

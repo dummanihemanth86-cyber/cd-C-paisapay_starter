@@ -1,0 +1,17 @@
+node_modules/
+.expo/
+.expo*/
+android/
+ios/
+dist/
+web-build/
+.env
+.env.*
+!.env.example
+*.apk
+*.aab
+*.jks
+*.keystore
+*.backup
+*.bak
+pg_hba.conf.backup
