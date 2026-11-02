@@ -27,7 +27,30 @@ export const openapi = {
       },
     } },
     '/auth/otp-status/{challengeId}': { get: { summary: 'Check gateway SMS state without exposing gateway credentials or message contents', parameters: [{ in: 'path', name: 'challengeId', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Latest accepted, sent, delivered, failed, or unknown state' }, '503': { description: 'Gateway status unavailable' } } } },
-    '/auth/verify-otp': { post: { summary: 'Verify OTP and create a session', responses: { '200': { description: 'Session created' }, '401': { description: 'Invalid or expired OTP' } } } },
+    '/auth/verify-otp': { post: {
+      summary: 'Verify an OTP challenge and create a session',
+      requestBody: {
+        required: true,
+        content: { 'application/json': {
+          schema: {
+            type: 'object',
+            required: ['challengeId', 'phoneE164', 'code'],
+            additionalProperties: false,
+            properties: {
+              challengeId: { type: 'string', format: 'uuid' },
+              phoneE164: { type: 'string', pattern: '^\\+[1-9]\\d{7,14}$', example: '+919876543210' },
+              code: { type: 'string', pattern: '^\\d{6}$', example: '123456' },
+            },
+          },
+          example: { challengeId: '00000000-0000-4000-8000-000000000001', phoneE164: '+919876543210', code: '123456' },
+        } },
+      },
+      responses: {
+        '200': { description: 'Session created' },
+        '400': { description: 'Missing or invalid challengeId, phoneE164, or code' },
+        '401': { description: 'Invalid or expired OTP' },
+      },
+    } },
     '/auth/register/request-otp': { post: { summary: 'Request a registration OTP; existing accounts receive a generic registration response', responses: { '202': { description: 'Registration challenge created' }, '409': { description: 'Registration unavailable for this number' }, '503': { description: 'SMS provider unavailable' } } } },
     '/auth/register/verify-otp': { post: { summary: 'Verify registration OTP and create an account with a server-hashed password', responses: { '201': { description: 'Account created; sign in separately' }, '401': { description: 'Invalid or expired registration OTP' } } } },
     '/auth/forgot-password/request-otp': { post: { summary: 'Request a five-minute password-reset OTP through the configured server-side SMS provider', responses: { '202': { description: 'Generic reset request accepted; OTP is not included in the response' }, '429': { description: 'Rate limited or resend cooldown active' }, '503': { description: 'SMS provider unavailable' } } } },

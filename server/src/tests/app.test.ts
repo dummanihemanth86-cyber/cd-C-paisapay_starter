@@ -85,6 +85,15 @@ describe('PaisaPay API foundation', () => {
     expect(response.body.openapi).toBe('3.0.3');
     expect(response.body.info.title).toBe('PaisaPay API');
     expect(response.body.paths).toHaveProperty('/config');
+
+    const verifyOtp = response.body.paths['/auth/verify-otp'].post;
+    expect(verifyOtp.requestBody.required).toBe(true);
+    expect(verifyOtp.requestBody.content['application/json'].schema.required).toEqual(['challengeId', 'phoneE164', 'code']);
+    expect(verifyOtp.requestBody.content['application/json'].example).toEqual({
+      challengeId: '00000000-0000-4000-8000-000000000001',
+      phoneE164: '+919876543210',
+      code: '123456',
+    });
   });
 
   it('protects private profile data', async () => {
