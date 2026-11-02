@@ -53,7 +53,10 @@ app.get('/api/v1/config', asyncRoute(async (_req, res) => {
 app.get('/v1/config', asyncRoute(async (_req, res) => {
   res.json({ ...await getPaymentMethodAvailability(), demoOnly: true });
 }));
-app.get('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(openapi));
+app.get('/api/v1/openapi.json', (_req, res) => res.json(openapi));
+app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(undefined, {
+  swaggerOptions: { url: '/api/v1/openapi.json' },
+}));
 app.post('/api/v1/webhooks/payments/:provider', (req, res, next) => {
   if (req.params.provider === 'cashfree') return void handleCashfreeWebhook(req, res).catch(next);
   return res.status(503).json({ error: { code: 'PAYMENT_PROVIDER_UNAVAILABLE', message: 'No approved payment adapter is configured for this provider.' } });

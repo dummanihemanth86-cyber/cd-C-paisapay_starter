@@ -43,7 +43,23 @@ describe('PaisaPay API foundation', () => {
   });
 
   it('serves API documentation', async () => {
-    await request(app).get('/api/v1/docs/').expect(200);
+    const response = await request(app).get('/api/v1/docs/').expect(200);
+    expect(response.text).toContain('./swagger-ui-bundle.js');
+    expect(response.text).toContain('./swagger-ui.css');
+    expect(response.headers['content-security-policy']).toContain("script-src 'self'");
+    expect(response.headers['content-security-policy']).toContain("style-src 'self' https: 'unsafe-inline'");
+
+    await request(app).get('/api/v1/docs/swagger-ui.css').expect(200).expect('Content-Type', /text\/css/);
+    await request(app).get('/api/v1/docs/swagger-ui-bundle.js').expect(200).expect('Content-Type', /javascript/);
+    const initializer = await request(app).get('/api/v1/docs/swagger-ui-init.js').expect(200).expect('Content-Type', /javascript/);
+    expect(initializer.text).toContain('/api/v1/openapi.json');
+  });
+
+  it('serves the OpenAPI document at its public JSON path', async () => {
+    const response = await request(app).get('/api/v1/openapi.json').expect(200).expect('Content-Type', /json/);
+    expect(response.body.openapi).toBe('3.0.3');
+    expect(response.body.info.title).toBe('PaisaPay API');
+    expect(response.body.paths).toHaveProperty('/config');
   });
 
   it('protects private profile data', async () => {
