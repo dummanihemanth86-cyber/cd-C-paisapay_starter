@@ -38,8 +38,33 @@ describe('PaisaPay API foundation', () => {
   });
 
   it('returns a controlled forbidden response for an unapproved browser origin', async () => {
-    const response = await request(app).get('/health').set('Origin', 'https://unapproved.example').expect(403);
+    const response = await request(app).post('/api/v1/auth/request-otp')
+      .set('Origin', 'https://unapproved.example')
+      .send({ phoneE164: '+919876543210' })
+      .expect(403);
     expect(response.body.error.code).toBe('CORS_ORIGIN_DENIED');
+  });
+
+  it('allows the production API origin while keeping CORS allowlisting active', async () => {
+    const response = await request(app).get('/api/v1/openapi.json')
+      .set('Origin', 'https://paisapay-api.onrender.com')
+      .expect(200);
+    expect(response.headers['access-control-allow-origin']).toBe('https://paisapay-api.onrender.com');
+  });
+
+  it('validates the documented JSON OTP request body and accepts only phoneE164', async () => {
+    const invalid = await request(app).post('/api/v1/auth/request-otp')
+      .set('Origin', 'https://paisapay-api.onrender.com')
+      .send({ phoneE164: 'not-e164' })
+      .expect(400);
+    expect(invalid.headers['access-control-allow-origin']).toBe('https://paisapay-api.onrender.com');
+    expect(invalid.body.error.code).toBe('VALIDATION_ERROR');
+
+    const spec = (await request(app).get('/api/v1/openapi.json').expect(200)).body;
+    const operation = spec.paths['/auth/request-otp'].post;
+    expect(operation.requestBody.required).toBe(true);
+    expect(operation.requestBody.content['application/json'].schema.required).toEqual(['phoneE164']);
+    expect(operation.requestBody.content['application/json'].schema.properties.phoneE164.example).toBe('+919876543210');
   });
 
   it('serves API documentation', async () => {

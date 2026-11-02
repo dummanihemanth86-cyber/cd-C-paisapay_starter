@@ -26,7 +26,7 @@ export const app = express();
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({ origin: (origin, callback) => {
-  if (!origin || env.appOrigins.includes(origin)) return callback(null, true);
+  if (!origin || origin === 'https://paisapay-api.onrender.com' || env.appOrigins.includes(origin)) return callback(null, true);
   if (env.isDevelopment && (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:'))) return callback(null, true);
   return callback(Object.assign(new Error('Origin is not allowed by CORS.'), { statusCode: 403, code: 'CORS_ORIGIN_DENIED' }));
 } }));

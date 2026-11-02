@@ -8,7 +8,24 @@ export const openapi = {
   },
   paths: {
     '/config': { get: { summary: 'Public INR/payment-method configuration', responses: { '200': { description: 'Configuration' } } } },
-    '/auth/request-otp': { post: { summary: 'Request an OTP delivered through the configured server-side Android SMS gateway', responses: { '202': { description: 'OTP challenge created; gateway acceptance does not confirm SMS delivery' }, '429': { description: 'Rate limited' }, '503': { description: 'Gateway unavailable, timed out, or rejected the request' } } } },
+    '/auth/request-otp': { post: {
+      summary: 'Request an OTP delivered through the configured server-side SMS provider',
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: {
+          type: 'object',
+          required: ['phoneE164'],
+          additionalProperties: false,
+          properties: { phoneE164: { type: 'string', pattern: '^\\+[1-9]\\d{7,14}$', example: '+919876543210', description: 'Phone number in international E.164 format.' } },
+        } } },
+      },
+      responses: {
+        '202': { description: 'OTP challenge accepted; provider acceptance does not confirm handset delivery' },
+        '400': { description: 'Missing or invalid phoneE164 JSON field' },
+        '429': { description: 'Rate limited' },
+        '503': { description: 'OTP provider unavailable, timed out, or rejected the request' },
+      },
+    } },
     '/auth/otp-status/{challengeId}': { get: { summary: 'Check gateway SMS state without exposing gateway credentials or message contents', parameters: [{ in: 'path', name: 'challengeId', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Latest accepted, sent, delivered, failed, or unknown state' }, '503': { description: 'Gateway status unavailable' } } } },
     '/auth/verify-otp': { post: { summary: 'Verify OTP and create a session', responses: { '200': { description: 'Session created' }, '401': { description: 'Invalid or expired OTP' } } } },
     '/auth/register/request-otp': { post: { summary: 'Request a registration OTP; existing accounts receive a generic registration response', responses: { '202': { description: 'Registration challenge created' }, '409': { description: 'Registration unavailable for this number' }, '503': { description: 'SMS provider unavailable' } } } },
