@@ -58,7 +58,34 @@ export const openapi = {
     '/auth/password/reset': { post: { summary: 'Reset a password using a valid six-digit SMS challenge; all sessions are revoked', responses: { '200': { description: 'Password changed' }, '401': { description: 'Invalid, expired, or unaccepted reset code' }, '429': { description: 'Too many incorrect codes' } } } },
     '/auth/refresh': { post: { summary: 'Rotate an expiring session', responses: { '200': { description: 'Tokens rotated' } } } },
     '/admin/auth/login': { post: { summary: 'Sign in to the separate Admin app using an existing active account provisioned with an administrator role', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['phoneE164', 'password'], properties: { phoneE164: { type: 'string', example: '+919876543210' }, password: { type: 'string', format: 'password' } } } } } }, responses: { '200': { description: 'Administrator session tokens and role' }, '401': { description: 'Invalid credentials or account is not an active provisioned admin' }, '429': { description: 'Admin login rate limit exceeded' } } } },
-    '/users/me': { get: { security: [{ bearerAuth: [] }], summary: 'Get current profile', responses: { '200': { description: 'Profile' } } }, patch: { security: [{ bearerAuth: [] }], summary: 'Complete/update current profile', responses: { '200': { description: 'Updated profile' } } } },
+    '/users/me': {
+      get: { security: [{ bearerAuth: [] }], summary: 'Get current profile', responses: { '200': { description: 'Profile' } } },
+      patch: {
+        security: [{ bearerAuth: [] }],
+        summary: 'Complete/update current profile',
+        requestBody: {
+          required: true,
+          content: { 'application/json': {
+            schema: {
+              type: 'object',
+              minProperties: 1,
+              additionalProperties: false,
+              properties: {
+                displayName: { type: 'string', minLength: 2, maxLength: 80, description: 'Trimmed display name.' },
+                avatarId: { type: 'string', nullable: true, enum: ['boy_aarav', 'boy_veer', 'boy_kabir', 'girl_anya', 'girl_myra', 'girl_tara'], description: 'Select one supported avatar or null to clear it.' },
+                referralCode: { type: 'string', minLength: 4, maxLength: 60, description: 'Optional referral code; it is linked only when the account has no existing referrer.' },
+              },
+            },
+            example: { displayName: 'Hemanth', avatarId: 'boy_aarav' },
+          } },
+        },
+        responses: {
+          '200': { description: 'Updated profile' },
+          '400': { description: 'No profile field supplied, invalid field/value, or referral code is invalid' },
+          '401': { description: 'Authentication required' },
+        },
+      },
+    },
     '/users/me/upi': {
       get: { security: [{ bearerAuth: [] }], summary: 'Read the signed-in user UPI ID and verification state', responses: { '200': { description: 'Saved UPI ID; format validation is not ownership verification' } } },
       patch: { security: [{ bearerAuth: [] }], summary: 'Save a format-checked UPI ID; status remains unverified', responses: { '200': { description: 'Saved UPI ID with UNVERIFIED_FORMAT_ONLY status' }, '400': { description: 'Invalid UPI ID format' } } },

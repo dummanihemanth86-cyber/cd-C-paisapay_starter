@@ -96,6 +96,25 @@ describe('PaisaPay API foundation', () => {
     });
   });
 
+  it('documents the editable PATCH /users/me profile request body', async () => {
+    const spec = (await request(app).get('/api/v1/openapi.json').expect(200)).body;
+    const operation = spec.paths['/users/me'].patch;
+    expect(operation.requestBody.required).toBe(true);
+    const body = operation.requestBody.content['application/json'];
+    expect(body.schema.type).toBe('object');
+    expect(body.schema.minProperties).toBe(1);
+    expect(body.schema.additionalProperties).toBe(false);
+    expect(body.schema.properties).toEqual({
+      displayName: expect.objectContaining({ type: 'string', minLength: 2, maxLength: 80 }),
+      avatarId: expect.objectContaining({
+        type: 'string', nullable: true,
+        enum: ['boy_aarav', 'boy_veer', 'boy_kabir', 'girl_anya', 'girl_myra', 'girl_tara'],
+      }),
+      referralCode: expect.objectContaining({ type: 'string', minLength: 4, maxLength: 60 }),
+    });
+    expect(body.example).toEqual({ displayName: 'Hemanth', avatarId: 'boy_aarav' });
+  });
+
   it('protects private profile data', async () => {
     const response = await request(app).get('/api/v1/users/me').expect(401);
     expect(response.body.error.code).toBe('AUTH_REQUIRED');
