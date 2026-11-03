@@ -115,6 +115,19 @@ describe('PaisaPay API foundation', () => {
     expect(body.example).toEqual({ displayName: 'Hemanth', avatarId: 'boy_aarav' });
   });
 
+  it('documents the editable PATCH /users/me/upi JSON request body', async () => {
+    const spec = (await request(app).get('/api/v1/openapi.json').expect(200)).body;
+    const operation = spec.paths['/users/me/upi'].patch;
+    expect(operation.requestBody.required).toBe(true);
+    const body = operation.requestBody.content['application/json'];
+    expect(body.schema.required).toEqual(['upiId']);
+    expect(body.schema.properties.upiId).toEqual(expect.objectContaining({ type: 'string', minLength: 3, maxLength: 100 }));
+    expect(body.schema.properties.displayName).toEqual(expect.objectContaining({ type: 'string', minLength: 2, maxLength: 100 }));
+    expect(body.schema.properties.displayName.nullable).not.toBe(true);
+    expect(body.schema.anyOf).toEqual([{ required: ['displayName'] }, { required: ['name'] }, { required: ['accountName'] }]);
+    expect(body.example).toEqual({ upiId: 'yourname@okaxis', displayName: 'Hemanth' });
+  });
+
   it('protects private profile data', async () => {
     const response = await request(app).get('/api/v1/users/me').expect(401);
     expect(response.body.error.code).toBe('AUTH_REQUIRED');

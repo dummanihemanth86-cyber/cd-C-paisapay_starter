@@ -88,7 +88,32 @@ export const openapi = {
     },
     '/users/me/upi': {
       get: { security: [{ bearerAuth: [] }], summary: 'Read the signed-in user UPI ID and verification state', responses: { '200': { description: 'Saved UPI ID; format validation is not ownership verification' } } },
-      patch: { security: [{ bearerAuth: [] }], summary: 'Save a format-checked UPI ID; status remains unverified', responses: { '200': { description: 'Saved UPI ID with UNVERIFIED_FORMAT_ONLY status' }, '400': { description: 'Invalid UPI ID format' } } },
+      patch: {
+        security: [{ bearerAuth: [] }],
+        summary: 'Save a format-checked UPI ID and account name; UPI ownership remains unverified',
+        requestBody: {
+          required: true,
+          content: { 'application/json': {
+            schema: {
+              type: 'object',
+              required: ['upiId'],
+              properties: {
+                upiId: { type: 'string', minLength: 3, maxLength: 100, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$', description: 'UPI ID in name@provider format.' },
+                displayName: { type: 'string', minLength: 2, maxLength: 100, description: 'Preferred account-name field. Supply this or one of the legacy name fields below.' },
+                name: { type: 'string', minLength: 2, maxLength: 100, description: 'Legacy alias for the account name.' },
+                accountName: { type: 'string', minLength: 2, maxLength: 100, description: 'Legacy alias for the account name.' },
+              },
+              anyOf: [{ required: ['displayName'] }, { required: ['name'] }, { required: ['accountName'] }],
+            },
+            example: { upiId: 'yourname@okaxis', displayName: 'Hemanth' },
+          } },
+        },
+        responses: {
+          '200': { description: 'Saved UPI ID and user-provided account name; verification status remains UNVERIFIED_FORMAT_ONLY' },
+          '400': { description: 'Invalid UPI ID or account name, or no account name supplied' },
+          '401': { description: 'Authentication required' },
+        },
+      },
       delete: { security: [{ bearerAuth: [] }], summary: 'Remove the signed-in user UPI ID', responses: { '200': { description: 'UPI ID removed' } } },
     },
     '/users/me/bank-accounts': {
