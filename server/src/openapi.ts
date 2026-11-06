@@ -58,6 +58,26 @@ export const openapi = {
     '/auth/password/reset': { post: { summary: 'Reset a password using a valid six-digit SMS challenge; all sessions are revoked', responses: { '200': { description: 'Password changed' }, '401': { description: 'Invalid, expired, or unaccepted reset code' }, '429': { description: 'Too many incorrect codes' } } } },
     '/auth/refresh': { post: { summary: 'Rotate an expiring session', responses: { '200': { description: 'Tokens rotated' } } } },
     '/admin/auth/login': { post: { summary: 'Sign in to the separate Admin app using an existing active account provisioned with an administrator role', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['phoneE164', 'password'], properties: { phoneE164: { type: 'string', example: '+919876543210' }, password: { type: 'string', format: 'password' } } } } } }, responses: { '200': { description: 'Administrator session tokens and role' }, '401': { description: 'Invalid credentials or account is not an active provisioned admin' }, '429': { description: 'Admin login rate limit exceeded' } } } },
+    '/admin/auth/forgot-password/request-otp': { post: {
+      summary: 'Request a reset code for an active Admin account; the generic response does not reveal whether the phone is registered',
+      requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['phoneE164'], additionalProperties: false, properties: { phoneE164: { type: 'string', pattern: '^\\+[1-9]\\d{7,14}$' } } }, example: { phoneE164: '+919876543210' } } } },
+      responses: {
+        '202': { description: 'Generic reset request accepted', content: { 'application/json': { schema: { type: 'object', required: ['challengeId', 'expiresInSeconds', 'resendAfterSeconds', 'message'], properties: { challengeId: { type: 'string', format: 'uuid' }, expiresInSeconds: { type: 'integer', example: 300 }, resendAfterSeconds: { type: 'integer', example: 60 }, message: { type: 'string' } } } } } },
+        '400': { description: 'Invalid phone number', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Error' } } } },
+        '429': { description: 'Admin password-reset rate limit exceeded', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Error' } } } },
+        '503': { description: 'Configured SMS provider unavailable', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Error' } } } },
+      },
+    } },
+    '/admin/auth/password/reset': { post: {
+      summary: 'Reset an active Admin password using a valid six-digit SMS OTP; all existing sessions are revoked',
+      requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['phoneE164', 'challengeId', 'code', 'newPassword'], additionalProperties: false, properties: { phoneE164: { type: 'string', pattern: '^\\+[1-9]\\d{7,14}$' }, challengeId: { type: 'string', format: 'uuid' }, code: { type: 'string', pattern: '^\\d{6}$' }, newPassword: { type: 'string', minLength: 12, maxLength: 128, format: 'password' } } }, example: { phoneE164: '+919876543210', challengeId: '00000000-0000-4000-8000-000000000001', code: '123456', newPassword: 'ReplaceWithSecureAdminPassword1!' } } } },
+      responses: {
+        '200': { description: 'Password reset and prior sessions revoked', content: { 'application/json': { schema: { type: 'object', required: ['ok', 'message'], properties: { ok: { type: 'boolean', enum: [true] }, message: { type: 'string' } } } } } },
+        '400': { description: 'Invalid reset request', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Error' } } } },
+        '401': { description: 'Invalid, expired, non-admin, or unaccepted reset code', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Error' } } } },
+        '429': { description: 'Reset attempt limit exceeded', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Error' } } } },
+      },
+    } },
     '/users/me': {
       get: { security: [{ bearerAuth: [] }], summary: 'Get current profile', responses: { '200': { description: 'Profile' } } },
       patch: {

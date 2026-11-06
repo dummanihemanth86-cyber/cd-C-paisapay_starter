@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
@@ -7,14 +8,74 @@ import { requireAdmin, requireAuth } from '../../middleware/auth.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { getPaymentMethodAvailability } from '../payments/availability.js';
 import { verifyPassword, hashPassword } from '../../lib/password.js';
-import { hashToken, newOpaqueToken } from '../../lib/security.js';
+import { hashOtp, hashToken, newOpaqueToken, safeHashEqual } from '../../lib/security.js';
+import { env } from '../../config/env.js';
+import { createOtpChallenge } from '../auth/routes.js';
 
 export const adminRouter = Router();
 export const adminAuthRouter = Router();
 const adminLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'ADMIN_LOGIN_RATE_LIMITED', message: 'Too many admin sign-in attempts. Wait before trying again.' } } });
 const adminPhoneLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (req) => `phone:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`, message: { error: { code: 'ADMIN_LOGIN_RATE_LIMITED', message: 'Too many sign-in attempts for this account. Wait before trying again.' } } });
+const adminPasswordResetIpLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts. Wait before trying again.' } } });
+const adminPasswordResetPhoneLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (req) => `admin-reset:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`, message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts for this number. Try again later.' } } });
 const adminPhone = z.string().regex(/^\+[1-9]\d{7,14}$/);
 const dummyAdminPasswordHash = hashPassword('paisa-pay-invalid-admin-password-dummy');
+
+adminAuthRouter.post('/forgot-password/request-otp', adminPasswordResetIpLimit, adminPasswordResetPhoneLimit, asyncRoute(async (req, res) => {
+  const input = z.object({ phoneE164: adminPhone }).strict().parse(req.body);
+  const db = databaseRequired();
+  const admin = await db.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { status: true, adminRole: { select: { id: true } } } });
+  const activeAdmin = admin?.status === 'ACTIVE' && Boolean(admin.adminRole);
+  const challenge = activeAdmin
+    ? await createOtpChallenge(input.phoneE164, 'ADMIN_PASSWORD_RESET')
+    : { challengeId: randomUUID() };
+  // A generic response avoids disclosing whether the phone belongs to an active admin.
+  res.status(202).json({
+    challengeId: challenge.challengeId,
+    expiresInSeconds: 300,
+    resendAfterSeconds: 60,
+    message: 'If an active Admin account exists for this number, a password-reset code will be sent by SMS.',
+  });
+}));
+
+adminAuthRouter.post('/password/reset', adminPasswordResetIpLimit, adminPasswordResetPhoneLimit, asyncRoute(async (req, res) => {
+  const input = z.object({
+    phoneE164: adminPhone,
+    challengeId: z.string().uuid(),
+    code: z.string().regex(/^\d{6}$/),
+    newPassword: z.string().min(12).max(128),
+  }).strict().parse(req.body);
+  const db = databaseRequired();
+  const passwordHash = await hashPassword(input.newPassword);
+  const reset = await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM otp_challenges WHERE id = ${input.challengeId}::uuid FOR UPDATE`;
+    const challenge = await tx.otpChallenge.findUnique({ where: { id: input.challengeId } });
+    if (!challenge || challenge.purpose !== 'ADMIN_PASSWORD_RESET' || challenge.phoneE164 !== input.phoneE164 || challenge.consumedAt || challenge.expiresAt <= new Date()) {
+      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    }
+    const isTestDemo = env.isTest && env.otpProvider === 'demo' && challenge.deliveryStatus === 'DEMO';
+    if (!isTestDemo && !['ACCEPTED', 'SENT', 'DELIVERED'].includes(challenge.deliveryStatus ?? '')) {
+      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    }
+    if (challenge.attempts >= 5) throw new HttpError(429, 'ADMIN_PASSWORD_RESET_ATTEMPTS_EXCEEDED', 'Too many incorrect codes. Request a new code.');
+    if (!safeHashEqual(challenge.codeHash, hashOtp(input.phoneE164, input.code))) {
+      await tx.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } });
+      return false;
+    }
+    const admin = await tx.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { id: true, status: true, adminRole: { select: { id: true } } } });
+    if (!admin || admin.status !== 'ACTIVE' || !admin.adminRole) {
+      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    }
+    const now = new Date();
+    await tx.user.update({ where: { id: admin.id }, data: { passwordHash, loginFailedAttempts: 0, loginLockedUntil: null } });
+    await tx.otpChallenge.updateMany({ where: { phoneE164: input.phoneE164, purpose: 'ADMIN_PASSWORD_RESET', consumedAt: null }, data: { consumedAt: now } });
+    await tx.session.updateMany({ where: { userId: admin.id, revokedAt: null }, data: { revokedAt: now } });
+    await tx.auditLog.create({ data: { actorId: admin.id, action: 'ADMIN_PASSWORD_RESET', target: `ADMIN_USER:${admin.id}`, reason: 'Admin password reset using a delivered one-time code.', metadata: { requestId: req.requestId || null } } });
+    return true;
+  }, { isolationLevel: 'ReadCommitted' });
+  if (!reset) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is incorrect.');
+  res.json({ ok: true, message: 'Admin password reset. Sign in using your new password.' });
+}));
 
 // Separate admin sign-in: existing users only, and an AdminUser row is required
 // before a session is created. This route intentionally does not create users,
