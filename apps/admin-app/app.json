@@ -3,7 +3,7 @@
     "name": "PaisaPay Admin",
     "slug": "paisapay-admin",
     "scheme": "paisapay-admin",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "icon": "./assets/paisapay-admin-icon.png",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.paisapay.admin",
-      "versionCode": 2,
+      "versionCode": 3,
       "adaptiveIcon": {
         "foregroundImage": "./assets/paisapay-admin-icon.png",
         "backgroundColor": "#FFFFFF"
