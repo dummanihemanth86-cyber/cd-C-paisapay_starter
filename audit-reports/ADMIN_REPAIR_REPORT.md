@@ -203,3 +203,43 @@ Do not turn either financial flag on or seed the adjustment account with an arbi
 - GitHub reports no deployment records or workflow run for `98e878d`. Render CLI/API credentials are not configured in this workspace, and the Render dashboard opens at sign-in. A push was made, but an actual Render deployment has **not been confirmed**. Do not infer deployment merely from `/ready` or the existing 401 responses.
 - The 1.0.3 standalone APK build succeeded and the package/version/signer/API URL/SHA-256 details are listed above. The debug certificate fingerprint matches the previously verified installed app fingerprint. ADB currently lists no connected device; therefore `adb install -r`, data preservation after install, app launch, and the Settings diagnostic screen have **not** been verified in this turn.
 - No financial controls were enabled and no production wallet or ledger mutation was performed.
+
+### Render dashboard diagnosis (2026-11-07)
+
+- The Render dashboard account contains one service, `paisapay-api1`, linked to this repository's `main` branch with Auto-Deploy enabled. Its assigned service URL is `https://paisapay-api1.onrender.com`.
+- Render shows the deployment for commit `98e878d` as **failed**. Its build succeeded; the process exited during production configuration validation because `SESSION_HASH_SECRET`, `BANK_ACCOUNT_ENCRYPTION_KEY`, and `OTP_PROVIDER=renflair-v1` are missing. The Render Environment page lists only database-related variables (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DIRECT_DATABASE_URL`, and `NEON_BRANCH`); `RENFLAIR_API_KEY` is also absent there. Secret values were not viewed or copied.
+- The documented production host `https://paisapay-api.onrender.com/ready` returned 200/database ready, while the Render-assigned `paisapay-api1.onrender.com` health request timed out after 120 seconds. The Render service has no custom domain shown in its settings. Therefore the failed `paisapay-api1` service cannot yet be treated as the production service serving `paisapay-api.onrender.com`; the target-service mapping needs owner confirmation.
+- No environment variable was added or changed, no secret was generated or exposed, and no manual redeploy was triggered. The local settings diagnostic remains undeployed. Account presence/balance and Settings screen remain unverified in production.
+
+### Correct production Render service and deployment verification (2026-11-07)
+
+This section supersedes the preceding Render dashboard diagnosis for production routing and deployment status. The correct production service is `paisapay-api`; the unrelated `paisapay-api1` service is not the owner of `https://paisapay-api.onrender.com`.
+
+- Render service `paisapay-api` (service ID `srv-dbkbglnb9u1s7386p8hg`) is linked to repository `dummanihemanth86-cyber/cd-C-paisapay_starter`, branch `main`, and owns `https://paisapay-api.onrender.com`.
+- Manually deployed GitHub `main` commit `672a148b353422794fa8612c4404a49a451f171c` (deployment `dep-dbnj53ou01pc73ctej2g`). Render reports **Deploy succeeded | Live**. Build logs show the expected commit checkout, successful build, and service-start message `PaisaPay API started` with database configured. The API startup log reports OTP provider `renflair-v1` and payment provider `disabled`.
+- The production Environment page contains `SESSION_HASH_SECRET`, `BANK_ACCOUNT_ENCRYPTION_KEY`, `OTP_PROVIDER`, and `RENFLAIR_API_KEY`. Secret values were left masked, not read, copied, or changed. Presence of `RENFLAIR_API_KEY` was confirmed; its provider-side validity was not separately exercised.
+- Browser GET `https://paisapay-api.onrender.com/ready` returned `{"ok":true,"service":"paisapay-api","dependencies":{"database":"ready"}}`.
+- Browser GET `https://paisapay-api.onrender.com/api/v1/admin/settings` without an authorized session returned `401 AUTH_REQUIRED`. This confirms the diagnostics route is deployed and protected; it does not verify the authenticated settings diagnostic payload, account presence, or ledger balance. No authorized Admin session was available to this verification process.
+- Render startup logs show financial operations remain disabled. No wallet credit or production balance/ledger mutation was made. The Render deploy used the existing configured environment; no secret values were modified.
+- Local DNS/network restrictions prevented a PowerShell HTTP check (`No such host is known`); browser verification above succeeded. Current local `HEAD` and `origin/main` both resolve to `672a148b353422794fa8612c4404a49a451f171c`. This verification update is local only; no commit was made for the report update.
+
+### Authenticated Admin phone verification (2026-11-07)
+
+- Started the local ADB server with the required host access. `adb devices -l` reports device `c843d7a11022` as `device` (authorized), product `moonstone_p_in`, model `22111317PI`. No USB debugging approval prompt was pending.
+- `com.paisapay.admin` was already installed as version `1.0.2` (`versionCode=3`). The app was launched in place; it was not uninstalled, updated, or cleared. The sign-in form appeared briefly during startup, then the persisted session restored and the app displayed `SUPER ADMIN · Server Authorized`. No password or token was entered, reset, or extracted.
+- Authenticated API results were inspected only through the Admin UI. No customer identifiers, phone values, audit content, or ledger entries were recorded in this report.
+
+| Check | Endpoint / evidence | Result |
+|---|---|---|
+| Role/session | `GET /api/v1/admin/me` (app session bootstrap) | Confirmed `SUPER_ADMIN`; UI displayed `Server Authorized`. |
+| User list | `GET /api/v1/admin/users?page=1&pageSize=25` | After clearing inherited temporary search filters, one user row appeared and no generic API error was displayed. |
+| User detail | `GET /api/v1/admin/users/:id` | Opened the detail panel for the visible result; identifying fields were not recorded. |
+| Aggregate report | `GET /api/v1/admin/reports?report=registrations&from=2026-10-09&to=2026-11-07` | Authenticated report screen returned a summary of 1 registration record for that date range. No row-level data was exported. |
+| Wallet ledger | `GET /api/v1/admin/wallets/ledger?page=1&pageSize=25` | Page 1 of 1; 0 ledger rows returned. This is not a diagnostic of the dedicated adjustment account's balance. |
+| Audit log | `GET /api/v1/admin/audit-logs?page=1&pageSize=25` | Authenticated audit screen displayed 5 entries; their contents were not opened or recorded. |
+| Credit safety gate | `GET /api/v1/admin/me` plus the Super Admin Credits screen | UI states wallet credits are disabled because required financial controls and a funded adjustment account are not configured. No credit was submitted. |
+
+- Settings diagnostic result is **not verified**. The screen branch is present in `apps/admin-app/App.js`, but the app's `NAV` list has no `settings` entry, so the installed Admin UI has no Settings tab to call `GET /api/v1/admin/settings`. The installed binary is also version 1.0.2. No token was extracted and no direct authenticated request was constructed outside the app.
+- Therefore actual production `ADMIN_ADJUSTMENT_FUND` record presence and its ledger balance remain unknown. The verified user-facing blocker is that server controls and funding are not ready. The backend diagnostic implementation additionally hard-codes `independentApprovalImplemented=false`, `adminAdjustmentControlsReady=false`, `superAdminCreditPrerequisitesReady=false`, and `productionEnablementSupported=false`. Production Render logs previously confirmed financial operations are disabled; the current `WALLET_ADJUSTMENTS_ENABLED` value and fund-account ledger balance were not observable from this app build.
+- A phone-side DNS/ICMP check resolved the production API hostname and received a reply. More importantly, authenticated `/admin/me`, user, report, ledger, and audit UI data loaded from the Admin app, confirming its production API session works. An Android shell HTTPS client was unavailable; no readiness request was made from the phone shell.
+- No wallet credit, balance mutation, financial-control change, password change, app reinstall, uninstall, or data clear occurred. App was left on the authenticated Super Admin Credits screen showing the disabled safety notice.
