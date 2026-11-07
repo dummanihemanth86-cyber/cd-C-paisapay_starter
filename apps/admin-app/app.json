@@ -3,7 +3,7 @@
     "name": "PaisaPay Admin",
     "slug": "paisapay-admin",
     "scheme": "paisapay-admin",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "icon": "./assets/paisapay-admin-icon.png",
@@ -14,11 +14,12 @@
     },
     "android": {
       "package": "com.paisapay.admin",
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/paisapay-admin-icon.png",
         "backgroundColor": "#FFFFFF"
       }
     },
-    "plugins": ["expo-secure-store", "expo-notifications"]
+    "plugins": ["./plugins/withAdminReleaseSigning", "expo-secure-store", "expo-notifications"]
   }
 }

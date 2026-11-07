@@ -38,11 +38,11 @@ npm run build:android:debug
 For a standalone local release APK that bundles JavaScript:
 
 ```powershell
-cd C:\paisapay_starter\apps\admin-app\android
-.\gradlew.bat assembleRelease
+cd C:\paisapay_starter\apps\admin-app
+npm run build:android:release
 ```
 
-Output: `android\app\build\outputs\apk\release\app-release.apk`. The checked-in local Gradle release signing config currently uses the Android debug keystore, so this APK is for internal testing only. Configure a protected production keystore or EAS-managed signing credentials before distribution. EAS production AAB builds also require an EAS project and production signing credentials.
+Output: `android\app\build\outputs\apk\release\app-release.apk`. Release builds require `PAISAPAY_ADMIN_STORE_FILE`, `PAISAPAY_ADMIN_STORE_PASSWORD`, `PAISAPAY_ADMIN_KEY_ALIAS`, and `PAISAPAY_ADMIN_KEY_PASSWORD` in the user-level Gradle properties file. The local config plugin applies this signing setup during Android prebuild and makes release tasks fail closed if signing properties are missing. Keep the keystore and these properties outside the repository and back them up securely. Never use the debug keystore for a release build. The release build script pins the Render API URL even if a local `.env` file points at a development server. EAS production AAB builds also require an EAS project and production signing credentials.
 
 ## Separate administrator login
 

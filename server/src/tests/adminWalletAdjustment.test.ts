@@ -108,13 +108,37 @@ describe('Super Admin wallet credit service', () => {
     expect(mock.auditCreate).toHaveBeenCalledOnce();
   });
 
+  it('replays the same Super Admin credit idempotency key without another ledger or audit entry', async () => {
+    const reason = 'Approved customer adjustment';
+    const mock = fixture({ userBalance: 22_500n, existing: {
+      id: 'prior-credit', referenceId: 'prior-credit-reference', createdAt: now,
+      metadata: {
+        adminUserId: actorUserId, targetUserId: targetId, targetPublicId: 'USER12345', direction: 'CREDIT',
+        amountPaise: String(MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE), reason, idempotencyScope: 'SUPER_ADMIN_WALLET_CREDIT',
+        eventType: 'ADMIN_ADJUSTMENT', referenceType: 'ADMIN_ADJUSTMENT',
+      },
+    } });
+    const result = await applySuperAdminWalletCredit(mock.tx, {
+      actorUserId, idempotencyKey: '00000000-0000-4000-8000-000000000005', targetUserId: targetId,
+      amountPaise: MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE, reason,
+    });
+    expect(result).toMatchObject({ id: 'prior-credit', replayed: true, balancePaise: 22_500 });
+    expect(mock.transactionCreate).not.toHaveBeenCalled();
+    expect(mock.auditCreate).not.toHaveBeenCalled();
+  });
+
   it('rejects credits outside ₹100–₹10,000 before writing ledger entries', async () => {
     const mock = fixture();
     await expect(applySuperAdminWalletCredit(mock.tx, {
       actorUserId, idempotencyKey: '00000000-0000-4000-8000-000000000005', targetUserId: targetId,
       amountPaise: MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE - 1, reason: 'Approved customer adjustment',
     })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
+    await expect(applySuperAdminWalletCredit(mock.tx, {
+      actorUserId, idempotencyKey: '00000000-0000-4000-8000-000000000006', targetUserId: targetId,
+      amountPaise: MAX_ADMIN_ADJUSTMENT_PAISE + 1, reason: 'Approved customer adjustment',
+    })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
     expect(mock.transactionCreate).not.toHaveBeenCalled();
     expect(mock.auditCreate).not.toHaveBeenCalled();
+    expect(mock.queryRaw).not.toHaveBeenCalled();
   });
 });
