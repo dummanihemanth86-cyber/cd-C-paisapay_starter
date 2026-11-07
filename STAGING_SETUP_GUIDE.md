@@ -2,7 +2,7 @@
 
 **Project:** `C:\paisapay_starter`
 **Purpose:** isolated, non-payment staging only
-**Status (2026-11-08):** isolated Render project and free PostgreSQL database are provisioned. No API service exists, no migration has run, and no deploy is active. The database expires on 2026-12-08 unless upgraded.
+**Status (2026-11-08):** the isolated Render project, free PostgreSQL database, and `paisapay-api-staging` web service are provisioned. The service's first deployment failed at startup because `DATABASE_URL` lacked an accepted TLS mode; a subsequent startup identified `DIRECT_DATABASE_URL` as still missing an accepted TLS mode. Health/readiness and migration completion are not yet verified. The database expires on 2026-12-08 unless upgraded.
 
 ## Safety boundary
 
@@ -23,11 +23,11 @@ The database has already been created in Render; do not create another one or us
 | Region / plan | Oregon / Free |
 | Current status | Available; expires 2026-12-08 unless upgraded |
 
-The staging Blueprint links this exact Render database to the staging API; it does not accept an arbitrary database URL. Render's generated internal URL has no query parameters by default, so before any deployment add `?sslmode=require` to the linked `DATABASE_URL` in the staging service's Environment page. If a URL already has query parameters, append `&sslmode=require`. Replace any existing weaker `sslmode` value. Do the same for any configured `DIRECT_DATABASE_URL` or `DATABASE_URL_UNPOOLED`. The API and migration config validate TLS before use; Prisma migrations prefer `DIRECT_DATABASE_URL`, then `DATABASE_URL_UNPOOLED`, then `DATABASE_URL`. Keep the database empty before the first migration; do not reset or drop it if it unexpectedly contains data. Never set `NODE_TLS_REJECT_UNAUTHORIZED=0` or use `sslmode=disable`.
+The existing `paisapay-api-staging` service must use only this staging database's internal URL. In the service's Environment page, set `sslmode=require` on `DATABASE_URL` and every configured optional migration URL (`DIRECT_DATABASE_URL`, `DATABASE_URL_UNPOOLED`). Replace an existing `sslmode` value instead of duplicating it; if other query parameters are present, append `&sslmode=require`. `sslmode=verify-full` is also accepted. The API and migration config validate every configured URL before use; Prisma migrations prefer `DIRECT_DATABASE_URL`, then `DATABASE_URL_UNPOOLED`, then `DATABASE_URL`. Keep the database empty before the first migration; do not reset or drop it if it unexpectedly contains data. Never set `NODE_TLS_REJECT_UNAUTHORIZED=0` or use `sslmode=disable`.
 
 ### Verify the staging target without printing credentials
 
-In Render, link the database to the staging service so Render supplies its connection values. Confirm the database resource ID above in the project. Never print the full URL. If an authorized operator needs to inspect a URL host in a private staging-only PowerShell session, use staging values only (never import production values):
+In Render, confirm the service environment is `Staging` and that each configured URL uses the internal hostname for the database resource above. Never print or export the full URL. If an authorized operator needs to inspect a URL host in a private staging-only PowerShell session, use staging values only (never import production values):
 
 ```powershell
 $runtimeUri = [Uri]$env:DATABASE_URL
@@ -40,7 +40,7 @@ Both hosts must identify the Render staging database above. The app's Prisma con
 
 ## 2. Configure the Render staging service
 
-Create a staging-only Blueprint from `render.staging.yaml` in the PaisaPay repository. In the Blueprint setup, select this file explicitly; the existing root `render.yaml` describes the other API service and must not be synced for staging. The staging Blueprint pins the branch, staging project/environment, Oregon region, service name, database link and financial-off settings:
+Use the already-created `paisapay-api-staging` service in the `PaisaPay Admin Staging` project and `Staging` environment. Do not create a Blueprint or another service. Verify the existing service settings:
 
 | Render setting | Staging value |
 |---|---|
@@ -50,12 +50,12 @@ Create a staging-only Blueprint from `render.staging.yaml` in the PaisaPay repos
 | Plan | Free to avoid creating a recurring charge; it may sleep between requests. Do not upgrade without approval. |
 | Root directory | `server` |
 | Branch | `codex/admin-wallet-credit-staging` |
-| Build command | `npm ci --include=dev && npm run db && npm run build` |
-| Pre-deploy command | None on Free tier; `npm run db` applies migrations during the build. |
+| Build command | `npm ci --include=dev && npm run db:deploy && npm run build` |
+| Pre-deploy command | None; `db:deploy` applies migrations during the build command. |
 | Start command | `npm start` (`node dist/src/server.js`) |
 | Health check path | `/ready` |
 
-The checked-in Blueprint currently names the service `paisapay-api`. If using a separate Render Blueprint instead of a manually created service, first configure a separate staging blueprint/service name and confirm that it will not update or replace the production service. Do not apply the current Blueprint to production as part of this setup guide.
+The production root `render.yaml` is not used for this staging service. Do not select Blueprint deployment, change the production service, or create a duplicate staging service.
 
 ## 3. Required staging environment variables
 
@@ -67,9 +67,9 @@ Set these in the **staging service's private Render Environment settings**. Neve
 | `NODE_ENV` | `production` (production-mode validation also protects the staging service) |
 | `HOST` | `0.0.0.0` |
 | `PORT` | Let Render set it; do not hardcode a port. |
-| `DATABASE_URL` | Blueprint-linked URL for `paisapay-admin-staging-db`; manually append `sslmode=require` before deploying. |
-| `DIRECT_DATABASE_URL` | Optional direct Render staging migration URL with `sslmode=require`; if set, it must point to the same staging database. |
-| `DATABASE_URL_UNPOOLED` | Optional migration URL with `sslmode=require`; if set, it must point to the same staging database. |
+| `DATABASE_URL` | Internal URL for `paisapay-admin-staging-db` with exactly one `sslmode=require` or `sslmode=verify-full`. |
+| `DIRECT_DATABASE_URL` | Optional staging migration URL. If configured, it must point to the same staging database and have exactly one accepted TLS mode. |
+| `DATABASE_URL_UNPOOLED` | Optional staging migration URL. If configured, it must point to the same staging database and have exactly one accepted TLS mode. |
 | `SESSION_HASH_SECRET` | New random staging-only secret; at least 32 characters. |
 | `BANK_ACCOUNT_ENCRYPTION_KEY` | New random staging-only 32-byte key encoded as 64 hex characters. |
 | `OTP_PROVIDER` | `renflair-v1` |
@@ -132,11 +132,11 @@ Store recovery copies in the organization's approved password/secret manager. Lo
 
 Prisma is configured in `server/prisma.config.ts` with schema `prisma/schema.prisma` and migrations under `prisma/migrations`. Migration connection selection is `DIRECT_DATABASE_URL` → `DATABASE_URL_UNPOOLED` → `DATABASE_URL`. Runtime data access uses the pooled `DATABASE_URL`.
 
-`npm run db` is an alias for `npm run db:deploy`, which executes `prisma migrate deploy`. It applies checked-in pending migrations and is not a read-only check. The staging Blueprint runs it in the build command, as requested; the existing root `render.yaml` uses a separate pre-deploy command for its own service. Prisma client generation during `npm run build` does not apply migrations. In production mode, `prisma.config.ts` validates every configured database URL and stops before migration if TLS is missing/disabled or no database URL is present.
+`npm run db:deploy` executes `prisma migrate deploy`. It applies checked-in pending migrations and is not a read-only check. The existing staging service runs it in the build command. Prisma client generation during `npm run build` does not apply migrations. In production mode, `prisma.config.ts` validates every configured database URL and stops before migration if TLS is missing, disabled, duplicated, or no database URL is present.
 
 Before the first staging deploy:
 
-1. Confirm the Blueprint-linked `DATABASE_URL` identifies service `dpg-dbnnr3jl550s73fnn4f0-a` and database `paisapay_staging`; confirm it includes `sslmode=require`. Any separate migration URL must resolve to that same database and include `sslmode=require` or `verify-full`.
+1. Confirm each configured URL in the existing staging service resolves to service `dpg-dbnnr3jl550s73fnn4f0-a` and database `paisapay_staging`; each must include exactly one `sslmode=require` or `sslmode=verify-full`.
 2. Review the exact checked-in migration files in `server/prisma/migrations/` and the Git diff. Confirm each migration is expected and safe for a fresh staging database.
 3. Using **staging URLs only**, check migration state from `C:\paisapay_starter\server`:
 
@@ -146,24 +146,28 @@ Before the first staging deploy:
 
    This contacts the configured database to inspect migration state; ensure environment variables point to staging before running it. This guide itself did not execute it.
 4. If staging contains data worth preserving, take a Render staging backup/snapshot and confirm restore access. The newly created database should otherwise remain disposable and empty.
-5. Only after reviewing the target and migration set should an authorized operator deploy the staging service and permit its configured `db:deploy` step. On the selected Free tier this runs in the build command, not a pre-deploy phase.
+5. Only after reviewing the target and migration set should an authorized operator deploy the existing staging service and permit its configured `db:deploy` step. This runs in the build command, not a pre-deploy phase.
 6. Review Render's migration log and verify expected migration IDs afterwards. Never use `prisma migrate reset`, `db push`, `migrate dev`, or seed commands against production. Do not treat rollback of application code as rollback of database schema.
 
 ## 7. Staging deployment sequence
 
-1. Use `render.staging.yaml` and select the staging Render project/environment; verify its `fromDatabase` reference points to `paisapay-admin-staging-db`.
-2. Complete all environment settings above; verify payment and financial flags are false/disabled and no deposit recipient is configured.
-3. Review the exact source commit, migration SQL, service root, commands, and host/project IDs. Confirm the Render service is `paisapay-api-staging` and separate from production.
-4. Before triggering a deploy, manually add `sslmode=require` to the service's linked `DATABASE_URL` and set the two required secret values. Render should install dependencies, validate and apply the reviewed migration against the linked staging database during the build command, build the app, then start the API. Monitor each phase; do not copy logs containing environment values. The TLS guard in `npm run db` must fail before contacting PostgreSQL if TLS is absent or disabled.
+1. In the existing `paisapay-api-staging` service, verify project/environment, branch `codex/admin-wallet-credit-staging`, `server` root, Oregon region, build command `npm ci --include=dev && npm run db:deploy && npm run build`, and start command `npm start`.
+2. Complete environment settings above; verify all financial flags are false/disabled and no deposit recipient is configured.
+3. Review the exact source commit and migration SQL. Confirm the configured database URLs resolve to the staging database only.
+4. Before deploying, rotate staging DB credentials as described below, update each configured database URL with one accepted TLS mode, and keep credentials private in Render. Render should apply the reviewed migrations during the build, build the app, then start it. Do not copy logs containing environment values.
 5. If build or migration fails, stop and inspect the staging logs. Do not retry against another database until the configured target has been positively confirmed.
 6. Proceed to smoke checks only after deploy succeeds.
 
+### Rotate staging PostgreSQL credentials safely
+
+In the existing `paisapay-admin-staging-db` dashboard, create a new default credential; do not expose the password in chat, logs, or screenshots. In the existing `paisapay-api-staging` Environment page, update `DATABASE_URL` and each configured migration URL using the staging database's internal connection URL and the new credential. Set exactly one `sslmode=require` (or `verify-full`) parameter on each URL. Save and redeploy the existing service. After `/ready` and migration status succeed, remove the old database credential if nothing else uses it. Do not rotate or modify production credentials.
+
 ## 8. Post-deployment health and documentation checks
 
-Replace the placeholder with the actual staging service hostname from Render; do not guess a URL. In PowerShell:
+The existing staging service URL shown in Render is `https://paisapay-api-staging.onrender.com`. In PowerShell:
 
 ```powershell
-$base = 'https://<actual-staging-service-host>'
+$base = 'https://paisapay-api-staging.onrender.com'
 Invoke-RestMethod "$base/health"
 Invoke-RestMethod "$base/ready"
 Invoke-WebRequest "$base/api/v1/docs/" | Select-Object -ExpandProperty StatusCode
@@ -210,4 +214,4 @@ Record the commit, staging database project/branch identifier (not connection st
 
 ## Current verification status
 
-This guide records a Render staging project and an available, isolated free PostgreSQL database. No staging API service, migration, authenticated API read, live OTP, or maker-checker ledger workflow has yet been deployed or tested. Staging is blocked until a dedicated staging Renflair key and controlled test phone, two separate staging SUPER_ADMIN identities, and a new staging API service are configured. End-to-end funding/credit testing additionally requires cleared funds received into a separately designated staging bank account. Existing local tests and builds passed as recorded in `audit-reports/ADMIN_REPAIR_REPORT.md`; they do not verify deployment or real ledger posting.
+The existing Render staging project, isolated database, and API service are provisioned. The latest observed startup blocker is missing accepted TLS on `DIRECT_DATABASE_URL`; the earlier startup also reported missing TLS on `DATABASE_URL`. The service is not verified Live, `/health` and `/ready` have not passed, and migration completion is unconfirmed. Authenticated API reads, live OTP, and maker-checker ledger workflow have not been verified. Staging remains blocked until all configured URLs are staging-only with strict TLS, migration status and readiness pass, a dedicated staging Renflair credential and controlled test phone are available, and two separate staging SUPER_ADMIN identities are configured. End-to-end funding/credit testing additionally requires cleared funds received into a separately designated staging bank account. No production deployment or production database access is part of this verification.

@@ -9,7 +9,10 @@ export const assertProductionDatabaseUrl = (name: string, value: string): void =
   if (['localhost', '127.0.0.1', '::1'].includes(hostname)) {
     throw new Error(`${name} must point to a remote PostgreSQL service, not localhost.`);
   }
-  if (!['require', 'verify-full'].includes(databaseUrl.searchParams.get('sslmode') ?? '')) {
+  const sslModes = databaseUrl.searchParams.getAll('sslmode');
+  // Reject duplicate sslmode parameters: URL consumers can disagree about
+  // whether the first or last value wins, which could silently disable TLS.
+  if (sslModes.length !== 1 || !['require', 'verify-full'].includes(sslModes[0])) {
     throw new Error(`${name} must enable TLS with sslmode=require or sslmode=verify-full.`);
   }
 };

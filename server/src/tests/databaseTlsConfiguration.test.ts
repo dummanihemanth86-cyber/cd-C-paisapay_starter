@@ -54,24 +54,41 @@ describe('production PostgreSQL TLS configuration', () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it('rejects a runtime URL without an explicit TLS mode', () => {
-    const result = loadProductionConfiguration({
-      DATABASE_URL: 'postgresql://dpg-stage.internal/paisapay_staging',
-    });
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('DATABASE_URL must enable TLS');
-  });
+  it.each(['DATABASE_URL', 'DIRECT_DATABASE_URL', 'DATABASE_URL_UNPOOLED'] as const)(
+    'rejects configured %s when sslmode is missing',
+    (variableName) => {
+      const result = loadProductionConfiguration({
+        [variableName]: 'postgresql://dpg-stage.internal/paisapay_staging?application_name=api',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`${variableName} must enable TLS`);
+    },
+    20_000,
+  );
 
-  it.each([
-    ['DIRECT_DATABASE_URL', 'DIRECT_DATABASE_URL'],
-    ['DATABASE_URL_UNPOOLED', 'DATABASE_URL_UNPOOLED'],
-  ])('rejects %s when it would use sslmode=disable for migrations', (variableName, expectedName) => {
-    const result = loadProductionConfiguration({
-      [variableName]: 'postgresql://dpg-stage.internal/paisapay_staging?sslmode=disable',
-    });
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain(`${expectedName} must enable TLS`);
-  });
+  it.each(['DATABASE_URL', 'DIRECT_DATABASE_URL', 'DATABASE_URL_UNPOOLED'] as const)(
+    'rejects configured %s when sslmode=disable',
+    (variableName) => {
+      const result = loadProductionConfiguration({
+        [variableName]: 'postgresql://dpg-stage.internal/paisapay_staging?sslmode=disable',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`${variableName} must enable TLS`);
+    },
+    20_000,
+  );
+
+  it.each(['DATABASE_URL', 'DIRECT_DATABASE_URL', 'DATABASE_URL_UNPOOLED'] as const)(
+    'rejects ambiguous duplicate sslmode values in %s',
+    (variableName) => {
+      const result = loadProductionConfiguration({
+        [variableName]: 'postgresql://dpg-stage.internal/paisapay_staging?sslmode=require&sslmode=disable',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`${variableName} must enable TLS`);
+    },
+    20_000,
+  );
 
   it('uses the first non-empty direct, unpooled, or runtime URL for Prisma migrations', () => {
     const result = loadPrismaMigrationConfiguration({
@@ -83,11 +100,31 @@ describe('production PostgreSQL TLS configuration', () => {
     expect(result.stdout.trim()).toBe('direct.internal');
   }, 20_000);
 
+  it('uses DATABASE_URL_UNPOOLED when DIRECT_DATABASE_URL is absent', () => {
+    const result = loadPrismaMigrationConfiguration({
+      DIRECT_DATABASE_URL: '',
+      DATABASE_URL_UNPOOLED: 'postgresql://unpooled.internal/paisapay_staging?sslmode=verify-full',
+      DATABASE_URL: 'postgresql://runtime.internal/paisapay_staging?sslmode=require',
+    }, 'const config = await import("./prisma.config.ts"); console.log(new URL(config.default.datasource.url).hostname)');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('unpooled.internal');
+  }, 20_000);
+
+  it('falls back to DATABASE_URL when both optional migration URLs are empty', () => {
+    const result = loadPrismaMigrationConfiguration({
+      DIRECT_DATABASE_URL: '',
+      DATABASE_URL_UNPOOLED: '',
+      DATABASE_URL: 'postgresql://runtime.internal/paisapay_staging?sslmode=require',
+    }, 'const config = await import("./prisma.config.ts"); console.log(new URL(config.default.datasource.url).hostname)');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('runtime.internal');
+  }, 20_000);
+
   it('blocks Prisma migration when its selected direct URL lacks TLS', () => {
     const result = loadPrismaMigrationConfiguration({
       DIRECT_DATABASE_URL: 'postgresql://direct.internal/paisapay_staging?sslmode=disable',
     });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('DIRECT_DATABASE_URL must enable TLS');
-  });
+  }, 20_000);
 });
