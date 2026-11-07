@@ -90,13 +90,32 @@ export function safeSettingsSnapshot(input: {
   paymentProvider: string;
   otpProvider: string;
   databaseConfigured: boolean;
+  walletAdjustmentEnabled: boolean;
+  walletAdjustmentAdminConfigured: boolean;
+  adjustmentFundAccount: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
 }) {
+  const funded = input.adjustmentFundAccount.status === 'PROVISIONED' && BigInt(input.adjustmentFundAccount.balancePaise ?? '0') > 0n;
+  const financialControlsReady = input.financialOperationsEnabled && input.walletAdjustmentEnabled;
   return {
     environment: input.nodeEnv,
     financialOperationsEnabled: input.financialOperationsEnabled,
     paymentProvider: input.paymentProvider,
     otpProvider: input.otpProvider,
     databaseConfigured: input.databaseConfigured,
+    financialSafety: {
+      financialOperationsEnabled: input.financialOperationsEnabled,
+      walletAdjustmentsEnabled: input.walletAdjustmentEnabled,
+      dedicatedAdminAdjustmentAccount: input.adjustmentFundAccount.status,
+      adjustmentFundBalancePaise: input.adjustmentFundAccount.balancePaise,
+      adjustmentFundHasFunds: funded,
+      singleAdminAdjustmentAccountConfigured: input.walletAdjustmentAdminConfigured,
+      independentApprovalImplemented: false,
+      adminAdjustmentControlsReady: false,
+      superAdminWalletCreditsEnabled: financialControlsReady,
+      superAdminCreditPrerequisitesReady: false,
+      productionEnablementSupported: false,
+      explanation: 'Production financial operations and manual wallet adjustments are blocked by the deployed server configuration. Keep credits disabled until a provider, documented funding source, reconciliation controls, dual approval, and independent production approval are established.',
+    },
     editableSettings: [] as string[],
     message: 'System configuration is read-only here. Secrets and financial-operation controls cannot be edited in the Admin UI.',
   };

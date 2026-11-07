@@ -31,8 +31,9 @@ describe('Admin report inputs and summaries', () => {
   });
 
   it('exposes safe read-only settings without secrets or mutation controls', () => {
-    const result = safeSettingsSnapshot({ nodeEnv: 'test', financialOperationsEnabled: false, paymentProvider: 'disabled', otpProvider: 'disabled', databaseConfigured: false });
+    const result = safeSettingsSnapshot({ nodeEnv: 'test', financialOperationsEnabled: false, paymentProvider: 'disabled', otpProvider: 'disabled', databaseConfigured: false, walletAdjustmentEnabled: false, walletAdjustmentAdminConfigured: false, adjustmentFundAccount: { status: 'PROVISIONED', balancePaise: '0' } });
     expect(result).toMatchObject({ financialOperationsEnabled: false, paymentProvider: 'disabled', editableSettings: [] });
+    expect(result.financialSafety).toMatchObject({ walletAdjustmentsEnabled: false, dedicatedAdminAdjustmentAccount: 'PROVISIONED', adjustmentFundBalancePaise: '0', adjustmentFundHasFunds: false, independentApprovalImplemented: false, adminAdjustmentControlsReady: false, superAdminWalletCreditsEnabled: false, superAdminCreditPrerequisitesReady: false, productionEnablementSupported: false });
     expect(Object.keys(result).join(',')).not.toMatch(/secret|password|token|databaseUrl|apiKey/i);
     expect(result.message).toContain('read-only');
   });

@@ -157,12 +157,30 @@ adminRouter.get('/reports', asyncRoute(async (req, res) => {
 
 adminRouter.get('/settings', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
+  let adjustmentFundAccount: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
+  try {
+    const rows = await databaseRequired().$queryRaw<Array<{ id: string | null; balance: bigint | null }>>`
+      SELECT a.id::text AS id, COALESCE(SUM(e.credit_paise - e.debit_paise), 0)::bigint AS balance
+        FROM (SELECT id FROM ledger_accounts WHERE id = '00000000-0000-4000-8000-000000000101'::uuid AND type::text = 'ADMIN_ADJUSTMENT_FUND') expected
+        LEFT JOIN ledger_accounts a ON a.id = expected.id
+        LEFT JOIN ledger_entries e ON e.account_id = a.id
+       GROUP BY a.id`;
+    adjustmentFundAccount = rows.length
+      ? { status: 'PROVISIONED', balancePaise: String(rows[0].balance ?? 0n) }
+      : { status: 'MISSING', balancePaise: null };
+  } catch {
+    // The diagnostics must remain useful if the account migration has not run.
+    adjustmentFundAccount = { status: 'CHECK_FAILED', balancePaise: null };
+  }
   res.json(safeSettingsSnapshot({
     nodeEnv: env.nodeEnv,
     financialOperationsEnabled: env.financialOperationsEnabled,
     paymentProvider: env.paymentProvider,
     otpProvider: env.otpProvider,
     databaseConfigured: Boolean(env.databaseUrl),
+    walletAdjustmentEnabled: env.walletAdjustmentsEnabled,
+    walletAdjustmentAdminConfigured: Boolean(env.walletAdjustmentAdminUserId),
+    adjustmentFundAccount,
   }));
 }));
 

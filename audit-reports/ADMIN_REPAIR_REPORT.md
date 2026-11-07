@@ -122,3 +122,77 @@ All paths are relative to `/api/v1`; `401 AUTH_REQUIRED` below was observed with
 - `adb install -r` succeeded. A post-install APK pull confirmed version `1.0.2` and the same signer fingerprint. No uninstall or app-data clear was performed.
 - Launched `com.paisapay.admin/.MainActivity`. UI inspection confirmed the Admin sign-in screen with password and secure sign-in controls visible. No login was attempted and no wallet credit or other financial action was performed.
 - Final installed APK SHA-256: `192DADA392FF07377D8800CF16C409768D1DEC39BC7A7CD0D56F4C17EDA194BE`.
+
+## Authenticated production safety review (2026-11-07, latest user evidence and local source review)
+
+### Production access evidence and limits
+
+- The owner reports that the installed Admin app now signs in successfully and screenshots show “Server Authorized”, the dashboard, and Super Admin Credits. This is user-provided visual evidence; this verification turn could not independently replay authenticated API requests because ADB currently lists no connected Android device. No access token was extracted or requested.
+- Attempts to open the protected production API directly without the app session were inaccessible from the web verification tool. Protected endpoint data, role-specific responses, and live PostgreSQL records therefore remain unverified in this update. A successful login/dashboard screenshot does not by itself prove every protected data endpoint is returning records.
+- No password reset, bootstrap, token extraction, production write, or wallet credit was attempted. No production balance was modified.
+
+### Financial controls and adjustment funding findings
+
+The current backend source has these controls:
+
+| Requirement | Exact configuration / record | Finding |
+|---|---|---|
+| General financial operations | `FINANCIAL_OPERATIONS_ENABLED` | Production default/sample is `false`. The production config validator rejects `true` because an independently verified payment and payout provider is not implemented. |
+| Manual wallet adjustments | `WALLET_ADJUSTMENTS_ENABLED` | Production default/sample is `false`. The production config validator rejects `true` until financial controls and adjustment funding are approved. |
+| Designated adjustment operator | `WALLET_ADJUSTMENT_ADMIN_USER_ID` | Optional UUID. Unset in the sample. This is required only for the separate single-ADMIN adjustment screen; it is not the SUPER_ADMIN credit route's role check. Do not populate it merely to enable SUPER_ADMIN credits. |
+| Payment provider | `PAYMENT_PROVIDER` | `disabled` in production sample; source rejects production startup with any provider other than disabled until an approved adapter exists. This is a blocker to enabling general financial operations. |
+| Dedicated ledger funding account | `ledger_accounts.id = 00000000-0000-4000-8000-000000000101`, type `ADMIN_ADJUSTMENT_FUND`, currency `INR`, `user_id = NULL` | Migration `20261104120100_admin_wallet_adjustment_fund_account` provisions the account row only. It explicitly does not fund it. Whether this row exists in deployed PostgreSQL has not been independently queried in this update. |
+| Adjustment funding balance | Net `SUM(ledger_entries.credit_paise - ledger_entries.debit_paise)` for that account | A newly provisioned account has no entries and therefore a zero balance. Credit requests check sufficient funds and use a balanced ledger transaction; there is no safe shortcut by directly editing a wallet or writing a made-up opening balance. Live balance is not verified here. |
+| Audit and idempotency | `ledger_transactions` and `audit_logs` in the same transaction; UUID `Idempotency-Key`, advisory lock, serializable transaction | Present in source. Unit tests validate replay/no-duplicate and mismatch behavior. No production credit was sent. |
+| Independent approval | No maker-checker / dual-approval wallet-credit workflow found | Missing. The credit UI's single confirmation and SUPER_ADMIN role do not constitute independent approval. A second approver and immutable approval record must be implemented before enabling. |
+
+Do not turn either financial flag on or seed the adjustment account with an arbitrary ledger entry. A safe future configuration requires a documented and independently verified source of funds; accounting approval for the source and matching journal entries; reconciliation ownership and evidence; a maker-checker approval workflow; operational limits/monitoring; and a separately approved, deployed provider/control implementation. The current production validator intentionally blocks the necessary flags, so these findings are not instructions to enable them.
+
+### Diagnostic improvement made locally (not yet deployed)
+
+- `GET /api/v1/admin/settings` now has a local source change that reports only non-secret financial control state, whether the designated account exists, its read-only ledger balance, funding status, and whether credit prerequisites appear ready. The SQL is read-only and handles a missing account/schema by reporting `CHECK_FAILED` rather than pretending the account is funded.
+- The Admin Settings page now renders this structured safety diagnostic. It cannot change settings or create funding entries.
+- The API route remains behind `requireAuth` and `requireAdmin`, with ADMIN/SUPER_ADMIN role filtering. The source continues to reject production financial enablement. This change is not part of the already deployed production API or installed APK until separately built/deployed.
+
+### API and feature verification matrix
+
+| Feature | Endpoint(s) | Current classification |
+|---|---|---|
+| Admin sign-in / role session | `POST /api/v1/admin/auth/login`, then `GET /api/v1/admin/me` | User reports successful SUPER_ADMIN login and server authorization; screenshots are not authenticated response captures. Endpoint role claims are not independently rechecked in this turn. |
+| Dashboard | `GET /api/v1/admin/overview` | Dashboard is reported visible. Live response/data completeness not independently queried now. |
+| User search | `GET /api/v1/admin/users?page=…&pageSize=…&q=…` | Implemented in source against PostgreSQL for public ID, display name, phone, and UUID. SUPER_ADMIN is permitted by the operations-role gate. Live search result not independently verified now. |
+| User details / balances / recent ledger | `GET /api/v1/admin/users/:id` | Implemented in source and reads account balances from ledger entries. Live user record not independently verified now. |
+| Super Admin credit history | `GET /api/v1/admin/users/:id/wallet/credits` | SUPER_ADMIN-only, joins Admin adjustment ledger transactions with audit entries. Live history not independently verified now. |
+| Reports | `GET /api/v1/admin/reports?report=…&from=…&to=…` | Read-only source implementation; financial reports are blocked while financial operations are disabled. Live response not independently verified now. |
+| Safe settings | `GET /api/v1/admin/settings` | Existing deployed route was previously confirmed present but not response-tested with auth. New funding diagnostics are local/unreleased. |
+| Wallet balances / ledger | `GET /api/v1/admin/wallets/ledger` | Read-only source implementation; live ledger records not independently verified now. |
+| Audit logs | `GET /api/v1/admin/audit-logs` | Read-only source implementation; live audit records not independently verified now. |
+| System diagnostics | `GET /api/v1/admin/system-health` | Read-only health endpoint reports API, DB probe, payment and payout provider state. Live authenticated response not independently verified now. |
+| Wallet credit submission | `POST /api/v1/admin/users/:id/wallet/credit` | Unavailable by design: financial flags are off; account funding and dual approval are not evidenced; production backend source refuses enablement. No credit was attempted. |
+
+### Current verification work results
+
+- Admin app automated tests: 26/26 passed.
+- Server Admin reporting and wallet-adjustment focused tests: 13/13 passed after adding coverage for the new safe funding diagnostic.
+- Server production TypeScript build: passed.
+- Production authenticated endpoint sweep: not performed in this turn because no authorized device/session was connected. Prior unauthenticated 401 route checks prove only that authentication is enforced, not that SUPER_ADMIN responses work.
+- Production database account presence/funding: not independently verified. The local diagnostic endpoint should be deployed and queried with the authorized app session before asserting those facts about production.
+- Production wallet credits: disabled and not used for testing.
+
+### Latest read-only network and bundle checks (2026-11-07)
+
+- Direct production `GET /ready` returned HTTP 200 with `database: ready`.
+- Without credentials, direct requests to `GET /api/v1/admin/settings`, `/admin/me`, `/admin/reports`, `/admin/wallets/ledger`, `/admin/audit-logs`, and `/admin/users?q=` returned HTTP 401. This confirms those routes are present and protected; it does not verify authorized data results.
+- ADB was rechecked and reports no connected device. The owner's successful login/screenshots remain user-reported evidence; there was no authenticated production session available to this verification process.
+- The Admin JS production export completed successfully after explicitly setting `EXPO_PUBLIC_API_URL=https://paisapay-api.onrender.com`. Inspection found that URL in the bundle and did not find the workspace LAN URL. This verified an Expo JS export, not a signed APK build or install.
+- The new diagnostics changes and report are local only. They have not been committed, pushed, deployed, or installed in the production APK. Consequently the current production API still cannot report the adjustment account's actual presence or ledger funding through the new diagnostic fields.
+- Additional no-credential route checks: `GET /api/v1/admin/users/00000000-0000-4000-8000-000000000001`, the matching `/wallet/credits` path, and a valid-shape `/reports` query each returned 401. Placeholder UUID use did not request or reveal an actual customer record.
+
+## Admin diagnostics deployment follow-up (2026-11-07)
+
+- Reviewed and tested the local financial-safety diagnostics. The read-only settings endpoint reports `ADMIN_ADJUSTMENT_FUND` as `PROVISIONED`, `MISSING`, or `CHECK_FAILED`, and returns its net ledger balance in paise only when queryable. It explicitly reports that independent approval is not implemented and therefore `adminAdjustmentControlsReady` and `superAdminCreditPrerequisitesReady` remain false. `superAdminWalletCreditsEnabled` mirrors the two server financial flags; this diagnostic does not enable or edit them.
+- The actual production fund-account row and balance are still unverified: this requires calling the new authenticated endpoint after deployment, and ADB currently reports no connected phone. The last directly observed production state was `/ready` HTTP 200/database ready; unauthenticated Admin reads returned 401. No production financial data was changed.
+- App tests: 26/26 passed. Focused server tests: 13/13 passed. Server build passed.
+- Built standalone APK `apps/admin-app/android/app/build/outputs/apk/release/app-release.apk`: package `com.paisapay.admin`, version `1.0.3`, versionCode `4`, min SDK 24, target SDK 36. APK signer SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`, matching the previously verified 1.0.2 installation signer. This build used the existing debug keystore; it was not regenerated or included in Git. APK SHA-256 `B0145ACF35E7644769E0297756CEAFC84CDDBBB01AD9A50BD9F8AC7536144303`. APK inspection confirmed `https://paisapay-api.onrender.com` is bundled and no workspace LAN URL is present.
+- Device update is pending: ADB currently lists no connected Android device. No install, uninstall, or app-data operation was performed; existing app data remains untouched.
+- GitHub `main` was at `4dcbcc7` on fetch. Local `main` contained two prior Admin-only commits ahead of it. All unrelated mobile and server work remains unstaged and outside the diagnostic change set. GitHub push and Render deployment status will be recorded after the push/deployment checks.
