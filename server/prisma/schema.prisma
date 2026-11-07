@@ -86,6 +86,12 @@ enum AdminRole {
   SUPER_ADMIN
 }
 
+enum AdminApprovalStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
 model User {
   id                           String               @id @default(uuid()) @db.Uuid
   publicId                     String?              @unique @map("public_id") @db.VarChar(10)
@@ -119,6 +125,11 @@ model User {
   notifications                Notification[]
   auditLogs                    AuditLog[]
   adminRole                    AdminUser?
+  adminWalletCreditRequestsMade AdminWalletCreditRequest[] @relation("AdminWalletCreditRequestMaker")
+  adminWalletCreditRequestsChecked AdminWalletCreditRequest[] @relation("AdminWalletCreditRequestChecker")
+  adminWalletCreditTargets      AdminWalletCreditRequest[] @relation("AdminWalletCreditRequestTarget")
+  adminWalletFundingRequestsMade AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestMaker")
+  adminWalletFundingRequestsChecked AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestChecker")
   submittedManualPaymentClaims ManualPaymentClaim[] @relation("ManualPaymentClaimSubmitter")
   reviewedManualPaymentClaims  ManualPaymentClaim[] @relation("ManualPaymentClaimReviewer")
   p2pWithdrawalOffers          P2pWithdrawalOffer[] @relation("P2pOfferCreator")
@@ -190,6 +201,8 @@ model LedgerTransaction {
   actorUserId    String?       @map("actor_user_id") @db.Uuid
   metadata       Json          @default("{}")
   entries        LedgerEntry[]
+  adminWalletCreditRequest AdminWalletCreditRequest?
+  adminWalletFundingRequest AdminWalletFundingRequest?
   createdAt      DateTime      @default(now()) @map("created_at")
 
   @@index([referenceType, referenceId])
@@ -624,6 +637,54 @@ model AuditLog {
 
   @@index([actorId, createdAt])
   @@map("audit_logs")
+}
+
+model AdminWalletCreditRequest {
+  id                    String               @id @default(uuid()) @db.Uuid
+  targetUserId          String               @map("target_user_id") @db.Uuid
+  targetUser            User                 @relation("AdminWalletCreditRequestTarget", fields: [targetUserId], references: [id], onDelete: Restrict)
+  makerUserId           String               @map("maker_user_id") @db.Uuid
+  makerUser             User                 @relation("AdminWalletCreditRequestMaker", fields: [makerUserId], references: [id], onDelete: Restrict)
+  checkerUserId         String?              @map("checker_user_id") @db.Uuid
+  checkerUser           User?                @relation("AdminWalletCreditRequestChecker", fields: [checkerUserId], references: [id], onDelete: Restrict)
+  amountPaise           BigInt               @map("amount_paise")
+  reason                String               @db.VarChar(500)
+  status                AdminApprovalStatus  @default(PENDING_APPROVAL)
+  idempotencyKey        String               @unique @map("idempotency_key") @db.VarChar(100)
+  decisionReason        String?              @map("decision_reason") @db.VarChar(500)
+  ledgerTransactionId   String?              @unique @map("ledger_transaction_id") @db.Uuid
+  ledgerTransaction     LedgerTransaction?   @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  createdAt             DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  decidedAt             DateTime?            @map("decided_at") @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("admin_wallet_credit_requests")
+}
+
+model AdminWalletFundingRequest {
+  id                    String               @id @default(uuid()) @db.Uuid
+  makerUserId           String               @map("maker_user_id") @db.Uuid
+  makerUser             User                 @relation("AdminWalletFundingRequestMaker", fields: [makerUserId], references: [id], onDelete: Restrict)
+  checkerUserId         String?              @map("checker_user_id") @db.Uuid
+  checkerUser           User?                @relation("AdminWalletFundingRequestChecker", fields: [checkerUserId], references: [id], onDelete: Restrict)
+  amountPaise           BigInt               @map("amount_paise")
+  sourceAccountLabel    String               @map("source_account_label") @db.VarChar(100)
+  externalReferenceHash String               @unique @map("external_reference_hash") @db.Char(64)
+  evidenceReference     String               @map("evidence_reference") @db.VarChar(160)
+  evidenceSha256        String               @map("evidence_sha256") @db.Char(64)
+  statementDate         DateTime             @map("statement_date") @db.Date
+  reason                String               @db.VarChar(500)
+  status                AdminApprovalStatus  @default(PENDING_APPROVAL)
+  idempotencyKey        String               @unique @map("idempotency_key") @db.VarChar(100)
+  decisionReason        String?              @map("decision_reason") @db.VarChar(500)
+  ledgerTransactionId   String?              @unique @map("ledger_transaction_id") @db.Uuid
+  ledgerTransaction     LedgerTransaction?   @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  createdAt             DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  decidedAt             DateTime?            @map("decided_at") @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@map("admin_wallet_funding_requests")
 }
 
 model IdempotencyKey {

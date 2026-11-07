@@ -71,6 +71,8 @@ describe('financial operations safety gate policy', () => {
       UPI_DEPOSIT_REWARD_ENABLED: 'false',
       PAYMENT_PROVIDER: 'disabled',
       FINANCIAL_OPERATIONS_ENABLED: 'true',
+      ADMIN_WALLET_PRODUCTION_APPROVED: 'false',
+      ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'false',
       DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
     };
     delete childEnv.DEMO_LOGIN_PHONE_E164;
@@ -98,7 +100,70 @@ describe('financial operations safety gate policy', () => {
     delete childEnv.SMS_GATEWAY_API_KEY;
     const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('WALLET_ADJUSTMENTS_ENABLED cannot be enabled in production');
+    expect(result.stderr).toContain('Production Admin wallet gates require the complete gate bundle');
+  });
+
+  it.each(['ADMIN_WALLET_FUNDING_ENABLED', 'ADMIN_WALLET_CREDITS_ENABLED'])('rejects production startup when %s is enabled by itself', (featureFlag) => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
+      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
+      SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder', OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false', PAYMENT_PROVIDER: 'disabled',
+      FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'false',
+      ADMIN_WALLET_PRODUCTION_APPROVED: 'false',
+      ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'false',
+      ADMIN_WALLET_FUNDING_ENABLED: featureFlag === 'ADMIN_WALLET_FUNDING_ENABLED' ? 'true' : 'false',
+      ADMIN_WALLET_CREDITS_ENABLED: featureFlag === 'ADMIN_WALLET_CREDITS_ENABLED' ? 'true' : 'false',
+      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
+    };
+    delete childEnv.DEMO_LOGIN_PHONE_E164;
+    delete childEnv.DEMO_LOGIN_PASSWORD;
+    delete childEnv.SMS_GATEWAY_URL;
+    delete childEnv.SMS_GATEWAY_API_KEY;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Production Admin wallet gates require the complete gate bundle');
+  });
+
+  it('allows only the explicitly approved dedicated Admin wallet gate bundle while global financial operations remain disabled', () => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
+      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
+      SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder', OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false', PAYMENT_PROVIDER: 'disabled',
+      FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'true',
+      ADMIN_WALLET_FUNDING_ENABLED: 'true', ADMIN_WALLET_CREDITS_ENABLED: 'true', ADMIN_WALLET_PRODUCTION_APPROVED: 'true', ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'true',
+      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
+    };
+    delete childEnv.DEMO_LOGIN_PHONE_E164;
+    delete childEnv.DEMO_LOGIN_PASSWORD;
+    delete childEnv.SMS_GATEWAY_URL;
+    delete childEnv.SMS_GATEWAY_API_KEY;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+    expect(result.status).toBe(0);
+  });
+
+  it('rejects the complete production wallet gate bundle until external bank reconciliation is attested', () => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
+      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
+      SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder', OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false', PAYMENT_PROVIDER: 'disabled',
+      FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'true',
+      ADMIN_WALLET_FUNDING_ENABLED: 'true', ADMIN_WALLET_CREDITS_ENABLED: 'true',
+      ADMIN_WALLET_PRODUCTION_APPROVED: 'true', ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'false',
+      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
+    };
+    delete childEnv.DEMO_LOGIN_PHONE_E164;
+    delete childEnv.DEMO_LOGIN_PASSWORD;
+    delete childEnv.SMS_GATEWAY_URL;
+    delete childEnv.SMS_GATEWAY_API_KEY;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('external bank reconciliation attestation');
   });
 
   it('covers only real route declarations and documents their disabled 503 response', () => {

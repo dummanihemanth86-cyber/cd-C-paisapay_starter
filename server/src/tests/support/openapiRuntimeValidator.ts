@@ -56,7 +56,11 @@ function validateValue(value: unknown, schema: Schema, pointer: string, spec: Sp
 }
 
 export function assertOpenApiResponse(spec: Spec, method: string, path: string, response: HttpResponse): void {
-  const operation = spec.paths[path]?.[method.toLowerCase()];
+  const normalizedPath = path.split('?')[0];
+  const operation = spec.paths[normalizedPath]?.[method.toLowerCase()] ?? Object.entries(spec.paths).find(([template]) => {
+    const pattern = new RegExp(`^${template.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\{[^/]+\\\}/g, '[^/]+')}$`);
+    return pattern.test(normalizedPath);
+  })?.[1]?.[method.toLowerCase()];
   expect(operation, `${method} ${path} operation`).toBeDefined();
   const responseSpec = operation?.responses?.[String(response.status)];
   expect(responseSpec, `${method} ${path} ${response.status} documented status`).toBeDefined();

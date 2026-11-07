@@ -105,6 +105,13 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
         expect(response.body.financialOperationsEnabled).toBe(true);
         expect(response.body.walletAdjustmentAllowed).toBe(false);
         expect(response.body.walletAdjustmentsEnabled).toBe(false);
+        expect(response.body.walletCreditRequestsEnabled).toBe(false);
+        expect(response.body.walletCreditBlockers).toContain('Maker-checker migration is missing');
+      }
+      if (path === '/admin/settings') {
+        expect(response.body.financialSafety.walletCreditReadiness).toBe('BLOCKED');
+        expect(response.body.financialSafety.walletProductionApproved).toBe(false);
+        expect(response.body.financialSafety.walletCreditBlockers).toContain('Maker-checker migration is missing');
       }
     }
     const report = await request(app).get('/api/v1/admin/reports?report=registrations&from=2026-01-01&to=2026-01-02').set(authorization).expect(200);
@@ -113,7 +120,7 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
     expect(report.body).not.toHaveProperty('userIds');
   });
 
-  it('keeps the single-admin wallet adjustment route disabled before any financial mutation', async () => {
+  it('retires the direct wallet adjustment route before any financial mutation', async () => {
     const previous = { enabled: env.walletAdjustmentsEnabled, adminId: env.walletAdjustmentAdminUserId, role: fakeDatabase.administrator.role };
     env.walletAdjustmentsEnabled = false;
     env.walletAdjustmentAdminUserId = fakeDatabase.user.id;
@@ -123,9 +130,9 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
       const response = await request(app).post('/api/v1/admin/wallet-adjustments').set(authorization)
         .set('Idempotency-Key', '84ac3927-50df-4cf3-8ef2-6b9966e05fd1')
         .send({ targetPublicId: '123456789', direction: 'CREDIT', amountPaise: 100, reason: 'Isolated disabled-route contract test' })
-        .expect(503);
+        .expect(409);
       assertOpenApiResponse(openapi, 'POST', '/admin/wallet-adjustments', response);
-      expect(response.body.error.code).toBe('WALLET_ADJUSTMENTS_DISABLED');
+      expect(response.body.error.code).toBe('MAKER_CHECKER_REQUIRED');
       expect(fakeDatabase.writes).toEqual([]);
     } finally {
       env.walletAdjustmentsEnabled = previous.enabled;
@@ -134,7 +141,7 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
     }
   });
 
-  it('denies other admin roles from the single-admin wallet adjustment endpoint', async () => {
+  it('retires the legacy adjustment endpoint regardless of admin role', async () => {
     const previous = { adminId: env.walletAdjustmentAdminUserId, role: fakeDatabase.administrator.role };
     env.walletAdjustmentAdminUserId = fakeDatabase.user.id;
     fakeDatabase.administrator.role = 'SUPER_ADMIN';
@@ -143,8 +150,8 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
       const response = await request(app).post('/api/v1/admin/wallet-adjustments').set(authorization)
         .set('Idempotency-Key', '84ac3927-50df-4cf3-8ef2-6b9966e05fd2')
         .send({ targetPublicId: '123456789', direction: 'CREDIT', amountPaise: 100, reason: 'Role isolation regression test' })
-        .expect(403);
-      expect(response.body.error.code).toBe('ADMIN_PERMISSION_DENIED');
+        .expect(409);
+      expect(response.body.error.code).toBe('MAKER_CHECKER_REQUIRED');
       expect(fakeDatabase.writes).toEqual([]);
     } finally {
       env.walletAdjustmentAdminUserId = previous.adminId;
@@ -152,7 +159,7 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
     }
   });
 
-  it('still enforces the existing global financial-operations gate after the private feature flag', async () => {
+  it('does not let old direct adjustment traffic bypass maker-checker when the global gate changes', async () => {
     const previous = { wallet: env.walletAdjustmentsEnabled, finance: env.financialOperationsEnabled, adminId: env.walletAdjustmentAdminUserId, role: fakeDatabase.administrator.role };
     env.walletAdjustmentsEnabled = true;
     env.financialOperationsEnabled = false;
@@ -163,8 +170,8 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
       const response = await request(app).post('/api/v1/admin/wallet-adjustments').set(authorization)
         .set('Idempotency-Key', '84ac3927-50df-4cf3-8ef2-6b9966e05fd3')
         .send({ targetPublicId: '123456789', direction: 'CREDIT', amountPaise: 100, reason: 'Global gate isolation test' })
-        .expect(503);
-      expect(response.body.error.code).toBe('FINANCIAL_OPERATIONS_DISABLED');
+        .expect(409);
+      expect(response.body.error.code).toBe('MAKER_CHECKER_REQUIRED');
       expect(fakeDatabase.writes).toEqual([]);
     } finally {
       env.walletAdjustmentsEnabled = previous.wallet;
