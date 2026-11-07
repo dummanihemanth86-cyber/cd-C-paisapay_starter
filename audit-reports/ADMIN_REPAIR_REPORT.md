@@ -37,21 +37,21 @@ All paths below are relative to `/api/v1`. The local API requires an authenticat
 | Transactions | `GET /admin/transactions` | Paginated deposit, withdrawal and P2P records from database. |
 | Wallet ledger | `GET /admin/wallets/ledger` | Read-only ledger records. |
 | Single-account wallet adjustment | `POST /admin/wallet-adjustments` | Existing separate configured-ADMIN flow; disabled unless server controls/funding permit it. |
-| Super Admin wallet credit | `GET /admin/users/:id/wallet/credits`; `POST /admin/users/:id/wallet/credit` | ₹100–₹10,000, confirmation/reason, idempotency, balanced ledger + audit, Super Admin only; production API is currently missing these routes. |
+| Super Admin wallet credit | `GET /admin/users/:id/wallet/credits`; `POST /admin/users/:id/wallet/credit` | ₹100–₹10,000, confirmation/reason, idempotency, balanced ledger + audit, Super Admin only. GET route presence/auth gate verified in production; no POST was sent. |
 | P2P operations | `GET /admin/p2p/overview`; `GET /admin/p2p/offers`; `POST /admin/p2p/offers/:id/cancel`; `GET /admin/p2p/orders`; `GET /admin/p2p/claims`; `GET /admin/p2p/claims/:id`; `GET /admin/p2p/claims/:id/evidence`; `POST /admin/p2p/claims/:id/review` | Search/monitor and audited review. Financial decisions require server role and verification rules. |
 | Payment providers | `GET /admin/providers` | Availability only; disabled or unapproved providers remain disabled. |
 | Commissions / referrals | `GET /admin/commissions`; `GET /admin/referrals`; `GET/PATCH /admin/referrals/config`; `PATCH /admin/referrals/milestones/:key` | Reporting and audited configuration; payout is not implied. |
 | Reward rules | `GET /admin/reward-rules`; `PATCH /admin/reward-rules/:id` | Super Admin updates are audited; rules do not credit funds. |
 | Announcements | `GET/POST /admin/notifications` | Audited in-app notices only; no SMS/push delivery is claimed. |
-| CSV reports | `GET /admin/reports` | Aggregate export; money reports remain subject to the financial-operations gate. Production API currently returns 404. |
+| CSV reports | `GET /admin/reports` | Aggregate export; money reports remain subject to the financial-operations gate. Production route presence/auth gate verified; response data not read. |
 | Disputes | `GET /admin/disputes` | View-only; dispute resolution workflow is not implemented. |
 | Support | `GET /admin/support/tickets`; `GET /admin/support/tickets/:id`; `POST /admin/support/tickets/:id/reply`; `PATCH /admin/support/tickets/:id/status` | Audited ticket operations; replies create in-app notifications. |
 | Admin alerts | `GET /admin/push-events`; `POST/DELETE /admin/push-devices` | Durable event list and device registration/revocation. Delivery depends on device/service configuration. |
 | Admin directory | `GET /admin/admins` | Super Admin read-only directory; role changes are not implemented. |
 | Audit logs | `GET /admin/audit-logs` | Searchable audit records, Operations/Admin/Super Admin. |
-| Diagnostics / safe settings | `GET /admin/system-health`; `GET /admin/settings` | Database/provider health and non-secret flags. Production API currently returns 404 for settings. |
+| Diagnostics / safe settings | `GET /admin/system-health`; `GET /admin/settings` | Database/provider health and non-secret flags. Production route presence/auth gate verified; settings response not read. |
 
-## Production API verification
+## Pre-deployment production API verification
 
 Read-only checks were made against `https://paisapay-api.onrender.com` without credentials. A `401 AUTH_REQUIRED` is the expected evidence that a protected route exists and authentication is enforced.
 
@@ -73,6 +73,32 @@ Read-only checks were made against `https://paisapay-api.onrender.com` without c
 | Full server suite | Not verifiable in this environment: 110 failures were socket-access errors (`connect EACCES` to Supertest loopback ports or local PostgreSQL `127.0.0.1:5432`), 65 tests passed and 39 were skipped. No database connection was established. |
 | Production mutation endpoint | Not probed; no wallet credit request was sent. |
 
-## Deployment status and remaining production gap
+## Status at initial repair commit
 
 Workspace fixes and builds are complete, but the deployed Render API has not been updated. Its observed `404` responses mean that reports/settings and Super Admin credit history cannot work against production until the backend changes are deployed. The new credit screen also requires a rebuilt Admin app. Existing installed binaries cannot receive a JavaScript change that was not already bundled; the production URL fallback supports the next build. KYC, Bird Assistant/joke management, dispute resolution, provider payouts, and Admin role changes remain unavailable because this API has no approved complete workflows for them.
+
+## Production deployment follow-up (2026-11-07)
+
+- Pushed the repair to GitHub `main`. The resulting branch head is `b151d8b` (`Merge remote-tracking branch 'origin/main'`), containing Admin repair commit `5f6dbe6` and preserving the concurrent password-reset commit `f9b26b4`.
+- Render is serving the new backend routes: `/ready` returned `200` with PostgreSQL `ready`; the production OpenAPI document now contains `/admin/reports`, `/admin/settings`, `/admin/users/{id}`, and `/admin/users/{id}/wallet/credits`. These four routes returned `401 AUTH_REQUIRED` without credentials instead of the pre-deployment `404` for missing routes.
+- A read-only sweep of all 32 documented Admin GET routes returned `401 AUTH_REQUIRED`; none returned `404`. This confirms route presence and the authentication gate, not access to customer data or role-specific responses.
+- No production Admin credentials were available. A successful Super Admin login, `SUPER_ADMIN`-specific `403`/`200` behavior, report/settings response contents, and real user detail/credit history data were therefore not verified. No password reset, bootstrap, credit POST, or other production write was attempted.
+- No wallet credit was performed. Production balances remain untouched by this verification.
+- The Admin release APK rebuilt successfully at `apps/admin-app/android/app/build/outputs/apk/release/app-release.apk`. It has package `com.paisapay.admin`, version `1.0.0` / versionCode `1`, min SDK `24`, target SDK `36`, and a valid APK signature. A companion Expo export built with `EXPO_PUBLIC_API_URL=https://paisapay-api.onrender.com` contains the production URL and not the local LAN URL.
+- The Android Gradle release signing config uses the default Android debug key (SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`). No production/EAS signing credentials were available. This APK is not safe to distribute as an update over installations signed with a different key. ADB could not start in this environment, so installation on a device was not tested.
+- Updated Admin-app tests pass 24/24; Admin reporting and wallet-ledger tests pass 12/12; `npm run build` passes. The Express `app.test.ts` suite cannot run here: all 82 checks fail when Supertest tries to open local loopback sockets (`connect EACCES`). The earlier full-suite socket/PostgreSQL restriction remains an environment limitation.
+- No payment provider was enabled. KYC, Bird Assistant/joke administration, dispute resolution, payout processing, Admin role changes, and push delivery remain unavailable until complete approved backend workflows and providers exist.
+
+### Post-deployment endpoint check
+
+All paths are relative to `/api/v1`; `401 AUTH_REQUIRED` below was observed with no credentials. This verifies routing and enforcement, not successful data reads.
+
+| Feature | Production endpoint(s) checked | Result |
+|---|---|---|
+| Reports | `GET /admin/reports` | `401 AUTH_REQUIRED`; route exists; response data/role access not verified. |
+| Safe settings | `GET /admin/settings` | `401 AUTH_REQUIRED`; route exists; safe response contents not verified. |
+| User details | `GET /admin/users/:id` | `401 AUTH_REQUIRED`; route exists; no customer details fetched. |
+| Credit history | `GET /admin/users/:id/wallet/credits` | `401 AUTH_REQUIRED`; route exists; no credit history fetched. |
+| All documented Admin reads | 32 documented `GET /admin/...` routes, including overview, users, transactions, wallet ledger, audit, support, P2P, diagnostics, and alerts | All 32 returned `401 AUTH_REQUIRED`; no `404` responses. |
+| Super Admin sign-in and authorization | `POST /admin/auth/login`; role-protected API routes | Not successfully verified: no existing Admin credentials were supplied; no login/password-reset attempt was made. |
+| Wallet credit creation | `POST /admin/users/:id/wallet/credit` | Deliberately not sent; no production mutation. |
