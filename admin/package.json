@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite build" },
+  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite build", "test": "node --test src/apiContract.test.mjs src/sessionApiClient.test.mjs src/pagination.test.mjs src/reportCsv.test.mjs ../shared/adminRecordNavigation.test.cjs ../shared/adminFinancialUx.test.cjs ../apps/admin-app/tests/walletAdjustmentUi.test.cjs" },
   "dependencies": { "@vitejs/plugin-react": "latest", "vite": "latest", "react": "latest", "react-dom": "latest" },
   "devDependencies": {}
 }

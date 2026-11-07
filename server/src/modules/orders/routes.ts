@@ -3,10 +3,11 @@ import { z } from 'zod';
 import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireAuth } from '../../middleware/auth.js';
+import { financialOperationsGate } from '../../middleware/financialOperations.js';
 import { getPaymentMethodAvailability } from '../payments/availability.js';
 
 export const ordersRouter = Router();
-ordersRouter.use(requireAuth);
+ordersRouter.use(requireAuth, financialOperationsGate);
 const methods = {
   Paytm: { enum: 'PAYTM' as const, buy: true, sell: true },
   PhonePe: { enum: 'PHONEPE' as const, buy: false, sell: true },

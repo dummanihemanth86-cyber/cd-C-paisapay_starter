@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireAuth } from '../../middleware/auth.js';
+import { financialOperationsGate } from '../../middleware/financialOperations.js';
 
 export const supportRouter = Router();
 supportRouter.use(requireAuth);
@@ -37,7 +38,7 @@ withdrawalsRouter.get('/', asyncRoute(async (req, res) => {
   const withdrawals = await databaseRequired().withdrawal.findMany({ where: { userId: req.auth!.userId }, orderBy: { createdAt: 'desc' }, take: 100 });
   res.json({ withdrawals: withdrawals.map((row) => ({ ...row, amountPaise: Number(row.amountPaise) })) });
 }));
-withdrawalsRouter.post('/', asyncRoute(async (req, res) => {
+withdrawalsRouter.post('/', financialOperationsGate, asyncRoute(async (req, res) => {
   const input = z.object({ amountPaise: z.number().int().min(10000).max(100_000_000) }).strict().parse(req.body);
   const key = req.header('idempotency-key');
   if (!key || key.length < 8 || key.length > 120) throw new HttpError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send an Idempotency-Key header between 8 and 120 characters.');

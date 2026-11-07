@@ -1,20 +1,84 @@
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { databaseRequired, prisma } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireAdmin, requireAuth } from '../../middleware/auth.js';
+import { assertFinancialOperationsEnabled } from '../../middleware/financialOperations.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { getPaymentMethodAvailability } from '../payments/availability.js';
 import { verifyPassword, hashPassword } from '../../lib/password.js';
-import { hashToken, newOpaqueToken } from '../../lib/security.js';
+import { hashOtp, hashToken, newOpaqueToken, safeHashEqual } from '../../lib/security.js';
+import { env } from '../../config/env.js';
+import { formatReportResult, hasMoney, reportQuerySchema, safeSettingsSnapshot, type ReportKind } from './reporting.js';
+import { applyAdminWalletAdjustment, applySuperAdminWalletCredit, MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from './walletAdjustment.js';
+import { createOtpChallenge } from '../auth/routes.js';
 
 export const adminRouter = Router();
 export const adminAuthRouter = Router();
 const adminLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'ADMIN_LOGIN_RATE_LIMITED', message: 'Too many admin sign-in attempts. Wait before trying again.' } } });
 const adminPhoneLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (req) => `phone:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`, message: { error: { code: 'ADMIN_LOGIN_RATE_LIMITED', message: 'Too many sign-in attempts for this account. Wait before trying again.' } } });
+const adminPasswordResetIpLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts. Wait before trying again.' } } });
+const adminPasswordResetPhoneLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (req) => `admin-reset:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`, message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts for this number. Try again later.' } } });
 const adminPhone = z.string().regex(/^\+[1-9]\d{7,14}$/);
 const dummyAdminPasswordHash = hashPassword('paisa-pay-invalid-admin-password-dummy');
+
+adminAuthRouter.post('/forgot-password/request-otp', adminPasswordResetIpLimit, adminPasswordResetPhoneLimit, asyncRoute(async (req, res) => {
+  const input = z.object({ phoneE164: adminPhone }).strict().parse(req.body);
+  const db = databaseRequired();
+  const admin = await db.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { status: true, adminRole: { select: { id: true } } } });
+  const activeAdmin = admin?.status === 'ACTIVE' && Boolean(admin.adminRole);
+  const challenge = activeAdmin
+    ? await createOtpChallenge(input.phoneE164, 'ADMIN_PASSWORD_RESET')
+    : { challengeId: randomUUID() };
+  // A generic response avoids disclosing whether the phone belongs to an active admin.
+  res.status(202).json({
+    challengeId: challenge.challengeId,
+    expiresInSeconds: 300,
+    resendAfterSeconds: 60,
+    message: 'If an active Admin account exists for this number, a password-reset code will be sent by SMS.',
+  });
+}));
+
+adminAuthRouter.post('/password/reset', adminPasswordResetIpLimit, adminPasswordResetPhoneLimit, asyncRoute(async (req, res) => {
+  const input = z.object({
+    phoneE164: adminPhone,
+    challengeId: z.string().uuid(),
+    code: z.string().regex(/^\d{6}$/),
+    newPassword: z.string().min(12).max(128),
+  }).strict().parse(req.body);
+  const db = databaseRequired();
+  const passwordHash = await hashPassword(input.newPassword);
+  const reset = await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM otp_challenges WHERE id = ${input.challengeId}::uuid FOR UPDATE`;
+    const challenge = await tx.otpChallenge.findUnique({ where: { id: input.challengeId } });
+    if (!challenge || challenge.purpose !== 'ADMIN_PASSWORD_RESET' || challenge.phoneE164 !== input.phoneE164 || challenge.consumedAt || challenge.expiresAt <= new Date()) {
+      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    }
+    const isTestDemo = env.isTest && env.otpProvider === 'demo' && challenge.deliveryStatus === 'DEMO';
+    if (!isTestDemo && !['ACCEPTED', 'SENT', 'DELIVERED'].includes(challenge.deliveryStatus ?? '')) {
+      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    }
+    if (challenge.attempts >= 5) throw new HttpError(429, 'ADMIN_PASSWORD_RESET_ATTEMPTS_EXCEEDED', 'Too many incorrect codes. Request a new code.');
+    if (!safeHashEqual(challenge.codeHash, hashOtp(input.phoneE164, input.code))) {
+      await tx.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } });
+      return false;
+    }
+    const admin = await tx.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { id: true, status: true, adminRole: { select: { id: true } } } });
+    if (!admin || admin.status !== 'ACTIVE' || !admin.adminRole) {
+      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    }
+    const now = new Date();
+    await tx.user.update({ where: { id: admin.id }, data: { passwordHash, loginFailedAttempts: 0, loginLockedUntil: null } });
+    await tx.otpChallenge.updateMany({ where: { phoneE164: input.phoneE164, purpose: 'ADMIN_PASSWORD_RESET', consumedAt: null }, data: { consumedAt: now } });
+    await tx.session.updateMany({ where: { userId: admin.id, revokedAt: null }, data: { revokedAt: now } });
+    await tx.auditLog.create({ data: { actorId: admin.id, action: 'ADMIN_PASSWORD_RESET', target: `ADMIN_USER:${admin.id}`, reason: 'Admin password reset using a delivered one-time code.', metadata: { requestId: req.requestId || null } } });
+    return true;
+  }, { isolationLevel: 'ReadCommitted' });
+  if (!reset) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is incorrect.');
+  res.json({ ok: true, message: 'Admin password reset. Sign in using your new password.' });
+}));
 
 // Separate admin sign-in: existing users only, and an AdminUser row is required
 // before a session is created. This route intentionally does not create users,
@@ -61,6 +125,47 @@ const operationsRoles = new Set(['OPERATIONS', 'ADMIN', 'SUPER_ADMIN']);
 function requireRole(role: string | undefined, allowed: Set<string>) { if (!role || !allowed.has(role)) throw new HttpError(403, 'ADMIN_PERMISSION_DENIED', 'Your administrator role cannot perform this action.'); }
 const phoneMasked = (phone: string) => `${phone.slice(0, Math.max(0, phone.length - 4)).replace(/\d/g, '*')}${phone.slice(-4)}`;
 
+adminRouter.get('/reports', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
+  const input = reportQuerySchema.parse(req.query);
+  if (hasMoney(input.report)) assertFinancialOperationsEnabled();
+  const db = databaseRequired();
+  const reportSources: Record<ReportKind, { table: string; amountColumn: string | null }> = {
+    registrations: { table: 'users', amountColumn: null },
+    deposits: { table: 'deposits', amountColumn: 'amount_paise' },
+    withdrawals: { table: 'withdrawals', amountColumn: 'amount_paise' },
+    'p2p-orders': { table: 'p2p_deposit_orders', amountColumn: 'amount_paise' },
+    'support-tickets': { table: 'support_tickets', amountColumn: null },
+  };
+  const source = reportSources[input.report];
+  const amountExpression = source.amountColumn ? Prisma.raw(`COALESCE(SUM(${source.amountColumn}), 0)::text`) : Prisma.raw('NULL::text');
+  const from = new Date(`${input.from}T00:00:00.000Z`);
+  const toExclusive = new Date(Date.parse(`${input.to}T00:00:00.000Z`) + 86_400_000);
+  const rows = await db.$queryRaw<Array<{ day: string; status: string; recordCount: bigint; amountPaise: string | null }>>`
+    SELECT to_char(date_trunc('day', created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+           status::text AS status,
+           COUNT(*)::bigint AS "recordCount",
+           ${amountExpression} AS "amountPaise"
+      FROM ${Prisma.raw(source.table)}
+     WHERE created_at >= ${from} AND created_at < ${toExclusive}
+       AND (${input.status ?? null}::text IS NULL OR status::text = ${input.status ?? null})
+     GROUP BY date_trunc('day', created_at AT TIME ZONE 'UTC'), status::text
+     ORDER BY day ASC, status ASC
+  `;
+  res.json(formatReportResult(input, rows));
+}));
+
+adminRouter.get('/settings', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
+  res.json(safeSettingsSnapshot({
+    nodeEnv: env.nodeEnv,
+    financialOperationsEnabled: env.financialOperationsEnabled,
+    paymentProvider: env.paymentProvider,
+    otpProvider: env.otpProvider,
+    databaseConfigured: Boolean(env.databaseUrl),
+  }));
+}));
+
 adminRouter.get('/me', asyncRoute(async (req, res) => {
   const role = req.auth!.role || 'SUPPORT';
   const common = ['overview', 'health'];
@@ -71,7 +176,23 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'audit', 'health', 'reports', 'notifications', 'settings'],
     SUPER_ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'admins', 'audit', 'health', 'reports', 'notifications', 'settings'],
   };
-  res.json({ userId: req.auth!.userId, role, allowedSections: roleViews[role] || common });
+  const walletAdjustmentAllowed = role === 'ADMIN' && env.walletAdjustmentAdminUserId === req.auth!.userId;
+  const walletCreditsAllowed = role === 'SUPER_ADMIN';
+  const allowedSections = [...(roleViews[role] || common)];
+  if (walletAdjustmentAllowed && !allowedSections.includes('walletAdjustments')) allowedSections.push('walletAdjustments');
+  if (walletCreditsAllowed && !allowedSections.includes('walletCredits')) allowedSections.push('walletCredits');
+  res.json({
+    userId: req.auth!.userId,
+    role,
+    allowedSections,
+    // Read-only capability metadata for Admin UI explanations. Mutation
+    // authorization continues to run through financialOperationsGate.
+    financialOperationsEnabled: env.financialOperationsEnabled,
+    walletAdjustmentAllowed,
+    walletAdjustmentsEnabled: walletAdjustmentAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
+    walletCreditsAllowed,
+    walletCreditsEnabled: walletCreditsAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
+  });
 }));
 
 adminRouter.post('/push-devices', asyncRoute(async (req, res) => {
@@ -154,7 +275,12 @@ adminRouter.get('/users', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set([...operationsRoles, 'FINANCE']));
   const db = databaseRequired(); const input = pageInput.parse(req.query); const where: any = {};
   if (input.status) where.status = z.enum(['PENDING_PROFILE', 'ACTIVE', 'SUSPENDED', 'CLOSED']).parse(input.status);
-  if (input.q) where.OR = [{ publicId: { contains: input.q, mode: 'insensitive' } }, { displayName: { contains: input.q, mode: 'insensitive' } }, { phoneE164: { contains: input.q } }];
+  if (input.q) where.OR = [
+    { publicId: { contains: input.q, mode: 'insensitive' } },
+    { displayName: { contains: input.q, mode: 'insensitive' } },
+    { phoneE164: { contains: input.q } },
+    ...(z.string().uuid().safeParse(input.q).success ? [{ id: input.q }] : []),
+  ];
   const [total, rows] = await Promise.all([db.user.count({ where }), db.user.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true, createdAt: true, updatedAt: true, sessions: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } }, _count: { select: { deposits: true, withdrawals: true, buyOrders: true, sellOrders: true } } } })]);
   const ids = rows.map((u) => u.id);
   const [balances, depositsByUser, withdrawalsByUser] = ids.length ? await Promise.all([
@@ -175,7 +301,12 @@ adminRouter.get('/users/:id', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set([...operationsRoles, 'FINANCE']));
   const db = databaseRequired(); const user = await db.user.findUnique({ where: { id: req.params.id }, select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true, createdAt: true, updatedAt: true, adminRole: { select: { role: true } }, _count: { select: { deposits: true, withdrawals: true, buyOrders: true, sellOrders: true } } } });
   if (!user) throw new HttpError(404, 'USER_NOT_FOUND', 'User was not found.');
-  res.json({ user: { ...user, phoneMasked: phoneMasked(user.phoneE164), phoneE164: undefined, totalTransactions: Object.values(user._count).reduce((a,b)=>a+b,0) } });
+  const [balances, recentLedgerEntries] = await Promise.all([
+    db.$queryRaw<Array<{ type: string; balance: bigint }>>`SELECT a.type::text AS type, COALESCE(SUM(e.credit_paise-e.debit_paise),0)::bigint AS balance FROM ledger_accounts a LEFT JOIN ledger_entries e ON e.account_id=a.id WHERE a.user_id=${user.id}::uuid AND a.type IN ('AVAILABLE','RESERVED') GROUP BY a.type`,
+    db.ledgerEntry.findMany({ where: { account: { userId: user.id } }, orderBy: { createdAt: 'desc' }, take: 20, select: { id: true, creditPaise: true, debitPaise: true, createdAt: true, account: { select: { type: true, currency: true } }, transaction: { select: { id: true, eventType: true, referenceType: true, referenceId: true, actorUserId: true } } } }),
+  ]);
+  const balance = (type: string) => Number(balances.find((row) => row.type === type)?.balance ?? 0n);
+  res.json({ user: { ...user, phoneMasked: phoneMasked(user.phoneE164), phoneE164: undefined, totalTransactions: Object.values(user._count).reduce((a,b)=>a+b,0), walletBalancePaise: balance('AVAILABLE'), reservedBalancePaise: balance('RESERVED'), recentLedgerEntries: recentLedgerEntries.map((entry) => ({ ...entry, creditPaise: Number(entry.creditPaise), debitPaise: Number(entry.debitPaise) })) } });
 }));
 
 adminRouter.post('/users/:id/status', adminMutationLimit, asyncRoute(async (req, res) => {
@@ -208,7 +339,7 @@ adminRouter.get('/withdrawals', asyncRoute(async (req, res) => {
   if (input.status) where.status = z.enum(['REQUESTED', 'UNDER_REVIEW', 'APPROVED', 'PROCESSING', 'COMPLETED', 'REJECTED', 'FAILED', 'CANCELLED']).parse(input.status);
   if (input.q) where.OR = [{ id: { contains: input.q, mode: 'insensitive' } }, { payoutReference: { contains: input.q, mode: 'insensitive' } }, { user: { is: { publicId: { contains: input.q, mode: 'insensitive' } } } }];
   const [total, rows] = await Promise.all([db.withdrawal.count({ where }), db.withdrawal.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, select: { id: true, amountPaise: true, currency: true, status: true, payoutReference: true, createdAt: true, updatedAt: true, user: { select: { publicId: true, displayName: true, phoneE164: true } } } })]);
-  res.json({ withdrawals: rows.map((w) => ({ ...w, amountPaise: Number(w.amountPaise), user: { ...w.user, phoneMasked: phoneMasked(w.user.phoneE164), phoneE164: undefined } })), page: input.page, pageSize: input.pageSize, total, payoutIntegration: 'UNAVAILABLE' });
+  res.json({ withdrawals: rows.map((w) => ({ ...w, amountPaise: Number(w.amountPaise), user: { ...w.user, phoneMasked: phoneMasked(w.user.phoneE164), phoneE164: undefined } })), page: input.page, pageSize: input.pageSize, total, payoutIntegration: 'NOT_CONFIGURED' });
 }));
 
 adminRouter.get('/transactions', asyncRoute(async (req, res) => {
@@ -234,9 +365,77 @@ adminRouter.get('/wallets/ledger', asyncRoute(async (req, res) => {
   res.json({ entries: rows.map((e) => ({ id: e.id, userId: e.account.user?.publicId, accountType: e.account.type, currency: e.account.currency, creditPaise: Number(e.creditPaise), debitPaise: Number(e.debitPaise), transaction: e.transaction, createdAt: e.createdAt })), total, page: input.page, pageSize: input.pageSize });
 }));
 
+adminRouter.get('/users/:id/wallet/credits', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const userId = z.string().uuid().parse(req.params.id);
+  const input = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25) }).parse(req.query);
+  const db = databaseRequired();
+  const user = await db.user.findUnique({ where: { id: userId }, select: { id: true } });
+  if (!user) throw new HttpError(404, 'USER_NOT_FOUND', 'User was not found.');
+  const where = { eventType: 'ADMIN_ADJUSTMENT', referenceType: 'ADMIN_ADJUSTMENT', entries: { some: { account: { is: { userId } } } } };
+  const [total, transactions, auditLogs] = await Promise.all([
+    db.ledgerTransaction.count({ where }),
+    db.ledgerTransaction.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize,
+      select: { id: true, actorUserId: true, referenceId: true, createdAt: true, metadata: true,
+        entries: { where: { account: { is: { userId } } }, select: { creditPaise: true } } } }),
+    db.auditLog.findMany({ where: { target: `USER:${userId}`, action: 'ADMIN_WALLET_CREDIT' }, orderBy: { createdAt: 'desc' }, take: input.pageSize,
+      select: { id: true, actorId: true, reason: true, metadata: true, createdAt: true } }),
+  ]);
+  const safeReason = (metadata: unknown) => metadata && typeof metadata === 'object' && !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>).reason === 'string' ? (metadata as Record<string, string>).reason : '';
+  const safeReference = (metadata: unknown) => metadata && typeof metadata === 'object' && !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>).transactionReference === 'string' ? (metadata as Record<string, string>).transactionReference : '';
+  res.json({
+    credits: transactions.map((transaction) => ({ id: transaction.id, transactionReference: transaction.referenceId, adminId: transaction.actorUserId,
+      amountPaise: Number(transaction.entries[0]?.creditPaise ?? 0n), reason: safeReason(transaction.metadata), createdAt: transaction.createdAt })),
+    auditLogs: auditLogs.map((entry) => ({ id: entry.id, adminId: entry.actorId, reason: entry.reason ?? safeReason(entry.metadata), transactionReference: safeReference(entry.metadata), createdAt: entry.createdAt })),
+    total, page: input.page, pageSize: input.pageSize,
+  });
+}));
+
+adminRouter.post('/users/:id/wallet/credit', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  if (!env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_CREDITS_DISABLED', 'Manual wallet credits are disabled by server financial controls. No balance was changed.');
+  assertFinancialOperationsEnabled();
+  const userId = z.string().uuid().parse(req.params.id);
+  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({
+    amountPaise: z.number().int().min(MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE).max(MAX_ADMIN_ADJUSTMENT_PAISE),
+    reason: z.string().trim().min(8).max(500),
+  }).strict().parse(req.body);
+  const db = databaseRequired();
+  const credit = await db.$transaction((tx) => applySuperAdminWalletCredit(tx, { actorUserId: req.auth!.userId, idempotencyKey, targetUserId: userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(credit.replayed ? 200 : 201).json({ credit, message: credit.replayed ? 'This credit was already recorded; no duplicate ledger entry was created.' : 'Manual ADMIN_ADJUSTMENT credit recorded in the immutable ledger.' });
+}));
+
+adminRouter.post('/wallet-adjustments', adminMutationLimit, asyncRoute(async (req, res) => {
+  if (req.auth!.role !== 'ADMIN' || !env.walletAdjustmentAdminUserId || req.auth!.userId !== env.walletAdjustmentAdminUserId) {
+    throw new HttpError(403, 'ADMIN_PERMISSION_DENIED', 'This wallet adjustment action is restricted to the explicitly configured ADMIN account.');
+  }
+  if (!env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_ADJUSTMENTS_DISABLED', 'Admin wallet adjustments are disabled until financial controls are approved. No balance was changed.');
+  assertFinancialOperationsEnabled();
+  const clientKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({
+    targetPublicId: z.string().trim().min(1).max(10).regex(/^[A-Za-z0-9_-]+$/),
+    direction: z.enum(['CREDIT', 'DEBIT']),
+    amountPaise: z.number().int().min(1).max(MAX_ADMIN_ADJUSTMENT_PAISE),
+    reason: z.string().trim().min(8).max(500),
+  }).strict().parse(req.body);
+  const db = databaseRequired();
+  const adjustment = await db.$transaction((tx) => applyAdminWalletAdjustment(tx, {
+    actorUserId: req.auth!.userId, idempotencyKey: clientKey, ...input,
+  }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(adjustment.replayed ? 200 : 201).json({ adjustment, message: adjustment.replayed ? 'This adjustment was already recorded; no duplicate ledger entry was created.' : 'Wallet adjustment was recorded in the immutable ledger.' });
+}));
+
 adminRouter.get('/referrals', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, operationsRoles);
-  const db = databaseRequired(); const input = pageInput.parse(req.query); const [total, rows, config] = await Promise.all([db.referral.count(), db.referral.findMany({ orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, include: { referrer: { select: { publicId: true, displayName: true } }, invitee: { select: { publicId: true, displayName: true, createdAt: true } } } }), db.referralProgramConfig.upsert({ where: { id: 1 }, create: { id: 1 }, update: {} })]);
+  const db = databaseRequired(); const input = pageInput.parse(req.query);
+  const where = input.q ? { OR: [
+    { referrer: { is: { publicId: { contains: input.q, mode: 'insensitive' as const } } } },
+    { referrer: { is: { displayName: { contains: input.q, mode: 'insensitive' as const } } } },
+    { invitee: { is: { publicId: { contains: input.q, mode: 'insensitive' as const } } } },
+    { invitee: { is: { displayName: { contains: input.q, mode: 'insensitive' as const } } } },
+  ] } : {};
+  const [total, rows, config] = await Promise.all([db.referral.count({ where }), db.referral.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, include: { referrer: { select: { publicId: true, displayName: true } }, invitee: { select: { publicId: true, displayName: true, createdAt: true } } } }), db.referralProgramConfig.upsert({ where: { id: 1 }, create: { id: 1 }, update: {} })]);
   res.json({ referrals: rows, total, page: input.page, pageSize: input.pageSize, commissionPolicy: { directRateBps: config.directRateBps, indirectRateBps: config.indirectRateBps, basis: 'Eligible successful INR transactions only after server-side verified deposits or Finance-verified P2P receipt', funding: 'No approved payout funding configured; accruals remain pending and are not credited to wallets.' } });
 }));
 
@@ -252,6 +451,7 @@ adminRouter.get('/referrals/config', asyncRoute(async (req, res) => {
 
 adminRouter.patch('/referrals/config', adminMutationLimit, asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
+  assertFinancialOperationsEnabled();
   const input = z.object({ directRateBps: z.number().int().min(0).max(1000), indirectRateBps: z.number().int().min(0).max(1000), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
   const db = databaseRequired();
   const result = await db.$transaction(async (tx) => {
@@ -265,6 +465,7 @@ adminRouter.patch('/referrals/config', adminMutationLimit, asyncRoute(async (req
 
 adminRouter.patch('/referrals/milestones/:key', adminMutationLimit, asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
+  assertFinancialOperationsEnabled();
   const key = z.enum(['TIER_5', 'TIER_10', 'TIER_20']).parse(req.params.key);
   const input = z.object({ requiredReferrals: z.number().int().min(1).max(100000), qualifyingTopUpPaise: z.number().int().positive().nullable(), rewardAmountPaise: z.number().int().nonnegative(), enabled: z.boolean(), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
   const db = databaseRequired();
@@ -290,7 +491,7 @@ adminRouter.get('/audit-logs', asyncRoute(async (req, res) => {
 adminRouter.get('/system-health', asyncRoute(async (_req, res) => {
   const checkedAt = new Date(); let database: 'online' | 'offline' = 'offline'; let responseTimeMs: number | null = null;
   if (prisma) { const start = Date.now(); try { await prisma.$queryRaw`SELECT 1`; database = 'online'; responseTimeMs = Date.now() - start; } catch { database = 'offline'; } }
-  const providers = await getPaymentMethodAvailability(); res.json({ checkedAt, api: 'online', database, databaseResponseTimeMs: responseTimeMs, payments: providers.methods.map((p) => ({ name: p.name, status: p.status, available: p.available })), payoutProvider: 'UNAVAILABLE', backgroundWorkers: 'NOT_CONFIGURED' });
+  const providers = await getPaymentMethodAvailability(); res.json({ checkedAt, api: 'online', database, databaseResponseTimeMs: responseTimeMs, payments: providers.methods.map((p) => ({ name: p.name, status: p.status, available: p.available })), payoutProvider: 'NOT_CONFIGURED', backgroundWorkers: 'NOT_CONFIGURED' });
 }));
 
 adminRouter.get('/p2p/overview', asyncRoute(async (req, res) => {
@@ -299,11 +500,38 @@ adminRouter.get('/p2p/overview', asyncRoute(async (req, res) => {
 
 adminRouter.get('/disputes', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, financeRoles); const db = databaseRequired(); const input = pageInput.parse(req.query);
-  const [orders, p2pOrders] = await Promise.all([
-    db.order.findMany({ where: { status: 'DISPUTED' }, orderBy: { updatedAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, include: { buyer: { select: { publicId: true, displayName: true } }, seller: { select: { publicId: true, displayName: true } }, history: { orderBy: { createdAt: 'desc' }, take: 5 } } }),
-    db.p2pDepositOrder.findMany({ where: { status: 'DISPUTED' }, orderBy: { updatedAt: 'desc' }, take: input.pageSize, include: { buyer: { select: { publicId: true, displayName: true } }, seller: { select: { publicId: true, displayName: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, createdAt: true } } } }),
+  if (input.status && input.status.toUpperCase() !== 'DISPUTED') return res.json({ disputes: [], total: 0, page: input.page, pageSize: input.pageSize, message: 'Disputes are view-only; resolution workflow is not implemented.' });
+  const search = input.q ? `%${input.q}%` : null;
+  const status = 'DISPUTED' as const;
+  const [countRows, pageKeys] = await Promise.all([
+    db.$queryRaw<Array<{ total: bigint }>>`
+      SELECT (
+        SELECT count(*) FROM orders WHERE status::text = ${status} AND (${search}::text IS NULL OR id::text ILIKE ${search})
+      ) + (
+        SELECT count(*) FROM p2p_deposit_orders WHERE status = ${status} AND (${search}::text IS NULL OR id::text ILIKE ${search} OR reference_id ILIKE ${search})
+      ) AS total
+    `,
+    db.$queryRaw<Array<{ id: string; source: 'ORDER' | 'P2P' }>>`
+      SELECT id, source FROM (
+        SELECT id, updated_at, 'ORDER'::text AS source FROM orders
+          WHERE status::text = ${status} AND (${search}::text IS NULL OR id::text ILIKE ${search})
+        UNION ALL
+        SELECT id, updated_at, 'P2P'::text AS source FROM p2p_deposit_orders
+          WHERE status = ${status} AND (${search}::text IS NULL OR id::text ILIKE ${search} OR reference_id ILIKE ${search})
+      ) AS disputes ORDER BY updated_at DESC, id DESC
+      OFFSET ${(input.page - 1) * input.pageSize} LIMIT ${input.pageSize}
+    `,
   ]);
-  res.json({ disputes: [...orders.map((o) => ({ id: o.id, referenceId: o.id, kind: o.kind, amountPaise: Number(o.amountPaise), status: o.status, buyer: o.buyer, seller: o.seller, createdAt: o.updatedAt, history: o.history })), ...p2pOrders.map((o) => ({ id: o.id, referenceId: o.referenceId, kind: 'P2P', amountPaise: Number(o.amountPaise), status: o.status, buyer: o.buyer, seller: o.seller, createdAt: o.updatedAt, latestClaim: o.claims[0] }))], message: 'Disputes are view-only; resolution workflow is not implemented.' });
+  const orderIds = pageKeys.filter((item) => item.source === 'ORDER').map((item) => item.id);
+  const p2pIds = pageKeys.filter((item) => item.source === 'P2P').map((item) => item.id);
+  const [orders, p2pOrders] = await Promise.all([
+    orderIds.length ? db.order.findMany({ where: { id: { in: orderIds } }, include: { buyer: { select: { publicId: true, displayName: true } }, seller: { select: { publicId: true, displayName: true } }, history: { orderBy: { createdAt: 'desc' }, take: 5 } } }) : [],
+    p2pIds.length ? db.p2pDepositOrder.findMany({ where: { id: { in: p2pIds } }, include: { buyer: { select: { publicId: true, displayName: true } }, seller: { select: { publicId: true, displayName: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, createdAt: true } } } }) : [],
+  ]);
+  const legacyById = new Map(orders.map((o) => [o.id, { id: o.id, referenceId: o.id, kind: o.kind, amountPaise: Number(o.amountPaise), status: o.status, buyer: o.buyer, seller: o.seller, createdAt: o.updatedAt, history: o.history }]));
+  const p2pById = new Map(p2pOrders.map((o) => [o.id, { id: o.id, referenceId: o.referenceId, kind: 'P2P', amountPaise: Number(o.amountPaise), status: o.status, buyer: o.buyer, seller: o.seller, createdAt: o.updatedAt, latestClaim: o.claims[0] }]));
+  const disputes = pageKeys.map((item) => item.source === 'ORDER' ? legacyById.get(item.id) : p2pById.get(item.id)).filter((item) => item !== undefined);
+  res.json({ disputes, total: Number(countRows[0]?.total ?? 0n), page: input.page, pageSize: input.pageSize, message: 'Disputes are view-only; resolution workflow is not implemented.' });
 }));
 
 adminRouter.get('/support/tickets', asyncRoute(async (req, res) => {
@@ -394,6 +622,7 @@ adminRouter.get('/reward-rules', asyncRoute(async (req, res) => {
 
 adminRouter.patch('/reward-rules/:id', adminMutationLimit, asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  assertFinancialOperationsEnabled();
   const input = z.object({ name: z.string().trim().min(2).max(100), eligibility: z.record(z.string(), z.unknown()), amountPaise: z.number().int().min(0).max(100_000_000_000), fundingSource: z.string().trim().max(100).nullable(), enabled: z.boolean(), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
   const db = databaseRequired();
   const rule = await db.$transaction(async (tx) => {
@@ -407,6 +636,8 @@ adminRouter.patch('/reward-rules/:id', adminMutationLimit, asyncRoute(async (req
 }));
 
 adminRouter.get('/admins', asyncRoute(async (req, res) => {
-  requireRole(req.auth!.role, new Set(['SUPER_ADMIN'])); const rows = await databaseRequired().adminUser.findMany({ orderBy: { createdAt: 'asc' }, select: { role: true, createdAt: true, user: { select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true } } } });
-  res.json({ admins: rows.map((x) => ({ ...x, user: { ...x.user, phoneMasked: phoneMasked(x.user.phoneE164), phoneE164: undefined } })), management: 'Role changes are not configured in this admin API.' });
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN'])); const db = databaseRequired(); const input = pageInput.parse(req.query);
+  const where: Prisma.AdminUserWhereInput = input.q ? { OR: [{ user: { is: { publicId: { contains: input.q, mode: 'insensitive' } } } }, { user: { is: { displayName: { contains: input.q, mode: 'insensitive' } } } }] } : {};
+  const [total, rows] = await Promise.all([db.adminUser.count({ where }), db.adminUser.findMany({ where, orderBy: { createdAt: 'asc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, select: { role: true, createdAt: true, user: { select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true } } } })]);
+  res.json({ admins: rows.map((x) => ({ ...x, user: { ...x.user, phoneMasked: phoneMasked(x.user.phoneE164), phoneE164: undefined } })), management: 'Role changes are not configured in this admin API.', total, page: input.page, pageSize: input.pageSize });
 }));

@@ -6,6 +6,7 @@ import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { uuidRef } from '../../lib/security.js';
 import { requireAdmin, requireAuth } from '../../middleware/auth.js';
+import { assertFinancialOperationsEnabled, financialOperationsGate } from '../../middleware/financialOperations.js';
 import { getPaymentMethodAvailability, summarizeWalletActivation } from './availability.js';
 import { validateManualReviewEvidence } from './manualReview.js';
 import { grantVerifiedUpiDepositReward } from './depositReward.js';
@@ -109,13 +110,16 @@ paymentsRouter.get('/wallet-methods', asyncRoute(async (req, res) => {
   });
 }));
 
-paymentsRouter.post('/deposits', asyncRoute(async (req, res) => {
+paymentsRouter.post('/deposits', financialOperationsGate, asyncRoute(async (req, res) => {
   const input = z.object({ amountPaise: z.number().int().min(1), method: z.enum(['UPI', 'Paytm', 'PhonePe', 'Navi', 'Cashfree']) }).strict().parse(req.body);
   if (input.amountPaise % 10_000 !== 0) {
     throw new HttpError(400, 'DEPOSIT_AMOUNT_INCREMENT_INVALID', 'Deposit amount must be in increments of ₹100 (for example ₹100, ₹200, or ₹500).');
   }
   if (input.method === 'UPI' && (input.amountPaise < env.minDepositPaise || input.amountPaise > env.maxDepositPaise)) {
     throw new HttpError(400, 'DEPOSIT_AMOUNT_OUT_OF_RANGE', `Deposit amount must be between ₹${(env.minDepositPaise / 100).toFixed(2)} and ₹${(env.maxDepositPaise / 100).toFixed(2)}.`);
+  }
+  if (input.method === 'UPI' && !env.depositReceiverUpiId) {
+    throw new HttpError(503, 'DEPOSIT_RECEIVER_NOT_CONFIGURED', 'UPI deposits are unavailable because no authorized recipient is configured. No deposit was created.');
   }
   const key = req.header('idempotency-key');
   if (!key || key.length < 8 || key.length > 120) throw new HttpError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send an Idempotency-Key header between 8 and 120 characters.');
@@ -187,12 +191,12 @@ paymentsRouter.post('/deposits', asyncRoute(async (req, res) => {
 
 paymentsRouter.get('/deposits', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await expireUnpaidUpiDeposits(db);
+  if (env.financialOperationsEnabled) await expireUnpaidUpiDeposits(db);
   const deposits = await db.deposit.findMany({ where: { userId: req.auth!.userId }, include: { manualPaymentClaim: { select: { status: true, createdAt: true, reviewedAt: true, reviewReason: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
   res.json({ currency: 'INR', deposits: deposits.map((item) => ({ ...item, amountPaise: Number(item.amountPaise), method: Object.keys(methods).find((name) => methods[name as keyof typeof methods].enum === item.method) ?? (item.method === 'MOBIKWIK' ? 'MobiKwik (legacy)' : item.method) })) });
 }));
 
-paymentsRouter.post('/deposits/:id/cancel', asyncRoute(async (req, res) => {
+paymentsRouter.post('/deposits/:id/cancel', financialOperationsGate, asyncRoute(async (req, res) => {
   const db = databaseRequired();
   const result = await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM deposits WHERE id = ${req.params.id}::uuid FOR UPDATE`;
@@ -211,7 +215,7 @@ paymentsRouter.post('/deposits/:id/cancel', asyncRoute(async (req, res) => {
   res.json({ deposit: { id: result.id, status: result.status, expiresAt: result.expiresAt }, message: result.status === 'CANCELLED' ? 'Deposit cancelled. No wallet credit was made.' : 'This deposit is expired. If you already paid, submit its reference for manual review; do not pay again.' });
 }));
 
-paymentsRouter.post('/deposits/:id/manual-verification', manualClaimLimit, asyncRoute(async (req, res) => {
+paymentsRouter.post('/deposits/:id/manual-verification', financialOperationsGate, manualClaimLimit, asyncRoute(async (req, res) => {
   const input = z.object({ transactionReference: z.string().optional(), evidenceImageBase64: z.string(), evidenceMimeType: z.string() }).strict().parse(req.body);
   const transactionReference = input.transactionReference?.trim() || null;
   if (transactionReference && !validateUpiUtr(transactionReference)) throw new HttpError(400, 'INVALID_UTR_FORMAT', 'If provided, enter the exact 12-digit UTR/RRN from your payment app.');
@@ -251,14 +255,22 @@ paymentsRouter.post('/deposits/:id/manual-verification', manualClaimLimit, async
 
 paymentsRouter.get('/admin/reconciliation/claims', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertFinancialOperationsEnabled();
   const status = typeof req.query.status === 'string' ? req.query.status : 'PENDING_REVIEW';
   if (!['PENDING_REVIEW', 'APPROVED', 'REJECTED', 'SUPERSEDED'].includes(status)) throw new HttpError(400, 'INVALID_CLAIM_STATUS', 'Unsupported reconciliation status.');
-  const claims = await databaseRequired().manualPaymentClaim.findMany({ where: { status }, select: { id: true, depositId: true, userId: true, transactionReference: true, status: true, evidenceMimeType: true, evidenceImage: false, createdAt: true, reviewedAt: true, reviewReason: true, verifiedAmountPaise: true, verifiedCurrency: true, receiverConfirmed: true, deposit: { select: { id: true, merchantReference: true, amountPaise: true, currency: true, status: true, createdAt: true } }, user: { select: { publicId: true, displayName: true, phoneE164: true } } }, orderBy: { createdAt: 'asc' }, take: 100 });
-  res.json({ claims: claims.map((claim) => ({ ...claim, deposit: { ...claim.deposit, amountPaise: Number(claim.deposit.amountPaise) }, user: { ...claim.user, phoneMasked: `${claim.user.phoneE164.slice(0, 3)}••••${claim.user.phoneE164.slice(-3)}`, phoneE164: undefined } })) });
+  const page = z.coerce.number().int().min(1).default(1).parse(req.query.page ?? '1');
+  const pageSize = z.coerce.number().int().min(1).max(100).default(25).parse(req.query.pageSize ?? '25');
+  const db = databaseRequired();
+  const [claims, total] = await Promise.all([
+    db.manualPaymentClaim.findMany({ where: { status }, select: { id: true, depositId: true, userId: true, transactionReference: true, status: true, evidenceMimeType: true, evidenceImage: false, createdAt: true, reviewedAt: true, reviewReason: true, verifiedAmountPaise: true, verifiedCurrency: true, receiverConfirmed: true, deposit: { select: { id: true, merchantReference: true, amountPaise: true, currency: true, status: true, createdAt: true } }, user: { select: { publicId: true, displayName: true, phoneE164: true } } }, orderBy: { createdAt: 'asc' }, skip: (page - 1) * pageSize, take: pageSize }),
+    db.manualPaymentClaim.count({ where: { status } }),
+  ]);
+  res.json({ claims: claims.map((claim) => ({ ...claim, deposit: { ...claim.deposit, amountPaise: Number(claim.deposit.amountPaise) }, user: { ...claim.user, phoneMasked: `${claim.user.phoneE164.slice(0, 3)}••••${claim.user.phoneE164.slice(-3)}`, phoneE164: undefined } })), total, page, pageSize });
 }));
 
 paymentsRouter.get('/admin/reconciliation/claims/:claimId/evidence', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertFinancialOperationsEnabled();
   const claim = await databaseRequired().manualPaymentClaim.findUnique({ where: { id: req.params.claimId }, select: { evidenceImage: true, evidenceMimeType: true } });
   if (!claim?.evidenceImage || !claim.evidenceMimeType) throw new HttpError(404, 'PAYMENT_EVIDENCE_NOT_FOUND', 'No transaction screenshot is attached to this claim.');
   res.set({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline; filename="payment-evidence"' });
@@ -267,6 +279,7 @@ paymentsRouter.get('/admin/reconciliation/claims/:claimId/evidence', requireAdmi
 
 paymentsRouter.post('/admin/reconciliation/claims/:claimId/review', requireAdmin, adminReviewLimit, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertFinancialOperationsEnabled();
   const input = z.object({
     decision: z.enum(['APPROVE', 'REJECT']),
     reason: z.string().trim().min(8).max(500),
@@ -351,10 +364,10 @@ paymentsRouter.post('/admin/reconciliation/claims/:claimId/review', requireAdmin
 
 paymentsRouter.get('/deposits/:id', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await expireUnpaidUpiDeposits(db);
+  if (env.financialOperationsEnabled) await expireUnpaidUpiDeposits(db);
   let deposit = await db.deposit.findFirst({ where: { id: req.params.id, userId: req.auth!.userId } });
   if (!deposit) throw new HttpError(404, 'DEPOSIT_NOT_FOUND', 'Deposit was not found.');
-  if (deposit.method === 'CASHFREE' && deposit.paymentSessionId && ['PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(deposit.status)) {
+  if (env.financialOperationsEnabled && deposit.method === 'CASHFREE' && deposit.paymentSessionId && ['PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(deposit.status)) {
     try {
       const [order, payments] = await Promise.all([getCashfreeOrder(deposit.merchantReference), getCashfreePayments(deposit.merchantReference)]);
       await confirmCashfreeDeposit(deposit.id, order, payments);

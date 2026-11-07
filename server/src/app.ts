@@ -21,6 +21,7 @@ import { p2pRouter } from './modules/p2p/routes.js';
 import { getPaymentMethodAvailability } from './modules/payments/availability.js';
 import { openapi } from './openapi.js';
 import { adminAuthRouter, adminRouter } from './modules/admin/routes.js';
+import { financialOperationsGate } from './middleware/financialOperations.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -57,7 +58,7 @@ app.get('/api/v1/openapi.json', (_req, res) => res.json(openapi));
 app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(undefined, {
   swaggerOptions: { url: '/api/v1/openapi.json' },
 }));
-app.post('/api/v1/webhooks/payments/:provider', (req, res, next) => {
+app.post('/api/v1/webhooks/payments/:provider', financialOperationsGate, (req, res, next) => {
   if (req.params.provider === 'cashfree') return void handleCashfreeWebhook(req, res).catch(next);
   return res.status(503).json({ error: { code: 'PAYMENT_PROVIDER_UNAVAILABLE', message: 'No approved payment adapter is configured for this provider.' } });
 });
@@ -70,7 +71,7 @@ app.use('/api/v1', (req, res, next) => {
     ['/users/me/bank-accounts', 'GET'], ['/users/me/bank-accounts', 'POST'],
     ['/users/me/balance', 'GET'], ['/users/me/transactions', 'GET'], ['/orders', 'GET'], ['/orders', 'POST'],
     ['/withdrawals', 'GET'], ['/withdrawals', 'POST'], ['/notifications', 'GET'], ['/support/tickets', 'GET'], ['/support/tickets', 'POST'],
-    ['/admin/auth/login', 'POST'], ['/admin/me', 'GET'], ['/admin/overview', 'GET'], ['/admin/users', 'GET'], ['/admin/deposits', 'GET'], ['/admin/withdrawals', 'GET'], ['/admin/transactions', 'GET'], ['/admin/wallets/ledger', 'GET'], ['/admin/referrals', 'GET'], ['/admin/referrals/config', 'GET'], ['/admin/referrals/config', 'PATCH'], ['/admin/commissions', 'GET'], ['/admin/providers', 'GET'], ['/admin/audit-logs', 'GET'], ['/admin/system-health', 'GET'], ['/admin/p2p/overview', 'GET'], ['/admin/disputes', 'GET'], ['/admin/support/tickets', 'GET'], ['/admin/admins', 'GET'], ['/admin/reconciliation/claims', 'GET'], ['/admin/notifications', 'GET'], ['/admin/notifications', 'POST'], ['/admin/reward-rules', 'GET'], ['/deposits/orders/my', 'GET'], ['/admin/p2p/offers', 'GET'], ['/admin/p2p/orders', 'GET'], ['/admin/p2p/claims', 'GET'], ['/admin/push-events', 'GET'], ['/admin/push-devices', 'POST'], ['/admin/push-devices', 'DELETE'],
+    ['/admin/auth/login', 'POST'], ['/admin/auth/forgot-password/request-otp', 'POST'], ['/admin/auth/password/reset', 'POST'], ['/admin/me', 'GET'], ['/admin/overview', 'GET'], ['/admin/users', 'GET'], ['/admin/deposits', 'GET'], ['/admin/withdrawals', 'GET'], ['/admin/transactions', 'GET'], ['/admin/wallets/ledger', 'GET'], ['/admin/wallet-adjustments', 'POST'], ['/admin/referrals', 'GET'], ['/admin/referrals/config', 'GET'], ['/admin/referrals/config', 'PATCH'], ['/admin/commissions', 'GET'], ['/admin/providers', 'GET'], ['/admin/audit-logs', 'GET'], ['/admin/system-health', 'GET'], ['/admin/reports', 'GET'], ['/admin/settings', 'GET'], ['/admin/p2p/overview', 'GET'], ['/admin/disputes', 'GET'], ['/admin/support/tickets', 'GET'], ['/admin/admins', 'GET'], ['/admin/reconciliation/claims', 'GET'], ['/admin/notifications', 'GET'], ['/admin/notifications', 'POST'], ['/admin/reward-rules', 'GET'], ['/deposits/orders/my', 'GET'], ['/admin/p2p/offers', 'GET'], ['/admin/p2p/orders', 'GET'], ['/admin/p2p/claims', 'GET'], ['/admin/push-events', 'GET'], ['/admin/push-devices', 'POST'], ['/admin/push-devices', 'DELETE'],
   ].some(([route, method]) => path === route && req.method === method) ||
     (/^\/auth\/otp-status\/[^/]+$/.test(path) && req.method === 'GET') ||
     (/^\/deposits\/[^/]+$/.test(path) && req.method === 'GET') ||
@@ -93,6 +94,8 @@ app.use('/api/v1', (req, res, next) => {
     (/^\/admin\/p2p\/claims\/[^/]+\/evidence$/.test(path) && req.method === 'GET') ||
     (/^\/admin\/p2p\/offers\/[^/]+\/cancel$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/users\/[^/]+$/.test(path) && req.method === 'GET') ||
+    (/^\/admin\/users\/[^/]+\/wallet\/credits$/.test(path) && req.method === 'GET') ||
+    (/^\/admin\/users\/[^/]+\/wallet\/credit$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/users\/[^/]+\/status$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/disputes$/.test(path) && req.method === 'GET') ||
     (/^\/admin\/reconciliation\/claims\/[^/]+\/review$/.test(path) && req.method === 'POST') ||

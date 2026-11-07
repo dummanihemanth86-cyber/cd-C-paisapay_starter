@@ -65,6 +65,7 @@ Do not paste a GitHub token or credential in chat. `render.yaml` is at repositor
    - `SESSION_HASH_SECRET`: generate privately, e.g. `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`.
    - `BANK_ACCOUNT_ENCRYPTION_KEY`: generate a distinct 32-byte key, e.g. `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
    - `RENFLAIR_API_KEY`: active production key from the OTP provider.
+   - `DEPOSIT_RECEIVER_UPI_ID`: leave unset unless UPI instructions are intentionally enabled. If set, use only a merchant VPA independently confirmed through the authorized account owner and a tested Finance reconciliation process. Do not treat format validation or a user-entered name as proof of ownership. If unset, UPI deposit creation returns HTTP 503 before writing a deposit; no default receiver is used.
 3. Render sets `PORT`; the API binds to `0.0.0.0` and honors that port. Do not hardcode a Render port. The blueprint health check is `/ready`, which checks PostgreSQL as well as the server process.
 4. Review build and pre-deploy logs. The build runs `npm ci`, `npm run db:generate`, and `npm run build`; pre-deploy runs `npm run db:deploy`; start runs `node dist/src/server.js`.
 5. After deployment, verify `https://YOUR-SERVICE.onrender.com/health` and `/ready`. `/health` only means the process responds; `/ready` must report the database ready.
@@ -120,6 +121,7 @@ For production-connected APKs specifically, use `--profile production-apk` from 
 | `OTP_PROVIDER=renflair-v1` | Render | Required supported live OTP adapter. |
 | `RENFLAIR_API_KEY` | Render secret | OTP provider credential. |
 | `PAYMENT_PROVIDER=disabled` | Render | Required until an approved production payment adapter exists. |
+| `DEPOSIT_RECEIVER_UPI_ID` | Render secret/private setting, conditional | Explicit receiver for manual UPI instructions only after merchant ownership and reconciliation are confirmed. If unset, UPI deposit creation returns HTTP 503. Does not enable automatic payment verification or wallet credit. |
 | `UPI_DEPOSIT_REWARD_ENABLED=false` | Render | Prevents unapproved client-side reward funding. |
 | `WELCOME_BONUS_ENABLED=false` | Render | Development-only feature; must stay off. |
 | `EXPO_PUSH_ACCESS_TOKEN` | Render secret, optional | Authenticated Expo push delivery, if enabled. |

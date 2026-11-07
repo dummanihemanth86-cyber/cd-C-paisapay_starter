@@ -7,7 +7,10 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   HOST: z.string().default('0.0.0.0'),
   APP_ORIGIN: z.string().default(''),
-  DEPOSIT_RECEIVER_UPI_ID: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$/).default('zitch@ptyes'),
+  DEPOSIT_RECEIVER_UPI_ID: z.preprocess(
+    (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$/).optional(),
+  ),
   MIN_DEPOSIT_PAISE: z.coerce.number().int().positive().default(1000),
   MAX_DEPOSIT_PAISE: z.coerce.number().int().positive().default(1_000_000),
   P2P_WITHDRAWAL_OFFER_TTL_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
@@ -29,6 +32,9 @@ const schema = z.object({
   RENFLAIR_V1_API_URL: z.string().url().default('https://sms.renflair.in/V1.php'),
   RENFLAIR_API_KEY: z.string().optional(),
   PAYMENT_PROVIDER: z.enum(['disabled', 'sandbox', 'cashfree-sandbox']).default('disabled'),
+  FINANCIAL_OPERATIONS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  WALLET_ADJUSTMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  WALLET_ADJUSTMENT_ADMIN_USER_ID: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value, z.string().uuid().optional()),
   CASHFREE_CLIENT_ID: z.string().optional(),
   CASHFREE_CLIENT_SECRET: z.string().optional(),
   CASHFREE_API_VERSION: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).default('2026-01-01'),
@@ -127,6 +133,8 @@ if (values.NODE_ENV === 'production') {
   })) throw new Error('Every production APP_ORIGIN must be an HTTPS origin without a path or trailing slash.');
   if (values.OTP_PROVIDER !== 'renflair-v1') throw new Error('Production requires the configured Renflair V1 OTP provider; no other live OTP adapter is implemented.');
   if (values.PAYMENT_PROVIDER !== 'disabled') throw new Error('No production payment provider adapter is implemented in this build. Keep payments disabled until one is approved and implemented.');
+  if (values.FINANCIAL_OPERATIONS_ENABLED) throw new Error('FINANCIAL_OPERATIONS_ENABLED cannot be enabled in production until an authorized payment and payout provider is implemented and independently verified.');
+  if (values.WALLET_ADJUSTMENTS_ENABLED) throw new Error('WALLET_ADJUSTMENTS_ENABLED cannot be enabled in production until financial controls and adjustment funding are approved.');
   if (values.WELCOME_BONUS_ENABLED) throw new Error('WELCOME_BONUS_ENABLED is development-only in this build. Production promotional funding and terms have not been approved.');
 }
 if (values.WELCOME_BONUS_ENABLED && !['development', 'test'].includes(values.NODE_ENV)) {
@@ -172,6 +180,9 @@ export const env = {
   renflairApiKey: values.RENFLAIR_API_KEY,
   renflairConfigured: Boolean(values.RENFLAIR_API_KEY),
   paymentProvider: values.PAYMENT_PROVIDER,
+  financialOperationsEnabled: values.FINANCIAL_OPERATIONS_ENABLED,
+  walletAdjustmentsEnabled: values.WALLET_ADJUSTMENTS_ENABLED,
+  walletAdjustmentAdminUserId: values.WALLET_ADJUSTMENT_ADMIN_USER_ID,
   cashfreeClientId: values.CASHFREE_CLIENT_ID,
   cashfreeClientSecret: values.CASHFREE_CLIENT_SECRET,
   cashfreeApiVersion: values.CASHFREE_API_VERSION,

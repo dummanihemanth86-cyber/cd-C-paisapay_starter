@@ -106,7 +106,7 @@ authRouter.post('/password/login', passwordLoginLimit, passwordPhoneLimit, async
   res.json({ accessToken: pair.accessToken, refreshToken: pair.refreshToken, accessExpiresInSeconds: 900, user: { id: result.user.id, publicId: result.user.publicId, displayName: result.user.displayName, status: result.user.status, referralCode: result.user.referralCode }, welcomeBonus: { status: result.welcomeBonus, amountPaise: result.welcomeBonus === 'CREDITED' ? env.welcomeBonusAmountPaise : 0 } });
 }));
 
-async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | 'REGISTER' | 'PASSWORD_RESET', referralCode?: string) {
+export async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | 'REGISTER' | 'PASSWORD_RESET' | 'ADMIN_PASSWORD_RESET', referralCode?: string) {
   // Production OTP is allowed only through a configured server-side provider;
   // environment validation rejects all other real providers in production.
   if (env.otpProvider === 'disabled' || (env.otpProvider === 'demo' && !env.isTest)) throw new HttpError(503, 'OTP_PROVIDER_UNAVAILABLE', 'OTP delivery is disabled. Contact the app administrator.');

@@ -3,6 +3,7 @@ import { env } from '../../config/env.js';
 import { databaseRequired } from '../../lib/db.js';
 import { HttpError } from '../../lib/http.js';
 import { uuidRef } from '../../lib/security.js';
+import { assertFinancialOperationsEnabled } from '../../middleware/financialOperations.js';
 
 type Tx = Prisma.TransactionClient;
 export const P2P_COMMITTED_ORDER_STATUSES = ['MATCHED', 'PAYMENT_PENDING', 'PAYMENT_EXPIRED_REVIEW', 'CANCELLED_PAYMENT_HOLD', 'PAYMENT_PROCESSING', 'DISPUTED', 'COMPLETED'];
@@ -63,6 +64,7 @@ async function getAccount(tx: Tx, userId: string, type: 'AVAILABLE' | 'RESERVED'
 }
 
 export async function releaseOfferFunds(tx: Tx, offer: { id: string; userId: string; amountPaise: bigint }, actorUserId: string | null, event: 'P2P_WITHDRAWAL_CANCELLED' | 'P2P_WITHDRAWAL_EXPIRED', requestedReleasePaise = offer.amountPaise, releaseReferenceId = offer.id) {
+  assertFinancialOperationsEnabled();
   if (requestedReleasePaise <= 0n) return false;
   const reservationKey = `P2P_WITHDRAWAL_RESERVED:${offer.id}`;
   const reservation = await tx.ledgerTransaction.findUnique({ where: { idempotencyKey: reservationKey }, select: { id: true } });
@@ -92,6 +94,7 @@ export async function releaseOfferFunds(tx: Tx, offer: { id: string; userId: str
 
 /** Move funds into RESERVED only when a buyer actually matches an offer. */
 export async function reserveOfferFunds(tx: Tx, offer: { id: string; userId: string; amountPaise: bigint }, actorUserId: string | null) {
+  assertFinancialOperationsEnabled();
   const idempotencyKey = `P2P_WITHDRAWAL_RESERVED:${offer.id}`;
   const existing = await tx.ledgerTransaction.findUnique({ where: { idempotencyKey }, select: { id: true } });
   if (existing) return true; // Existing offers created by the earlier reserve-on-create flow.
@@ -113,6 +116,7 @@ export async function reserveOfferFunds(tx: Tx, offer: { id: string; userId: str
 
 /** Backfill pre-reservation offers before they can be shown or matched. */
 export async function ensureOpenP2pOffersReserved(tx: Tx, now = new Date(), limit = 500) {
+  assertFinancialOperationsEnabled();
   const offers = await tx.p2pWithdrawalOffer.findMany({ where: { status: { in: ['OPEN', 'PARTIALLY_MATCHED'] }, expiresAt: { gt: now } }, orderBy: { createdAt: 'asc' }, take: limit });
   let reservedCount = 0;
   for (const offer of offers) {
@@ -138,6 +142,7 @@ export async function ensureOpenP2pOffersReserved(tx: Tx, now = new Date(), limi
 
 /** Expire unmatched offers and atomically move their reservation back to available balance. */
 export async function expireP2pOffers(tx: Tx, now = new Date(), limit = 100) {
+  assertFinancialOperationsEnabled();
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM p2p_withdrawal_offers
     WHERE status IN ('OPEN', 'PARTIALLY_MATCHED') AND expires_at <= ${now}
@@ -161,6 +166,7 @@ export async function expireP2pOffers(tx: Tx, now = new Date(), limit = 100) {
 
 /** Expire five-minute buyer deadlines. Retain the seller reservation only after a recorded UPI app handoff. */
 export async function expireUnconfirmedP2pMatches(tx: Tx, now = new Date(), limit = 100) {
+  assertFinancialOperationsEnabled();
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM p2p_deposit_orders
     WHERE status IN ('MATCHED', 'PAYMENT_PENDING') AND expires_at IS NOT NULL AND expires_at <= ${now}
@@ -258,6 +264,7 @@ export async function expireUnconfirmedP2pMatches(tx: Tx, now = new Date(), limi
 }
 
 export async function expireP2pOffersBatch(db: PrismaClient, now = new Date()) {
+  assertFinancialOperationsEnabled();
   return db.$transaction(async (tx) => {
     await expireUnconfirmedP2pMatches(tx, now);
     await expireP2pOffers(tx, now);
@@ -266,6 +273,7 @@ export async function expireP2pOffersBatch(db: PrismaClient, now = new Date()) {
 }
 
 export async function createWithdrawalOffer(input: { userId: string; amountPaise: number; idempotencyKey: string }) {
+  assertFinancialOperationsEnabled();
   const db = databaseRequired();
   const amount = BigInt(input.amountPaise);
   const key = `P2P_WITHDRAWAL:${input.userId}:${input.idempotencyKey}`;

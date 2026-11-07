@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
+import { Prisma } from '../../generated/prisma/client.js';
 import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { uuidRef } from '../../lib/security.js';
 import { requireAdmin, requireAuth } from '../../middleware/auth.js';
+import { assertFinancialOperationsEnabled, financialOperationsGate } from '../../middleware/financialOperations.js';
 import { env } from '../../config/env.js';
 import { grantVerifiedP2pOrderReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../payments/depositReward.js';
 import { grantVerifiedReferralCommission } from '../users/referralCommission.js';
@@ -12,8 +14,21 @@ import { committedP2pAmount, createWithdrawalOffer, deriveP2pOfferStatus, ensure
 
 export const p2pRouter = Router();
 p2pRouter.use(requireAuth);
+// Public P2P reads currently perform expiry/reservation maintenance. Admin
+// routes keep their existing auth and role checks; gated Finance operations
+// assert the feature state after those checks.
+p2pRouter.use((req, res, next) => {
+  const path = req.path;
+  const p2pFinancialPath = path === '/withdrawals'
+    || path.startsWith('/withdrawals/')
+    || path === '/deposits/quick-match'
+    || path.startsWith('/deposits/orders/')
+    || /^\/orders\/[^/]+\/dispute$/.test(path);
+  return p2pFinancialPath ? financialOperationsGate(req, res, next) : next();
+});
 
 const p2pLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, skip: () => env.isTest, message: { error: { code: 'P2P_RATE_LIMITED', message: 'Too many P2P requests. Wait and retry.' } } });
+const adminListInput = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25), q: z.string().trim().max(120).optional(), status: z.string().trim().max(40).optional() });
 const idempotencyHeader = (req: import('express').Request) => {
   const key = req.header('idempotency-key');
   if (!key || key.length < 8 || key.length > 120) throw new HttpError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send an Idempotency-Key header between 8 and 120 characters.');
@@ -382,21 +397,31 @@ p2pRouter.post('/orders/:id/dispute', p2pLimit, asyncRoute(async (req, res) => {
 
 p2pRouter.get('/admin/p2p/offers', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'OPERATIONS', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'P2P_REVIEW_REQUIRED', 'Operations or Finance access is required.');
-  const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
-  const offers = await databaseRequired().p2pWithdrawalOffer.findMany({ where: q ? { referenceId: { contains: q, mode: 'insensitive' } } : {}, include: { user: { select: { id: true, publicId: true, phoneE164: true, displayName: true } }, orders: { include: { claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, createdAt: true, reviewReason: true, evidenceReference: true } } } } }, orderBy: { createdAt: 'desc' }, take: 200 });
+  const input = adminListInput.parse(req.query);
+  const where = { ...(input.q ? { referenceId: { contains: input.q, mode: 'insensitive' as const } } : {}), ...(input.status ? { status: input.status as never } : {}) };
+  const db = databaseRequired();
+  const [total, offers] = await Promise.all([
+    db.p2pWithdrawalOffer.count({ where }),
+    db.p2pWithdrawalOffer.findMany({ where, include: { user: { select: { id: true, publicId: true, phoneE164: true, displayName: true } }, orders: { orderBy: { createdAt: 'desc' }, take: 25, include: { claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, createdAt: true, reviewReason: true, evidenceReference: true } } } }, _count: { select: { orders: true } } }, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize }),
+  ]);
+  const orderTotals = offers.length ? await db.p2pDepositOrder.groupBy({ by: ['withdrawalOfferId', 'status'], where: { withdrawalOfferId: { in: offers.map((offer) => offer.id) } }, _sum: { amountPaise: true } }) : [];
+  const totalsByOffer = new Map<string, Array<{ status: string; amountPaise: bigint }>>();
+  for (const row of orderTotals) totalsByOffer.set(row.withdrawalOfferId, [...(totalsByOffer.get(row.withdrawalOfferId) ?? []), { status: row.status, amountPaise: row._sum.amountPaise ?? 0n }]);
   res.json({ offers: offers.map((offer) => {
-    const completed = offer.orders.filter((order) => order.status === 'COMPLETED').reduce((sum, order) => sum + order.amountPaise, 0n);
-    const active = offer.orders.filter((order) => P2P_ACTIVE_ORDER_STATUSES.includes(order.status)).reduce((sum, order) => sum + order.amountPaise, 0n);
-    const held = offer.orders.filter((order) => P2P_HELD_ORDER_STATUSES.includes(order.status)).reduce((sum, order) => sum + order.amountPaise, 0n);
+    const aggregateOrders = totalsByOffer.get(offer.id) ?? [];
+    const completed = aggregateOrders.filter((order) => order.status === 'COMPLETED').reduce((sum, order) => sum + order.amountPaise, 0n);
+    const active = aggregateOrders.filter((order) => P2P_ACTIVE_ORDER_STATUSES.includes(order.status)).reduce((sum, order) => sum + order.amountPaise, 0n);
+    const held = aggregateOrders.filter((order) => P2P_HELD_ORDER_STATUSES.includes(order.status)).reduce((sum, order) => sum + order.amountPaise, 0n);
     const committed = completed + active + held;
-    const derivedStatus = deriveP2pOfferStatus(offer.status, offer.amountPaise, offer.orders);
+    const derivedStatus = deriveP2pOfferStatus(offer.status, offer.amountPaise, aggregateOrders);
     const matchable = !['CANCELLED', 'EXPIRED', 'SETTLED'].includes(offer.status);
-    return { ...offer, status: derivedStatus, amountPaise: Number(offer.amountPaise), completedAmountPaise: Number(completed), activeReservedPaise: Number(active), disputedHeldPaise: Number(held), matchedAmountPaise: Number(committed), remainingAmountPaise: Number(offer.amountPaise > committed ? offer.amountPaise - committed : 0n), availableAmountPaise: Number(matchable && offer.amountPaise > committed ? offer.amountPaise - committed : 0n), payeeVpa: undefined, user: { ...offer.user, phoneMasked: `${offer.user.phoneE164.slice(0, 3)}••••${offer.user.phoneE164.slice(-3)}`, phoneE164: undefined }, orders: offer.orders.map((order) => ({ ...order, amountPaise: Number(order.amountPaise), buyer: 'REDACTED_FOR_ADMIN_LIST', verificationStatus: order.claims[0]?.status ?? 'NOT_SUBMITTED', handoffStatus: order.paymentHandoffStartedAt ? 'UPI_HANDOFF_REPORTED' : order.paymentDetailsShownAt ? 'PAYMENT_DETAILS_SHOWN' : 'NOT_STARTED' })) };
-  }) });
+    return { ...offer, status: derivedStatus, amountPaise: Number(offer.amountPaise), completedAmountPaise: Number(completed), activeReservedPaise: Number(active), disputedHeldPaise: Number(held), matchedAmountPaise: Number(committed), remainingAmountPaise: Number(offer.amountPaise > committed ? offer.amountPaise - committed : 0n), availableAmountPaise: Number(matchable && offer.amountPaise > committed ? offer.amountPaise - committed : 0n), payeeVpa: undefined, user: { ...offer.user, phoneMasked: `${offer.user.phoneE164.slice(0, 3)}••••${offer.user.phoneE164.slice(-3)}`, phoneE164: undefined }, orders: offer.orders.map((order) => ({ ...order, amountPaise: Number(order.amountPaise), buyer: 'REDACTED_FOR_ADMIN_LIST', verificationStatus: order.claims[0]?.status ?? 'NOT_SUBMITTED', handoffStatus: order.paymentHandoffStartedAt ? 'UPI_HANDOFF_REPORTED' : order.paymentDetailsShownAt ? 'PAYMENT_DETAILS_SHOWN' : 'NOT_STARTED' })), orderCount: offer._count.orders };
+  }), page: input.page, pageSize: input.pageSize, total });
 }));
 
 p2pRouter.post('/admin/p2p/offers/:id/cancel', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'OPERATIONS', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'P2P_REVIEW_REQUIRED', 'Operations or Finance access is required.');
+  assertFinancialOperationsEnabled();
   const input = z.object({ reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
   const db = databaseRequired();
   const offer = await db.$transaction(async (tx) => {
@@ -418,30 +443,37 @@ p2pRouter.post('/admin/p2p/offers/:id/cancel', requireAdmin, asyncRoute(async (r
 
 p2pRouter.get('/admin/p2p/orders', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'OPERATIONS', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'P2P_REVIEW_REQUIRED', 'Operations or Finance access is required.');
-  const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
-  const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : '';
+  const input = adminListInput.parse(req.query);
   const db = databaseRequired();
-  const orders = await db.p2pDepositOrder.findMany({
-    where: { ...(q ? { OR: [{ referenceId: { contains: q, mode: 'insensitive' as const } }, { withdrawalOffer: { referenceId: { contains: q, mode: 'insensitive' as const } } }] } : {}), ...(status ? { status } : {}) },
+  const where: Prisma.P2pDepositOrderWhereInput = {
+    ...(input.q ? { OR: [
+      { referenceId: { contains: input.q, mode: 'insensitive' } },
+      { withdrawalOffer: { is: { referenceId: { contains: input.q, mode: 'insensitive' } } } },
+    ] } : {}),
+    ...(input.status ? { status: input.status } : {}),
+  };
+  const [total, orders] = await Promise.all([db.p2pDepositOrder.count({ where }), db.p2pDepositOrder.findMany({
+    where,
     include: { buyer: { select: { id: true, publicId: true, displayName: true, phoneE164: true } }, seller: { select: { id: true, publicId: true, displayName: true, phoneE164: true } }, withdrawalOffer: { select: { id: true, referenceId: true, status: true, paymentMethod: true, amountPaise: true, createdAt: true, expiresAt: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, reviewReason: true, evidenceReference: true, verifiedAmountPaise: true, verifiedCurrency: true, receiverConfirmed: true, reviewedAt: true, createdAt: true } } },
-    orderBy: { createdAt: 'desc' }, take: 200,
-  });
+    orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize,
+  })]);
   const targetIds = orders.flatMap((order) => [`P2P_DEPOSIT_ORDER:${order.id}`, `P2P_WITHDRAWAL_OFFER:${order.withdrawalOfferId}`]);
   const audit = targetIds.length ? await db.auditLog.findMany({ where: { target: { in: targetIds } }, orderBy: { createdAt: 'asc' }, take: 3000 }) : [];
   const timelineByTarget = new Map<string, typeof audit>();
   for (const event of audit) timelineByTarget.set(event.target, [...(timelineByTarget.get(event.target) ?? []), event]);
-  res.json({ orders: orders.map((order) => ({ ...order, amountPaise: Number(order.amountPaise), withdrawalOffer: { ...order.withdrawalOffer, amountPaise: Number(order.withdrawalOffer.amountPaise) }, buyer: { ...order.buyer, phoneMasked: `${order.buyer.phoneE164.slice(0, 3)}••••${order.buyer.phoneE164.slice(-3)}`, phoneE164: undefined }, seller: { ...order.seller, phoneMasked: `${order.seller.phoneE164.slice(0, 3)}••••${order.seller.phoneE164.slice(-3)}`, phoneE164: undefined }, claims: order.claims.map((claim) => ({ ...claim, verifiedAmountPaise: claim.verifiedAmountPaise === null ? null : Number(claim.verifiedAmountPaise) })), timeline: timelineByTarget.get(`P2P_DEPOSIT_ORDER:${order.id}`) ?? [] })) });
+  res.json({ orders: orders.map((order) => ({ ...order, amountPaise: Number(order.amountPaise), withdrawalOffer: { ...order.withdrawalOffer, amountPaise: Number(order.withdrawalOffer.amountPaise) }, buyer: { ...order.buyer, phoneMasked: `${order.buyer.phoneE164.slice(0, 3)}••••${order.buyer.phoneE164.slice(-3)}`, phoneE164: undefined }, seller: { ...order.seller, phoneMasked: `${order.seller.phoneE164.slice(0, 3)}••••${order.seller.phoneE164.slice(-3)}`, phoneE164: undefined }, claims: order.claims.map((claim) => ({ ...claim, verifiedAmountPaise: claim.verifiedAmountPaise === null ? null : Number(claim.verifiedAmountPaise) })), timeline: timelineByTarget.get(`P2P_DEPOSIT_ORDER:${order.id}`) ?? [] })), page: input.page, pageSize: input.pageSize, total });
 }));
 
 p2pRouter.get('/admin/p2p/claims', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  const db = databaseRequired();
-  const claims = await db.p2pPaymentClaim.findMany({ where: { status: 'PENDING_REVIEW' }, select: {
+  assertFinancialOperationsEnabled();
+  const db = databaseRequired(); const input = adminListInput.parse(req.query);
+  const [total, claims] = await Promise.all([db.p2pPaymentClaim.count({ where: { status: 'PENDING_REVIEW' } }), db.p2pPaymentClaim.findMany({ where: { status: 'PENDING_REVIEW' }, select: {
     id: true, orderId: true, userId: true, transactionReference: true, status: true, claimedAmountPaise: true, claimedPaidAt: true,
     evidenceMimeType: true, evidenceReference: true, reviewReason: true, createdAt: true,
     order: { select: { id: true, referenceId: true, amountPaise: true, status: true, createdAt: true, expiresAt: true, paymentDetailsShownAt: true, paymentHandoffStartedAt: true, cancellationRequestedAt: true, seller: { select: { id: true, publicId: true } }, withdrawalOffer: { select: { id: true, referenceId: true, payeeVpa: true, payeeName: true } } } },
     user: { select: { id: true, publicId: true, phoneE164: true, displayName: true } },
-  }, orderBy: { createdAt: 'asc' }, take: 200 });
+  }, orderBy: { createdAt: 'asc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize })]);
   const events = claims.length ? await db.auditLog.findMany({ where: { target: { in: claims.map((claim) => `P2P_DEPOSIT_ORDER:${claim.orderId}`) } }, orderBy: { createdAt: 'asc' }, select: { target: true, action: true, createdAt: true, reason: true } }) : [];
   const eventMap = new Map<string, typeof events>();
   for (const event of events) eventMap.set(event.target, [...(eventMap.get(event.target) ?? []), event]);
@@ -449,11 +481,12 @@ p2pRouter.get('/admin/p2p/claims', requireAdmin, asyncRoute(async (req, res) => 
     ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType),
     user: { ...claim.user, phoneMasked: `${claim.user.phoneE164.slice(0, 3)}••••${claim.user.phoneE164.slice(-3)}`, phoneE164: undefined },
     order: { ...claim.order, amountPaise: Number(claim.order.amountPaise), timestamps: p2pOrderTimestamps(claim.order, eventMap.get(`P2P_DEPOSIT_ORDER:${claim.orderId}`) ?? []), timeline: eventMap.get(`P2P_DEPOSIT_ORDER:${claim.orderId}`) ?? [], withdrawalOffer: claim.order.withdrawalOffer },
-  })) });
+  })), page: input.page, pageSize: input.pageSize, total });
 }));
 
 p2pRouter.get('/admin/p2p/claims/:claimId', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertFinancialOperationsEnabled();
   const db = databaseRequired();
   const claim = await db.p2pPaymentClaim.findUnique({ where: { id: req.params.claimId }, select: {
     id: true, status: true, transactionReference: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true, createdAt: true, reviewReason: true,
@@ -474,6 +507,7 @@ p2pRouter.get('/admin/p2p/claims/:claimId', requireAdmin, asyncRoute(async (req,
 
 p2pRouter.get('/admin/p2p/claims/:claimId/evidence', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertFinancialOperationsEnabled();
   const claim = await databaseRequired().p2pPaymentClaim.findUnique({ where: { id: req.params.claimId }, select: { evidenceImage: true, evidenceMimeType: true } });
   if (!claim?.evidenceImage || !claim.evidenceMimeType) throw new HttpError(404, 'P2P_PAYMENT_EVIDENCE_NOT_FOUND', 'No payment image is attached to this claim.');
   res.set({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline; filename="p2p-payment-evidence"' });
@@ -482,6 +516,7 @@ p2pRouter.get('/admin/p2p/claims/:claimId/evidence', requireAdmin, asyncRoute(as
 
 p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertFinancialOperationsEnabled();
   const input = z.object({ decision: z.enum(['APPROVE', 'REJECT']), reason: z.string().trim().min(8).max(500), evidenceReference: z.string().trim().min(3).max(160), verifiedTransactionReference: transactionReference.optional(), verifiedAmountPaise: z.number().int().positive().optional(), verifiedCurrency: z.string().length(3).optional(), verifiedPayeeVpa: z.string().trim().min(3).max(100).optional(), receiverConfirmed: z.boolean().optional(), paymentNotReceivedConfirmed: z.boolean().optional() }).strict().superRefine((value, ctx) => {
     if (value.decision === 'APPROVE') for (const key of ['verifiedTransactionReference', 'verifiedAmountPaise', 'verifiedCurrency', 'verifiedPayeeVpa', 'receiverConfirmed'] as const) if (value[key] === undefined) ctx.addIssue({ code: 'custom', path: [key], message: 'Required for approval.' });
     if (value.decision === 'REJECT' && value.paymentNotReceivedConfirmed !== true) ctx.addIssue({ code: 'custom', path: ['paymentNotReceivedConfirmed'], message: 'Finance must confirm from recipient-side records that no payment was received and no late payment is pending before releasing the reservation.' });

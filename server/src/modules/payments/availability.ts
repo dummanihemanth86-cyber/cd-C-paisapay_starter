@@ -98,6 +98,7 @@ export async function getPaymentMethodAvailability() {
   }
 
   const byMethod = new Map(configurations.map((item) => [item.method, item]));
+  const receiverVpa = env.depositReceiverUpiId ?? null;
   const methods = paymentMethodRules.map((rule) => {
     const providerConfigured = rule.method === 'CASHFREE' && cashfreeSandboxAvailable();
     return {
@@ -119,7 +120,7 @@ export async function getPaymentMethodAvailability() {
   return {
     currency: 'INR',
     upiDeposit: {
-      receiverVpa: env.depositReceiverUpiId,
+      receiverVpa,
       minAmountPaise: env.minDepositPaise,
       maxAmountPaise: env.maxDepositPaise,
       rewardPercentBps: env.upiDepositRewardPercentBps,
@@ -127,16 +128,20 @@ export async function getPaymentMethodAvailability() {
       rewardMessage: env.upiDepositRewardEnabled
         ? 'Development test rewards are funded from the local reward pool and are credited only after an eligible UPI deposit is independently verified, subject to available pool balance.'
         : 'A reward estimate can be shown, but no funded deposit reward program is active; no reward will be credited.',
-      paymentInitiation: 'UPI_INTENT',
+      paymentInitiation: receiverVpa ? 'UPI_INTENT' : 'UNAVAILABLE',
       verificationMode: 'MANUAL_RECONCILIATION',
       automaticVerificationAvailable: false,
-      message: 'UPI app handoff is available. Payment remains pending until Finance independently verifies the merchant receipt.',
+      message: receiverVpa
+        ? 'UPI app handoff is available. Payment remains pending until Finance independently verifies the merchant receipt.'
+        : 'UPI deposits are unavailable because no recipient is configured. No deposit request can be created.',
     },
     // A configured Cashfree sandbox is useful for checkout testing but is not
     // a live payment route and never credits redeemable funds.
     livePaymentsEnabled: false,
     sandboxPaymentsEnabled: methods.some((method) => method.method === 'CASHFREE' && method.available),
-    availabilityMessage: methods.some((method) => method.available)
+    availabilityMessage: !receiverVpa
+      ? 'UPI deposits are unavailable because no recipient is configured. No approved, operational payment provider is configured.'
+      : methods.some((method) => method.available)
       ? 'Cashfree sandbox checkout is enabled for testing only. It does not add redeemable balance.'
       : 'UPI payments are temporarily unavailable. No approved, operational payment provider is configured.',
     methods,

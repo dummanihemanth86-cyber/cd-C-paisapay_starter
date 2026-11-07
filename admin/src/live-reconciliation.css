@@ -38,6 +38,7 @@
 .admin-metric:hover { transform: translateY(-2px); border-color: #3677c4; box-shadow: 0 14px 30px #02061770; }
 .live-admin button { box-shadow: 0 6px 18px #071a3c55; transition: filter .16s ease, transform .16s ease, box-shadow .16s ease; }
 .live-admin button:hover:not(:disabled) { filter: brightness(1.1); box-shadow: 0 9px 24px #071a3c88; }
+.financial-action-banner{display:flex;flex-direction:column;gap:5px;padding:13px 16px;margin:0 0 14px;border:1px solid #e6c77c;border-radius:12px;background:#332b17;color:#fcd34d;font-size:13px;line-height:1.55}.financial-action-banner strong{color:#fde68a;font-size:14px}.financial-action-banner span{color:#f8e7bb}
 .live-admin input:focus, .live-admin select:focus, .live-admin textarea:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px #2563eb2c; outline: none; }
 .admin-table-wrap { border: 1px solid #263b58; border-radius: 14px; background: #0b1728a6; }
 .admin-table th { position: sticky; top: 0; z-index: 1; background: #12233a; }

@@ -75,6 +75,7 @@ enum LedgerAccountType {
   SETTLEMENT_CASH
   PAYMENT_SUSPENSE
   REWARD_FUND
+  ADMIN_ADJUSTMENT_FUND
 }
 
 enum AdminRole {
