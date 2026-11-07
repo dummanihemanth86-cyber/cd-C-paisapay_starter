@@ -53,6 +53,8 @@ integration('Android gateway OTP routes (PostgreSQL integration)', () => {
       await db.$transaction(async (tx) => {
         await tx.otpChallenge.deleteMany({ where: { phoneE164: { in: phones } } });
         if (userIds.length) {
+          await tx.auditLog.deleteMany({ where: { actorId: { in: userIds } } });
+          await tx.session.deleteMany({ where: { userId: { in: userIds } } });
           await tx.ledgerAccount.deleteMany({ where: { userId: { in: userIds } } });
           await tx.user.deleteMany({ where: { id: { in: userIds } } });
         }
@@ -106,6 +108,43 @@ integration('Android gateway OTP routes (PostgreSQL integration)', () => {
     await request(app).get('/api/v1/users/me').set('Authorization', `Bearer ${oldLogin.body.accessToken}`).expect(401);
     await request(app).post('/api/v1/auth/password/login').send({ phoneE164, password: 'old-password-123' }).expect(401);
     await request(app).post('/api/v1/auth/password/login').send({ phoneE164, password: 'new-password-456' }).expect(200);
+  });
+
+  it('resets only active Admin accounts using a six-digit provider OTP and revokes every old session', async () => {
+    const phoneE164 = newPhone();
+    const oldPassword = 'OldAdminPassword123!';
+    const newPassword = 'NewAdminPassword456!';
+    const admin = await db.user.create({ data: { phoneE164, displayName: 'Admin Reset Test', status: 'ACTIVE', passwordHash: await hashPassword(oldPassword) } });
+    await db.adminUser.create({ data: { userId: admin.id, role: 'ADMIN' } });
+    const oldSession = await request(app).post('/api/v1/admin/auth/login').send({ phoneE164, password: oldPassword }).expect(200);
+
+    const requested = await request(app).post('/api/v1/admin/auth/forgot-password/request-otp').send({ phoneE164 }).expect(202);
+    expect(requested.body.message).toMatch(/If an active Admin account exists/);
+    expect(JSON.stringify(requested.body)).not.toMatch(/\b\d{6}\b/);
+    const challenge = await db.otpChallenge.findUniqueOrThrow({ where: { id: requested.body.challengeId } });
+    expect(challenge.purpose).toBe('ADMIN_PASSWORD_RESET');
+    expect(challenge.codeHash).not.toBe(lastMessage.match(/code is (\d{6})/)?.[1]);
+    const code = lastMessage.match(/code is (\d{6})/)?.[1];
+    expect(code).toBeDefined();
+
+    await request(app).post('/api/v1/admin/auth/password/reset').send({ phoneE164, challengeId: requested.body.challengeId, code: '2321', newPassword }).expect(400);
+    await request(app).post('/api/v1/auth/password/reset').send({ phoneE164, challengeId: requested.body.challengeId, code, newPassword }).expect(401);
+    await request(app).post('/api/v1/admin/auth/password/reset').send({ phoneE164, challengeId: requested.body.challengeId, code: `${(Number(code) + 1) % 1_000_000}`.padStart(6, '0'), newPassword }).expect(401);
+    await request(app).post('/api/v1/admin/auth/password/reset').send({ phoneE164, challengeId: requested.body.challengeId, code, newPassword }).expect(200);
+    await request(app).get('/api/v1/admin/me').set('Authorization', `Bearer ${oldSession.body.accessToken}`).expect(401);
+    await request(app).post('/api/v1/admin/auth/login').send({ phoneE164, password: oldPassword }).expect(401);
+    await request(app).post('/api/v1/admin/auth/login').send({ phoneE164, password: newPassword }).expect(200);
+  });
+
+  it('does not send reset SMS or change a normal user password through Admin reset endpoints', async () => {
+    const phoneE164 = newPhone();
+    const oldPassword = 'NormalUserPassword123!';
+    await db.user.create({ data: { phoneE164, displayName: 'Non Admin Reset Test', status: 'ACTIVE', passwordHash: await hashPassword(oldPassword) } });
+    const requested = await request(app).post('/api/v1/admin/auth/forgot-password/request-otp').send({ phoneE164 }).expect(202);
+    expect(lastMessage).toBe('');
+    expect(await db.otpChallenge.count({ where: { phoneE164, purpose: 'ADMIN_PASSWORD_RESET' } })).toBe(0);
+    await request(app).post('/api/v1/admin/auth/password/reset').send({ phoneE164, challengeId: requested.body.challengeId, code: '123456', newPassword: 'NewNormalUserPassword456!' }).expect(401);
+    await request(app).post('/api/v1/auth/password/login').send({ phoneE164, password: oldPassword }).expect(200);
   });
 
   it('does not report gateway network failure as an accepted SMS', async () => {
