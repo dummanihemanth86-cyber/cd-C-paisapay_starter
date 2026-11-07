@@ -203,3 +203,154 @@ Do not turn either financial flag on or seed the adjustment account with an arbi
 - GitHub reports no deployment records or workflow run for `98e878d`. Render CLI/API credentials are not configured in this workspace, and the Render dashboard opens at sign-in. A push was made, but an actual Render deployment has **not been confirmed**. Do not infer deployment merely from `/ready` or the existing 401 responses.
 - The 1.0.3 standalone APK build succeeded and the package/version/signer/API URL/SHA-256 details are listed above. The debug certificate fingerprint matches the previously verified installed app fingerprint. ADB currently lists no connected device; therefore `adb install -r`, data preservation after install, app launch, and the Settings diagnostic screen have **not** been verified in this turn.
 - No financial controls were enabled and no production wallet or ledger mutation was performed.
+
+### Render dashboard diagnosis (2026-11-07)
+
+- The Render dashboard account contains one service, `paisapay-api1`, linked to this repository's `main` branch with Auto-Deploy enabled. Its assigned service URL is `https://paisapay-api1.onrender.com`.
+- Render shows the deployment for commit `98e878d` as **failed**. Its build succeeded; the process exited during production configuration validation because `SESSION_HASH_SECRET`, `BANK_ACCOUNT_ENCRYPTION_KEY`, and `OTP_PROVIDER=renflair-v1` are missing. The Render Environment page lists only database-related variables (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DIRECT_DATABASE_URL`, and `NEON_BRANCH`); `RENFLAIR_API_KEY` is also absent there. Secret values were not viewed or copied.
+- The documented production host `https://paisapay-api.onrender.com/ready` returned 200/database ready, while the Render-assigned `paisapay-api1.onrender.com` health request timed out after 120 seconds. The Render service has no custom domain shown in its settings. Therefore the failed `paisapay-api1` service cannot yet be treated as the production service serving `paisapay-api.onrender.com`; the target-service mapping needs owner confirmation.
+- No environment variable was added or changed, no secret was generated or exposed, and no manual redeploy was triggered. The local settings diagnostic remains undeployed. Account presence/balance and Settings screen remain unverified in production.
+
+### Correct production Render service and deployment verification (2026-11-07)
+
+This section supersedes the preceding Render dashboard diagnosis for production routing and deployment status. The correct production service is `paisapay-api`; the unrelated `paisapay-api1` service is not the owner of `https://paisapay-api.onrender.com`.
+
+- Render service `paisapay-api` (service ID `srv-dbkbglnb9u1s7386p8hg`) is linked to repository `dummanihemanth86-cyber/cd-C-paisapay_starter`, branch `main`, and owns `https://paisapay-api.onrender.com`.
+- Manually deployed GitHub `main` commit `672a148b353422794fa8612c4404a49a451f171c` (deployment `dep-dbnj53ou01pc73ctej2g`). Render reports **Deploy succeeded | Live**. Build logs show the expected commit checkout, successful build, and service-start message `PaisaPay API started` with database configured. The API startup log reports OTP provider `renflair-v1` and payment provider `disabled`.
+- The production Environment page contains `SESSION_HASH_SECRET`, `BANK_ACCOUNT_ENCRYPTION_KEY`, `OTP_PROVIDER`, and `RENFLAIR_API_KEY`. Secret values were left masked, not read, copied, or changed. Presence of `RENFLAIR_API_KEY` was confirmed; its provider-side validity was not separately exercised.
+- Browser GET `https://paisapay-api.onrender.com/ready` returned `{"ok":true,"service":"paisapay-api","dependencies":{"database":"ready"}}`.
+- Browser GET `https://paisapay-api.onrender.com/api/v1/admin/settings` without an authorized session returned `401 AUTH_REQUIRED`. This confirms the diagnostics route is deployed and protected; it does not verify the authenticated settings diagnostic payload, account presence, or ledger balance. No authorized Admin session was available to this verification process.
+- Render startup logs show financial operations remain disabled. No wallet credit or production balance/ledger mutation was made. The Render deploy used the existing configured environment; no secret values were modified.
+- Local DNS/network restrictions prevented a PowerShell HTTP check (`No such host is known`); browser verification above succeeded. Current local `HEAD` and `origin/main` both resolve to `672a148b353422794fa8612c4404a49a451f171c`. This verification update is local only; no commit was made for the report update.
+
+### Authenticated Admin phone verification (2026-11-07)
+
+- Started the local ADB server with the required host access. `adb devices -l` reports device `c843d7a11022` as `device` (authorized), product `moonstone_p_in`, model `22111317PI`. No USB debugging approval prompt was pending.
+- `com.paisapay.admin` was already installed as version `1.0.2` (`versionCode=3`). The app was launched in place; it was not uninstalled, updated, or cleared. The sign-in form appeared briefly during startup, then the persisted session restored and the app displayed `SUPER ADMIN · Server Authorized`. No password or token was entered, reset, or extracted.
+- Authenticated API results were inspected only through the Admin UI. No customer identifiers, phone values, audit content, or ledger entries were recorded in this report.
+
+| Check | Endpoint / evidence | Result |
+|---|---|---|
+| Role/session | `GET /api/v1/admin/me` (app session bootstrap) | Confirmed `SUPER_ADMIN`; UI displayed `Server Authorized`. |
+| User list | `GET /api/v1/admin/users?page=1&pageSize=25` | After clearing inherited temporary search filters, one user row appeared and no generic API error was displayed. |
+| User detail | `GET /api/v1/admin/users/:id` | Opened the detail panel for the visible result; identifying fields were not recorded. |
+| Aggregate report | `GET /api/v1/admin/reports?report=registrations&from=2026-10-09&to=2026-11-07` | Authenticated report screen returned a summary of 1 registration record for that date range. No row-level data was exported. |
+| Wallet ledger | `GET /api/v1/admin/wallets/ledger?page=1&pageSize=25` | Page 1 of 1; 0 ledger rows returned. This is not a diagnostic of the dedicated adjustment account's balance. |
+| Audit log | `GET /api/v1/admin/audit-logs?page=1&pageSize=25` | Authenticated audit screen displayed 5 entries; their contents were not opened or recorded. |
+| Credit safety gate | `GET /api/v1/admin/me` plus the Super Admin Credits screen | UI states wallet credits are disabled because required financial controls and a funded adjustment account are not configured. No credit was submitted. |
+
+- Settings diagnostic result is **not verified**. The screen branch is present in `apps/admin-app/App.js`, but the app's `NAV` list has no `settings` entry, so the installed Admin UI has no Settings tab to call `GET /api/v1/admin/settings`. The installed binary is also version 1.0.2. No token was extracted and no direct authenticated request was constructed outside the app.
+- Therefore actual production `ADMIN_ADJUSTMENT_FUND` record presence and its ledger balance remain unknown. The verified user-facing blocker is that server controls and funding are not ready. The backend diagnostic implementation additionally hard-codes `independentApprovalImplemented=false`, `adminAdjustmentControlsReady=false`, `superAdminCreditPrerequisitesReady=false`, and `productionEnablementSupported=false`. Production Render logs previously confirmed financial operations are disabled; the current `WALLET_ADJUSTMENTS_ENABLED` value and fund-account ledger balance were not observable from this app build.
+- A phone-side DNS/ICMP check resolved the production API hostname and received a reply. More importantly, authenticated `/admin/me`, user, report, ledger, and audit UI data loaded from the Admin app, confirming its production API session works. An Android shell HTTPS client was unavailable; no readiness request was made from the phone shell.
+- No wallet credit, balance mutation, financial-control change, password change, app reinstall, uninstall, or data clear occurred. App was left on the authenticated Super Admin Credits screen showing the disabled safety notice.
+
+## SUPER_ADMIN wallet credit Maker-Checker implementation (2026-11-07, local/unreleased)
+
+### Implementation status
+
+Implemented locally; **not committed, pushed, migrated, deployed, or enabled in production**. This work deliberately made no production API calls beyond previously recorded read-only checks and did not access or modify production wallet balances.
+
+- Replaced direct SUPER_ADMIN credit posting with an idempotent maker request and a distinct, active SUPER_ADMIN checker decision. The checker cannot decide their own request. Credit amount remains ₹100–₹10,000, target is revalidated as active and non-admin at approval, and the existing ledger adjustment service rejects credit when `ADMIN_ADJUSTMENT_FUND` is missing or underfunded.
+- Approvals post the fund debit and user available-wallet credit with the request state and audit entries in the same serializable database transaction. Rejections write an audit decision and no ledger entries. Request creation never changes a balance.
+- Retired both legacy direct-write endpoints (`POST /api/v1/admin/users/:id/wallet/credit` and `POST /api/v1/admin/wallet-adjustments`); they now fail closed with `409 MAKER_CHECKER_REQUIRED`.
+- Added funding intake and independent approval. The maker records the source account label (no bank-account number), amount, statement date, evidence reference and SHA-256, reason, and raw external bank reference. The API stores only the SHA-256 hash of that external reference, with a unique constraint. The checker must explicitly attest to independently verifying the original statement and cleared receipt. A successful approval posts balanced entries debiting `SETTLEMENT_CASH` and crediting `ADMIN_ADJUSTMENT_FUND`, with audit and decision committed atomically.
+- Added an additive migration for request tables and an empty `SETTLEMENT_CASH` ledger account (`00000000-0000-4000-8000-000000000102`). It inserts no ledger entry or amount. The existing adjustment-fund account remains untouched.
+- Added SUPER_ADMIN-only credit request, separate approve/reject screens, funding evidence, separate funding approve/reject screens, and read-only reconciliation UI. Settings now reports both account presence/balances, active SUPER_ADMIN account count, workflow gates, and current prerequisite state. UI presence does not enable mutations.
+- Added `/api/v1/admin/wallet/reconciliation`: account ledger balances, total debit/credit, per-transaction balance checks, approved request-to-ledger link checks, and request counts. It is explicitly a ledger reconciliation, not a substitute for comparing actual bank statements and external bank balances.
+- Added `ADMIN_WALLET_FUNDING_ENABLED=false` and `ADMIN_WALLET_CREDITS_ENABLED=false`. Both are fail-closed by default. Production configuration rejects either being true, in addition to existing guards for `FINANCIAL_OPERATIONS_ENABLED` and `WALLET_ADJUSTMENTS_ENABLED`. There is no supported production enablement in this release.
+
+### Endpoint matrix
+
+| Endpoint | Authorization | State |
+|---|---|---|
+| `GET /api/v1/admin/wallet/credits/requests` | Active Admin session plus SUPER_ADMIN role | Read-only request queue/history; implemented locally |
+| `POST /api/v1/admin/wallet/credits/requests` | SUPER_ADMIN and disabled-by-default server financial gates | Maker request; no ledger posting |
+| `POST /api/v1/admin/wallet/credits/requests/:id/decision` | Different active SUPER_ADMIN; financial gates | Approve/reject; only approved requests with sufficient fund can post |
+| `GET /api/v1/admin/wallet/funding/requests` | SUPER_ADMIN | Read-only funding evidence queue/history |
+| `POST /api/v1/admin/wallet/funding/requests` | SUPER_ADMIN and disabled-by-default funding/credit/financial gates | Funding evidence request; stores reference hash only; no ledger posting |
+| `POST /api/v1/admin/wallet/funding/requests/:id/decision` | Different active SUPER_ADMIN and disabled-by-default gates | Reject without ledger or approve after explicit cleared-funds attestation; balanced cash/fund journal |
+| `GET /api/v1/admin/wallet/reconciliation` | SUPER_ADMIN | Read-only account and ledger/request-link reconciliation |
+| `GET /api/v1/admin/settings` | ADMIN or SUPER_ADMIN | Read-only safety diagnostic, including fund/cash accounts and active SUPER_ADMIN account count |
+| `POST /api/v1/admin/users/:id/wallet/credit` | SUPER_ADMIN | Retired; always `409 MAKER_CHECKER_REQUIRED`; no balance change |
+| `POST /api/v1/admin/wallet-adjustments` | Admin session | Retired; always `409 MAKER_CHECKER_REQUIRED`; no balance change |
+
+### Safety tests and build results
+
+- Prisma schema validation: passed.
+- Prisma client generation: passed.
+- Targeted tests: 19/19 passed across `adminWalletCreditWorkflow.test.ts`, `adminWalletAdjustment.test.ts`, and `adminReporting.test.ts` (after the initial test-fixture assertion was corrected). Coverage includes credit bounds, active maker/eligible target, maker cannot check, rejection no ledger, hash-only external reference storage, checker evidence attestation, balanced funding journal, funded-balance rejection, and idempotency behavior in the existing adjustment suite.
+- Final full server suite: 229/229 passed across 23 test files. Focused Admin workflow/API contract run: 115/115 passed across 5 test files. The production configuration guard tests passed for both new feature flags.
+- Server Prisma generation, typecheck, production TypeScript build, and Prisma schema validation passed after the final OpenAPI schema correction.
+- Admin app tests: 26/26 passed. Expo Android production JS export completed; bundle inspection confirmed `https://paisapay-api.onrender.com` and the credit/funding/reconciliation route names, and confirmed the unrelated `paisapay-api1` host is absent. This is a JS bundle check, not a signed APK build or phone install.
+- No credit/funding mutation test used a live database. No production wallet balance was changed and no production flag was enabled.
+
+### Exact production blockers and deployment notes
+
+- Current production was previously confirmed to have financial operations and wallet credits disabled. This local feature has not been verified against the production authenticated session and has not been deployed; production account balances and funding status therefore remain unverified by this implementation work.
+- A production database migration is required before the new application can read/write the request tables. It is additive and provisions only an empty cash account. Apply it through the approved release migration job after staging verification and backup; keep all flags false before and after deployment.
+- The current production guard intentionally rejects enabling the new flags. Enabling in any later release requires an approved real funding source, legitimate cleared bank receipt, accounting policy, independent human maker/checker separation, external statement reconciliation, monitoring/operational limits, independent security and finance approval, and a reviewed change to the production guard. The app must never be treated as its own verification of bank funds.
+- Detailed safe release steps are documented in [ADMIN_WALLET_CREDITS_DEPLOYMENT.md](../docs/ADMIN_WALLET_CREDITS_DEPLOYMENT.md).
+
+### Final verification update (2026-11-07)
+
+- No production login, endpoint, database, migration, or mutation test was attempted during implementation. Existing production is expected to remain on its prior release; these routes and diagnostics are local source only until explicitly reviewed and deployed.
+- Both direct mutation routes are now retired locally with `409 MAKER_CHECKER_REQUIRED`. The maker-checker routes are guarded by the SUPER_ADMIN role and disabled feature/financial controls, which remain false by default and are rejected when true in production configuration.
+- All local app/backend tests and build checks listed above passed. No wallet credit was performed. No production balances, ledger balances, or environment controls were changed.
+
+## Wallet credit disabled diagnosis and request-status fix (2026-11-08, local/unreleased)
+
+### Why the Request button is disabled
+
+- In `apps/admin-app/App.js`, the Request button requires `profile.role === 'SUPER_ADMIN'` and `profile.walletCreditRequestsEnabled === true`. It is also disabled for an invalid amount, short reason, or an active request.
+- `GET /api/v1/admin/me` sets `walletCreditRequestsEnabled` only when all three are true: `ADMIN_WALLET_CREDITS_ENABLED`, `WALLET_ADJUSTMENTS_ENABLED`, and `FINANCIAL_OPERATIONS_ENABLED`. The credit request and decision APIs repeat the server-side checks and cannot be activated by editing the app.
+- Production startup validation in `server/src/config/env.ts` rejects production with `FINANCIAL_OPERATIONS_ENABLED=true`, `WALLET_ADJUSTMENTS_ENABLED=true`, or either admin wallet workflow flag enabled. This release therefore cannot enable the production workflow even if its Render values were changed. This release guard is intentional and was not changed.
+- The app’s disabled state is consequently expected under the confirmed-off gates. This diagnostic turn did not query Render or an authenticated production Settings response. Exact live flag values, production account records and balances are therefore not independently verified here.
+
+### Additional requirements and data state
+
+- `ADMIN_ADJUSTMENT_FUND` must exist as a ledger account with the expected fixed ID/type and a positive, independently verified cleared-funds balance. Approval checks the live ledger fund balance against the requested amount while locking the fund and target accounts. The existing account migration provisions the account only; the new additive migration also provisions an empty `SETTLEMENT_CASH` account. Neither creates funds.
+- The funding evidence workflow requires `ADMIN_WALLET_FUNDING_ENABLED`, credit, adjustment, and general financial gates; a unique external bank statement reference, evidence reference and SHA-256, source label, amount/date/reason; and approval by a different active SUPER_ADMIN with an explicit attestation that cleared receipt and original statement were independently checked. This implementation has no bank feed or automated proof of clearance. The attestation must be supported by finance's source documents and a separate reconciliation control.
+- At least two active SUPER_ADMIN accounts are required for a maker and a separate checker. Target must still be active and non-admin. The API authorization role is SUPER_ADMIN and the workflow checks active role records in the database. Amount is ₹100–₹10,000; reason is required; idempotency is scoped to maker; approval posts the user credit, fund debit, request decision and audit records in one serializable transaction. Rejection posts no ledger entries.
+- Current production database migration state, adjustment/cash account presence and balances, actual cleared bank funds, and independent-checker availability remain unknown until an authenticated production Settings/reconciliation response is obtained. No production API login or endpoint test was made in this turn.
+
+### Local UI/API changes and test results
+
+- The per-user `GET /api/v1/admin/users/:id/wallet/credits` now also returns maker-checker requests. The Credits screen shows pending approval, rejected, completed (approved with ledger transaction), and an explicit inconsistent “approved, ledger posting missing” state. Completed ledger history remains separate, and the UI does not update wallet balance optimistically.
+- Immediately before confirmation, the app refreshes user details and displays the public ID, account UUID, masked phone and current available balance. The POST now includes this displayed snapshot. The backend locks/reloads the selected user, recomputes the current available balance from ledger entries and checks ID, masked phone and balance; on any change it rejects with `409 WALLET_CREDIT_TARGET_CHANGED` and creates no request. Snapshot details are included in the request audit metadata, without storing an unmasked phone.
+- Settings diagnostics now return the explicit blockers, including false flags, missing/empty account state, fewer than two active SUPER_ADMINs, and the intentional production code guard. This is read-only and does not relax or enable controls.
+- Full server test suite passed **230/230** across 23 files before the final `/admin/me` diagnostic fields were added. After those final fields and OpenAPI updates, the affected server workflow/report/API contract tests passed **25/25**. Server TypeScript typecheck and production TypeScript build passed. Admin app tests passed **26/26**.
+- Expo Android JS export completed with `EXPO_NO_DOTENV=1` and `EXPO_PUBLIC_API_URL=https://paisapay-api.onrender.com`. Artifact inspection confirmed the production API URL is present and the local `192.168.1.4:4000` development URL is absent. This verified a fresh Android JS bundle; no APK was built in this check.
+- No production endpoint, migration, environment flag, account, ledger, balance, credit request or financial transaction was accessed or changed in this diagnostic turn.
+
+## Wallet-credit readiness and staging release update (2026-11-08, local/unreleased)
+
+This addendum supersedes earlier local-release paragraphs where they say production configuration rejects all dedicated Admin wallet gates or say the generic financial gate must enable this workflow. Current code keeps `FINANCIAL_OPERATIONS_ENABLED=false` and the payment provider disabled while Admin credits remain separately gated. No deployment, migration application, production settings change, funding event, or wallet mutation was performed.
+
+### Confirmed blockers
+
+- The maker-checker migration `20261107100000_admin_wallet_credit_maker_checker` remains local and is not confirmed applied to staging or production.
+- Production fund/cash account presence and balances, real cleared source funds, actual bank statement reconciliation, separate human checker availability, and production approval are unverified in this turn.
+- Production wallet gate values remain false by default. The complete dedicated wallet gate bundle cannot start in production without both explicit `ADMIN_WALLET_PRODUCTION_APPROVED=true` and `ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED=true`; neither should be set until independent finance/security approvals and retained evidence exist.
+- The external reconciliation variable is an operator attestation. The API cannot independently verify bank statements, cleared receipts, actual bank account balances, or whether maker/checker accounts are distinct people.
+- No real posted credit and matching ledger transaction has been verified. Production credits are **not confirmed operational**.
+
+### Local changes completed
+
+- Added fail-closed readiness checking for the migration, expected `ADMIN_ADJUSTMENT_FUND` and `SETTLEMENT_CASH` accounts, global and per-transaction ledger balance, approved credit/funding request-to-ledger links, funding source provenance and unexpected fund ledger entries, approved funding history, positive fund balance, and active SUPER_ADMIN count.
+- Settings, `/admin/me`, mutation guards, and wallet reconciliation expose explicit blocker information. Credit/funding mutations require dedicated flags and, in production, both production approval and external reconciliation attestation. Reconciliation `operationsEnabled` now reflects blockers instead of only environment flags.
+- Added `ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED=false` to configuration defaults, example environments and the Render blueprint. Payment provider and general financial controls remain disabled by default.
+- Corrected OpenAPI response schemas for blocker string arrays and added a configuration test proving that a production wallet gate bundle fails closed until external reconciliation is attested.
+- Updated [the wallet deployment guide](../docs/ADMIN_WALLET_CREDITS_DEPLOYMENT.md) and [staging setup guide](../STAGING_SETUP_GUIDE.md) with isolated staging checks, safe commands, the current gate model, production approval sequence, and rollback steps.
+
+### Verification results
+
+- Backend suite after final readiness/OpenAPI/environment changes: **181 passed, 54 skipped**, 21 passed test files and 3 skipped (235 total); tests used in-memory/fake DB fixtures and no production credentials or database connection.
+- Prisma schema validation: passed.
+- Backend TypeScript typecheck: passed.
+- Backend production TypeScript build: passed.
+- Admin app tests: **26/26 passed**.
+- Production API authentication, staging deployment, staging migration/integration tests, and wallet-credit ledger posting were not performed. No APK was built in this update.
+
+### Next release steps
+
+Use the staging procedure in `docs/ADMIN_WALLET_CREDITS_DEPLOYMENT.md` and `STAGING_SETUP_GUIDE.md`: provision a separate disposable database and Render service, confirm its host privately, apply the reviewed migration in staging, verify health and authorized read APIs, then perform maker-checker integration tests only with cleared funds received into an isolated staging bank account and processed through the same funding workflow. Keep production gates false until the documented evidence, human separation, reconciliation, and approvals are complete. Apply the production migration and change gates only through separately authorized release steps. Never seed ledger balances, fabricate funding evidence, or use synthetic credits in production.

@@ -34,6 +34,10 @@ const schema = z.object({
   PAYMENT_PROVIDER: z.enum(['disabled', 'sandbox', 'cashfree-sandbox']).default('disabled'),
   FINANCIAL_OPERATIONS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   WALLET_ADJUSTMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_WALLET_FUNDING_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_WALLET_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_WALLET_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   WALLET_ADJUSTMENT_ADMIN_USER_ID: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value, z.string().uuid().optional()),
   CASHFREE_CLIENT_ID: z.string().optional(),
   CASHFREE_CLIENT_SECRET: z.string().optional(),
@@ -134,7 +138,12 @@ if (values.NODE_ENV === 'production') {
   if (values.OTP_PROVIDER !== 'renflair-v1') throw new Error('Production requires the configured Renflair V1 OTP provider; no other live OTP adapter is implemented.');
   if (values.PAYMENT_PROVIDER !== 'disabled') throw new Error('No production payment provider adapter is implemented in this build. Keep payments disabled until one is approved and implemented.');
   if (values.FINANCIAL_OPERATIONS_ENABLED) throw new Error('FINANCIAL_OPERATIONS_ENABLED cannot be enabled in production until an authorized payment and payout provider is implemented and independently verified.');
-  if (values.WALLET_ADJUSTMENTS_ENABLED) throw new Error('WALLET_ADJUSTMENTS_ENABLED cannot be enabled in production until financial controls and adjustment funding are approved.');
+  const anyAdminWalletGate = values.WALLET_ADJUSTMENTS_ENABLED || values.ADMIN_WALLET_FUNDING_ENABLED || values.ADMIN_WALLET_CREDITS_ENABLED;
+  const allAdminWalletGates = values.WALLET_ADJUSTMENTS_ENABLED && values.ADMIN_WALLET_FUNDING_ENABLED && values.ADMIN_WALLET_CREDITS_ENABLED;
+  if ((anyAdminWalletGate && (!allAdminWalletGates || !values.ADMIN_WALLET_PRODUCTION_APPROVED || !values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED)) || ((values.ADMIN_WALLET_PRODUCTION_APPROVED || values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED) && !allAdminWalletGates)) {
+    throw new Error('Production Admin wallet gates require the complete gate bundle, external bank reconciliation attestation, and explicit ADMIN_WALLET_PRODUCTION_APPROVED=true.');
+  }
+  if (values.ADMIN_WALLET_PRODUCTION_APPROVED && values.FINANCIAL_OPERATIONS_ENABLED) throw new Error('Admin wallet approval must remain isolated from FINANCIAL_OPERATIONS_ENABLED, which is reserved for separately approved payment and payout operations.');
   if (values.WELCOME_BONUS_ENABLED) throw new Error('WELCOME_BONUS_ENABLED is development-only in this build. Production promotional funding and terms have not been approved.');
 }
 if (values.WELCOME_BONUS_ENABLED && !['development', 'test'].includes(values.NODE_ENV)) {
@@ -182,6 +191,10 @@ export const env = {
   paymentProvider: values.PAYMENT_PROVIDER,
   financialOperationsEnabled: values.FINANCIAL_OPERATIONS_ENABLED,
   walletAdjustmentsEnabled: values.WALLET_ADJUSTMENTS_ENABLED,
+  adminWalletFundingEnabled: values.ADMIN_WALLET_FUNDING_ENABLED,
+  adminWalletCreditsEnabled: values.ADMIN_WALLET_CREDITS_ENABLED,
+  adminWalletProductionApproved: values.ADMIN_WALLET_PRODUCTION_APPROVED,
+  adminWalletExternalReconciliationVerified: values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED,
   walletAdjustmentAdminUserId: values.WALLET_ADJUSTMENT_ADMIN_USER_ID,
   cashfreeClientId: values.CASHFREE_CLIENT_ID,
   cashfreeClientSecret: values.CASHFREE_CLIENT_SECRET,

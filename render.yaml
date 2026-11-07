@@ -32,6 +32,16 @@ services:
         value: disabled
       - key: FINANCIAL_OPERATIONS_ENABLED
         value: "false"
+      - key: WALLET_ADJUSTMENTS_ENABLED
+        value: "false"
+      - key: ADMIN_WALLET_FUNDING_ENABLED
+        value: "false"
+      - key: ADMIN_WALLET_CREDITS_ENABLED
+        value: "false"
+      - key: ADMIN_WALLET_PRODUCTION_APPROVED
+        value: "false"
+      - key: ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED
+        value: "false"
       - key: DEPOSIT_RECEIVER_UPI_ID
         sync: false
       - key: UPI_DEPOSIT_REWARD_ENABLED

@@ -12,7 +12,9 @@ import { verifyPassword, hashPassword } from '../../lib/password.js';
 import { hashOtp, hashToken, newOpaqueToken, safeHashEqual } from '../../lib/security.js';
 import { env } from '../../config/env.js';
 import { formatReportResult, hasMoney, reportQuerySchema, safeSettingsSnapshot, type ReportKind } from './reporting.js';
-import { applyAdminWalletAdjustment, applySuperAdminWalletCredit, MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from './walletAdjustment.js';
+import { MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from './walletAdjustment.js';
+import { createCreditRequest, decideCreditRequest, createFundingRequest, decideFundingRequest, ADMIN_ADJUSTMENT_FUND_ID, ADMIN_SETTLEMENT_CASH_ID } from './walletCreditWorkflow.js';
+import { readWalletCreditReadiness } from './walletCreditReadiness.js';
 import { createOtpChallenge } from '../auth/routes.js';
 
 export const adminRouter = Router();
@@ -157,21 +159,17 @@ adminRouter.get('/reports', asyncRoute(async (req, res) => {
 
 adminRouter.get('/settings', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
-  let adjustmentFundAccount: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
-  try {
-    const rows = await databaseRequired().$queryRaw<Array<{ id: string | null; balance: bigint | null }>>`
-      SELECT a.id::text AS id, COALESCE(SUM(e.credit_paise - e.debit_paise), 0)::bigint AS balance
-        FROM (SELECT id FROM ledger_accounts WHERE id = '00000000-0000-4000-8000-000000000101'::uuid AND type::text = 'ADMIN_ADJUSTMENT_FUND') expected
-        LEFT JOIN ledger_accounts a ON a.id = expected.id
-        LEFT JOIN ledger_entries e ON e.account_id = a.id
-       GROUP BY a.id`;
-    adjustmentFundAccount = rows.length
-      ? { status: 'PROVISIONED', balancePaise: String(rows[0].balance ?? 0n) }
-      : { status: 'MISSING', balancePaise: null };
-  } catch {
-    // The diagnostics must remain useful if the account migration has not run.
-    adjustmentFundAccount = { status: 'CHECK_FAILED', balancePaise: null };
-  }
+  const db = databaseRequired();
+  const readiness = await readWalletCreditReadiness(db);
+  const walletCreditBlockers = [
+    ...(!env.walletAdjustmentsEnabled ? ['WALLET_ADJUSTMENTS_ENABLED is false'] : []),
+    ...(!env.adminWalletFundingEnabled ? ['ADMIN_WALLET_FUNDING_ENABLED is false'] : []),
+    ...(!env.adminWalletCreditsEnabled ? ['ADMIN_WALLET_CREDITS_ENABLED is false'] : []),
+    ...readiness.creditBlockers,
+    ...(env.nodeEnv === 'production' && !env.adminWalletProductionApproved ? ['ADMIN_WALLET_PRODUCTION_APPROVED is false; independent approval has not been recorded'] : []),
+    ...(env.nodeEnv === 'production' && !env.adminWalletExternalReconciliationVerified ? ['ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED is false; external bank reconciliation has not been attested'] : []),
+  ];
+  const walletCreditReadiness = walletCreditBlockers.length === 0 ? 'READY' : 'BLOCKED';
   res.json(safeSettingsSnapshot({
     nodeEnv: env.nodeEnv,
     financialOperationsEnabled: env.financialOperationsEnabled,
@@ -179,8 +177,23 @@ adminRouter.get('/settings', asyncRoute(async (req, res) => {
     otpProvider: env.otpProvider,
     databaseConfigured: Boolean(env.databaseUrl),
     walletAdjustmentEnabled: env.walletAdjustmentsEnabled,
+    walletFundingEnabled: env.adminWalletFundingEnabled,
+    walletCreditsEnabled: env.adminWalletCreditsEnabled,
+    activeSuperAdminCount: readiness.activeSuperAdminCount,
+    independentCheckerAvailable: readiness.activeSuperAdminCountStatus === 'VERIFIED' && readiness.activeSuperAdminCount >= 2,
+    walletCreditBlockers,
+    walletProductionApproved: env.adminWalletProductionApproved,
+    makerCheckerMigration: readiness.migration,
+    walletLedgerIntegrity: readiness.ledgerIntegrity,
+    creditRequestLedgerLinks: readiness.creditRequestLedgerLinks,
+    fundingRequestLedgerLinks: readiness.fundingRequestLedgerLinks,
+    fundingProvenance: readiness.fundingProvenance,
+    activeSuperAdminCountStatus: readiness.activeSuperAdminCountStatus,
+    externalBankReconciliation: env.adminWalletExternalReconciliationVerified ? 'OPERATOR_ATTESTED_REQUIRES_RETAINED_FINANCE_EVIDENCE' : readiness.externalBankReconciliation,
+    walletCreditReadiness,
     walletAdjustmentAdminConfigured: Boolean(env.walletAdjustmentAdminUserId),
-    adjustmentFundAccount,
+    settlementCashAccount: readiness.settlementCashAccount,
+    adjustmentFundAccount: readiness.adjustmentFundAccount,
   }));
 }));
 
@@ -196,9 +209,18 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
   };
   const walletAdjustmentAllowed = role === 'ADMIN' && env.walletAdjustmentAdminUserId === req.auth!.userId;
   const walletCreditsAllowed = role === 'SUPER_ADMIN';
+  const walletReadiness = walletCreditsAllowed ? await readWalletCreditReadiness(databaseRequired()) : null;
+  const walletProductionAuthorized = env.nodeEnv !== 'production' || (env.adminWalletProductionApproved && env.adminWalletExternalReconciliationVerified);
+  const releaseBlockers = [
+    ...(env.nodeEnv === 'production' && !env.adminWalletProductionApproved ? ['ADMIN_WALLET_PRODUCTION_APPROVED is false'] : []),
+    ...(env.nodeEnv === 'production' && !env.adminWalletExternalReconciliationVerified ? ['ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED is false'] : []),
+  ];
+  const walletCreditBlockers = [...(walletReadiness?.creditBlockers ?? []), ...releaseBlockers];
+  const walletFundingBlockers = [...(walletReadiness?.fundingBlockers ?? []), ...releaseBlockers];
+  const walletCreditRequestsEnabled = walletCreditsAllowed && walletProductionAuthorized && env.adminWalletCreditsEnabled && env.walletAdjustmentsEnabled && walletReadiness?.creditBlockers.length === 0;
+  const walletFundingRequestsEnabled = walletCreditsAllowed && walletProductionAuthorized && env.adminWalletFundingEnabled && env.adminWalletCreditsEnabled && env.walletAdjustmentsEnabled && walletReadiness?.fundingBlockers.length === 0;
   const allowedSections = [...(roleViews[role] || common)];
-  if (walletAdjustmentAllowed && !allowedSections.includes('walletAdjustments')) allowedSections.push('walletAdjustments');
-  if (walletCreditsAllowed && !allowedSections.includes('walletCredits')) allowedSections.push('walletCredits');
+  if (walletCreditsAllowed) for (const section of ['walletCredits', 'walletCreditApprovals', 'walletCreditRejections', 'walletFunding', 'walletFundingApprovals', 'walletFundingRejections', 'walletReconciliation']) if (!allowedSections.includes(section)) allowedSections.push(section);
   res.json({
     userId: req.auth!.userId,
     role,
@@ -207,9 +229,17 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     // authorization continues to run through financialOperationsGate.
     financialOperationsEnabled: env.financialOperationsEnabled,
     walletAdjustmentAllowed,
-    walletAdjustmentsEnabled: walletAdjustmentAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
+    walletAdjustmentsEnabled: role === 'SUPER_ADMIN' ? env.walletAdjustmentsEnabled && walletProductionAuthorized : walletAdjustmentAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
     walletCreditsAllowed,
-    walletCreditsEnabled: walletCreditsAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
+    adminWalletFundingEnabled: env.adminWalletFundingEnabled,
+    adminWalletCreditsEnabled: env.adminWalletCreditsEnabled,
+    adminWalletProductionApproved: env.adminWalletProductionApproved,
+    adminWalletExternalReconciliationVerified: env.adminWalletExternalReconciliationVerified,
+    walletCreditsEnabled: walletCreditRequestsEnabled,
+    walletCreditRequestsEnabled,
+    walletFundingRequestsEnabled,
+    walletCreditBlockers,
+    walletFundingBlockers,
   });
 }));
 
@@ -399,49 +429,152 @@ adminRouter.get('/users/:id/wallet/credits', asyncRoute(async (req, res) => {
     db.auditLog.findMany({ where: { target: `USER:${userId}`, action: 'ADMIN_WALLET_CREDIT' }, orderBy: { createdAt: 'desc' }, take: input.pageSize,
       select: { id: true, actorId: true, reason: true, metadata: true, createdAt: true } }),
   ]);
+  const [requests, requestTotal] = await Promise.all([
+    db.adminWalletCreditRequest.findMany({ where: { targetUserId: userId }, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize,
+      select: { id: true, amountPaise: true, reason: true, status: true, makerUserId: true, checkerUserId: true, decisionReason: true, ledgerTransactionId: true, createdAt: true, decidedAt: true, makerUser: { select: { publicId: true, displayName: true } }, checkerUser: { select: { publicId: true, displayName: true } } } }),
+    db.adminWalletCreditRequest.count({ where: { targetUserId: userId } }),
+  ]);
   const safeReason = (metadata: unknown) => metadata && typeof metadata === 'object' && !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>).reason === 'string' ? (metadata as Record<string, string>).reason : '';
   const safeReference = (metadata: unknown) => metadata && typeof metadata === 'object' && !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>).transactionReference === 'string' ? (metadata as Record<string, string>).transactionReference : '';
   res.json({
     credits: transactions.map((transaction) => ({ id: transaction.id, transactionReference: transaction.referenceId, adminId: transaction.actorUserId,
       amountPaise: Number(transaction.entries[0]?.creditPaise ?? 0n), reason: safeReason(transaction.metadata), createdAt: transaction.createdAt })),
     auditLogs: auditLogs.map((entry) => ({ id: entry.id, adminId: entry.actorId, reason: entry.reason ?? safeReason(entry.metadata), transactionReference: safeReference(entry.metadata), createdAt: entry.createdAt })),
+    requests: requests.map((entry) => ({ ...walletWorkflowRequestForApi(entry), displayStatus: entry.status === 'APPROVED' && entry.ledgerTransactionId ? 'COMPLETED' : entry.status })),
+    requestTotal,
     total, page: input.page, pageSize: input.pageSize,
   });
 }));
 
 adminRouter.post('/users/:id/wallet/credit', adminMutationLimit, asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
-  if (!env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_CREDITS_DISABLED', 'Manual wallet credits are disabled by server financial controls. No balance was changed.');
-  assertFinancialOperationsEnabled();
-  const userId = z.string().uuid().parse(req.params.id);
-  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
-  const input = z.object({
-    amountPaise: z.number().int().min(MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE).max(MAX_ADMIN_ADJUSTMENT_PAISE),
-    reason: z.string().trim().min(8).max(500),
-  }).strict().parse(req.body);
+  throw new HttpError(409, 'MAKER_CHECKER_REQUIRED', 'Direct wallet credits are retired. Submit a credit request and obtain approval from a different active SUPER_ADMIN. No balance was changed.');
+}));
+
+function assertWalletProductionApproval() {
+  if (env.nodeEnv === 'production' && (!env.adminWalletProductionApproved || !env.adminWalletExternalReconciliationVerified)) throw new HttpError(503, 'WALLET_PRODUCTION_APPROVAL_REQUIRED', 'The dedicated Admin wallet production release and independent external bank reconciliation have not both been explicitly approved. No financial change was made.');
+}
+async function assertWalletCreditWorkflowEnabled() {
+  if (!env.adminWalletCreditsEnabled || !env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_CREDITS_DISABLED', 'Wallet credit requests are disabled by dedicated server financial controls. No balance was changed.');
+  assertWalletProductionApproval();
+  const readiness = await readWalletCreditReadiness(databaseRequired());
+  if (readiness.creditBlockers.length) throw new HttpError(503, 'WALLET_CREDITS_NOT_READY', `Wallet credit prerequisites are not ready: ${readiness.creditBlockers.join('; ')}. No balance was changed.`);
+}
+async function assertWalletFundingWorkflowEnabled() {
+  if (!env.adminWalletFundingEnabled || !env.adminWalletCreditsEnabled || !env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_FUNDING_DISABLED', 'Wallet funding is disabled by dedicated server financial controls. No ledger balance was changed.');
+  assertWalletProductionApproval();
+  const readiness = await readWalletCreditReadiness(databaseRequired());
+  if (readiness.fundingBlockers.length) throw new HttpError(503, 'WALLET_FUNDING_NOT_READY', `Wallet funding prerequisites are not ready: ${readiness.fundingBlockers.join('; ')}. No ledger balance was changed.`);
+}
+function walletWorkflowRequestForApi<T extends { amountPaise: bigint }>(request: T) {
+  return { ...request, amountPaise: Number(request.amountPaise) };
+}
+
+adminRouter.get('/wallet/credits/requests', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const input = pageInput.parse(req.query);
+  const status = z.enum(['PENDING_APPROVAL', 'APPROVED', 'REJECTED']).optional().parse(req.query.status);
+  const where = status ? { status } : {};
   const db = databaseRequired();
-  const credit = await db.$transaction((tx) => applySuperAdminWalletCredit(tx, { actorUserId: req.auth!.userId, idempotencyKey, targetUserId: userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  res.status(credit.replayed ? 200 : 201).json({ credit, message: credit.replayed ? 'This credit was already recorded; no duplicate ledger entry was created.' : 'Manual ADMIN_ADJUSTMENT credit recorded in the immutable ledger.' });
+  const [requests, total] = await Promise.all([
+    db.adminWalletCreditRequest.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, include: { targetUser: { select: { publicId: true, displayName: true, phoneE164: true, status: true } }, makerUser: { select: { publicId: true, displayName: true } }, checkerUser: { select: { publicId: true, displayName: true } } } }),
+    db.adminWalletCreditRequest.count({ where }),
+  ]);
+  res.json({ requests: requests.map((r) => ({ ...walletWorkflowRequestForApi(r), targetUser: { ...r.targetUser, phoneMasked: phoneMasked(r.targetUser.phoneE164), phoneE164: undefined } })), total, page: input.page, pageSize: input.pageSize });
+}));
+
+adminRouter.post('/wallet/credits/requests', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  await assertWalletCreditWorkflowEnabled();
+  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({ targetUserId: z.string().uuid(), verifiedPublicId: z.string().trim().min(1).max(50), verifiedPhoneMasked: z.string().trim().min(4).max(32), verifiedWalletBalancePaise: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), amountPaise: z.number().int().min(MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE).max(MAX_ADMIN_ADJUSTMENT_PAISE), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => createCreditRequest(tx, { makerUserId: req.auth!.userId, idempotencyKey, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(result.replayed ? 200 : 201).json({ request: walletWorkflowRequestForApi(result.request), replayed: result.replayed, message: 'Credit request is pending approval by a different active SUPER_ADMIN. No wallet balance has changed.' });
+}));
+
+adminRouter.post('/wallet/credits/requests/:id/decision', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  await assertWalletCreditWorkflowEnabled();
+  const id = z.string().uuid().parse(req.params.id);
+  const input = z.object({ decision: z.enum(['APPROVE', 'REJECT']), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => decideCreditRequest(tx, { requestId: id, checkerUserId: req.auth!.userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.json({ ...result, request: walletWorkflowRequestForApi(result.request), message: input.decision === 'APPROVE' ? 'Credit approved and posted with balanced ledger entries and audit records.' : 'Credit request rejected; no wallet balance changed.' });
+}));
+
+adminRouter.get('/wallet/funding/requests', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const input = pageInput.parse(req.query);
+  const status = z.enum(['PENDING_APPROVAL', 'APPROVED', 'REJECTED']).optional().parse(req.query.status);
+  const where = status ? { status } : {};
+  const db = databaseRequired();
+  const [requests, total] = await Promise.all([
+    db.adminWalletFundingRequest.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, include: { makerUser: { select: { publicId: true, displayName: true } }, checkerUser: { select: { publicId: true, displayName: true } } } }),
+    db.adminWalletFundingRequest.count({ where }),
+  ]);
+  res.json({ requests: requests.map(walletWorkflowRequestForApi), total, page: input.page, pageSize: input.pageSize });
+}));
+
+adminRouter.post('/wallet/funding/requests', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  await assertWalletFundingWorkflowEnabled();
+  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({ amountPaise: z.number().int().positive().max(100_000_000_000), sourceAccountLabel: z.string().trim().min(3).max(100), externalReference: z.string().trim().min(6).max(200), evidenceReference: z.string().trim().min(3).max(160), evidenceSha256: z.string().regex(/^[a-fA-F0-9]{64}$/), statementDate: z.string().date(), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => createFundingRequest(tx, { makerUserId: req.auth!.userId, idempotencyKey, ...input, statementDate: new Date(`${input.statementDate}T00:00:00.000Z`) }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(result.replayed ? 200 : 201).json({ request: walletWorkflowRequestForApi(result.request), replayed: result.replayed, message: 'Funding evidence is queued for independent verification. No ledger balance has changed.' });
+}));
+
+adminRouter.post('/wallet/funding/requests/:id/decision', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  await assertWalletFundingWorkflowEnabled();
+  const id = z.string().uuid().parse(req.params.id);
+  const input = z.object({ decision: z.enum(['APPROVE', 'REJECT']), reason: z.string().trim().min(8).max(500), evidenceVerified: z.boolean().default(false) }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => decideFundingRequest(tx, { requestId: id, checkerUserId: req.auth!.userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.json({ ...result, request: walletWorkflowRequestForApi(result.request), message: input.decision === 'APPROVE' ? 'Verified funding posted to the adjustment fund through a balanced ledger journal.' : 'Funding request rejected; no ledger balance changed.' });
+}));
+
+adminRouter.get('/wallet/reconciliation', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const db = databaseRequired();
+  const readiness = await readWalletCreditReadiness(db);
+  const rows = await databaseRequired().$queryRaw<Array<{ accountId: string | null; type: string | null; balancePaise: string; debitsPaise: string; creditsPaise: string }>>`
+    SELECT a.id::text AS "accountId", a.type::text AS type,
+           CASE WHEN a.type::text = 'SETTLEMENT_CASH' THEN COALESCE(SUM(e.debit_paise - e.credit_paise), 0)::text
+                ELSE COALESCE(SUM(e.credit_paise - e.debit_paise), 0)::text END AS "balancePaise",
+           COALESCE(SUM(e.debit_paise), 0)::text AS "debitsPaise",
+           COALESCE(SUM(e.credit_paise), 0)::text AS "creditsPaise"
+      FROM ledger_accounts a LEFT JOIN ledger_entries e ON e.account_id = a.id
+     WHERE a.id IN (${ADMIN_ADJUSTMENT_FUND_ID}::uuid, ${ADMIN_SETTLEMENT_CASH_ID}::uuid)
+     GROUP BY a.id, a.type ORDER BY a.type`;
+  const totals = await databaseRequired().$queryRaw<Array<{ debits: string; credits: string }>>`SELECT COALESCE(SUM(debit_paise), 0)::text AS debits, COALESCE(SUM(credit_paise), 0)::text AS credits FROM ledger_entries`;
+  const [pendingCredits, pendingFunding, approvedCredits, approvedFunding, imbalancedTransactions, creditLinkErrors, fundingLinkErrors] = await Promise.all([
+    databaseRequired().adminWalletCreditRequest.count({ where: { status: 'PENDING_APPROVAL' } }),
+    databaseRequired().adminWalletFundingRequest.count({ where: { status: 'PENDING_APPROVAL' } }),
+    databaseRequired().adminWalletCreditRequest.count({ where: { status: 'APPROVED' } }),
+    databaseRequired().adminWalletFundingRequest.count({ where: { status: 'APPROVED' } }),
+    databaseRequired().$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM (SELECT transaction_id FROM ledger_entries GROUP BY transaction_id HAVING SUM(debit_paise) <> SUM(credit_paise)) unbalanced`,
+    databaseRequired().$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM admin_wallet_credit_requests r LEFT JOIN ledger_transactions t ON t.id = r.ledger_transaction_id WHERE r.status::text = 'APPROVED' AND (t.id IS NULL OR t.reference_type <> 'ADMIN_ADJUSTMENT' OR t.event_type <> 'ADMIN_ADJUSTMENT' OR (SELECT COALESCE(SUM(e.credit_paise), 0) FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id WHERE e.transaction_id = t.id AND a.user_id = r.target_user_id AND a.type::text = 'AVAILABLE') <> r.amount_paise OR (SELECT COALESCE(SUM(e.debit_paise), 0) FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id WHERE e.transaction_id = t.id AND a.id = ${ADMIN_ADJUSTMENT_FUND_ID}::uuid) <> r.amount_paise`,
+    databaseRequired().$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM admin_wallet_funding_requests r LEFT JOIN ledger_transactions t ON t.id = r.ledger_transaction_id WHERE r.status::text = 'APPROVED' AND (t.id IS NULL OR t.reference_type <> 'ADMIN_WALLET_FUNDING_REQUEST' OR t.reference_id <> r.id::text OR (SELECT COALESCE(SUM(e.debit_paise), 0) FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id WHERE e.transaction_id = t.id AND a.id = ${ADMIN_SETTLEMENT_CASH_ID}::uuid) <> r.amount_paise OR (SELECT COALESCE(SUM(e.credit_paise), 0) FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id WHERE e.transaction_id = t.id AND a.id = ${ADMIN_ADJUSTMENT_FUND_ID}::uuid) <> r.amount_paise`,
+  ]);
+  const ledgerBalanced = (totals[0]?.debits ?? '0') === (totals[0]?.credits ?? '0') && Number(imbalancedTransactions[0]?.count ?? 0n) === 0;
+  const creditLedgerDiscrepancies = Number(creditLinkErrors[0]?.count ?? 0n);
+  const fundingLedgerDiscrepancies = Number(fundingLinkErrors[0]?.count ?? 0n);
+  const walletCreditBlockers = [
+    ...readiness.creditBlockers,
+    ...(!env.walletAdjustmentsEnabled ? ['WALLET_ADJUSTMENTS_ENABLED is false'] : []),
+    ...(!env.adminWalletFundingEnabled ? ['ADMIN_WALLET_FUNDING_ENABLED is false'] : []),
+    ...(!env.adminWalletCreditsEnabled ? ['ADMIN_WALLET_CREDITS_ENABLED is false'] : []),
+    ...(env.nodeEnv === 'production' && !env.adminWalletProductionApproved ? ['ADMIN_WALLET_PRODUCTION_APPROVED is false'] : []),
+    ...(env.nodeEnv === 'production' && !env.adminWalletExternalReconciliationVerified ? ['ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED is false'] : []),
+  ];
+  res.json({ accounts: rows, ledgerBalanced, totalDebitsPaise: totals[0]?.debits ?? '0', totalCreditsPaise: totals[0]?.credits ?? '0', pendingCredits, pendingFunding, approvedCredits, approvedFunding, creditLedgerDiscrepancies, fundingLedgerDiscrepancies, requestLedgerLinksReconciled: creditLedgerDiscrepancies === 0 && fundingLedgerDiscrepancies === 0, walletCreditBlockers, operationsEnabled: walletCreditBlockers.length === 0 });
 }));
 
 adminRouter.post('/wallet-adjustments', adminMutationLimit, asyncRoute(async (req, res) => {
-  if (req.auth!.role !== 'ADMIN' || !env.walletAdjustmentAdminUserId || req.auth!.userId !== env.walletAdjustmentAdminUserId) {
-    throw new HttpError(403, 'ADMIN_PERMISSION_DENIED', 'This wallet adjustment action is restricted to the explicitly configured ADMIN account.');
-  }
-  if (!env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_ADJUSTMENTS_DISABLED', 'Admin wallet adjustments are disabled until financial controls are approved. No balance was changed.');
-  assertFinancialOperationsEnabled();
-  const clientKey = z.string().uuid().parse(req.get('Idempotency-Key'));
-  const input = z.object({
-    targetPublicId: z.string().trim().min(1).max(10).regex(/^[A-Za-z0-9_-]+$/),
-    direction: z.enum(['CREDIT', 'DEBIT']),
-    amountPaise: z.number().int().min(1).max(MAX_ADMIN_ADJUSTMENT_PAISE),
-    reason: z.string().trim().min(8).max(500),
-  }).strict().parse(req.body);
-  const db = databaseRequired();
-  const adjustment = await db.$transaction((tx) => applyAdminWalletAdjustment(tx, {
-    actorUserId: req.auth!.userId, idempotencyKey: clientKey, ...input,
-  }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  res.status(adjustment.replayed ? 200 : 201).json({ adjustment, message: adjustment.replayed ? 'This adjustment was already recorded; no duplicate ledger entry was created.' : 'Wallet adjustment was recorded in the immutable ledger.' });
+  throw new HttpError(409, 'MAKER_CHECKER_REQUIRED', 'Direct wallet adjustments are retired. Use the independently approved funding and credit workflows. No balance was changed.');
 }));
 
 adminRouter.get('/referrals', asyncRoute(async (req, res) => {

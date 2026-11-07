@@ -92,10 +92,27 @@ export function safeSettingsSnapshot(input: {
   databaseConfigured: boolean;
   walletAdjustmentEnabled: boolean;
   walletAdjustmentAdminConfigured: boolean;
+  walletFundingEnabled?: boolean;
+  walletCreditsEnabled?: boolean;
+  activeSuperAdminCount?: number;
+  independentCheckerAvailable?: boolean;
+  walletCreditBlockers?: string[];
+  walletCreditReadiness?: string;
+  makerCheckerMigration?: string;
+  walletLedgerIntegrity?: string;
+  creditRequestLedgerLinks?: string;
+  fundingRequestLedgerLinks?: string;
+  fundingProvenance?: string;
+  activeSuperAdminCountStatus?: string;
+  externalBankReconciliation?: string;
+  walletProductionApproved?: boolean;
+  settlementCashAccount?: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
   adjustmentFundAccount: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
 }) {
   const funded = input.adjustmentFundAccount.status === 'PROVISIONED' && BigInt(input.adjustmentFundAccount.balancePaise ?? '0') > 0n;
-  const financialControlsReady = input.financialOperationsEnabled && input.walletAdjustmentEnabled;
+  const independentApprovalAvailable = (input.activeSuperAdminCount ?? 0) >= 2;
+  const cashAccount = input.settlementCashAccount ?? { status: 'MISSING' as const, balancePaise: null };
+  const financialControlsReady = input.walletAdjustmentEnabled && input.walletFundingEnabled === true && input.walletCreditsEnabled === true && input.walletProductionApproved === true && funded && independentApprovalAvailable && cashAccount.status === 'PROVISIONED' && input.walletCreditReadiness === 'READY';
   return {
     environment: input.nodeEnv,
     financialOperationsEnabled: input.financialOperationsEnabled,
@@ -109,12 +126,28 @@ export function safeSettingsSnapshot(input: {
       adjustmentFundBalancePaise: input.adjustmentFundAccount.balancePaise,
       adjustmentFundHasFunds: funded,
       singleAdminAdjustmentAccountConfigured: input.walletAdjustmentAdminConfigured,
-      independentApprovalImplemented: false,
-      adminAdjustmentControlsReady: false,
+      independentApprovalImplemented: true,
+      independentApprovalAvailable,
+      independentCheckerAvailable: input.independentCheckerAvailable ?? independentApprovalAvailable,
+      walletCreditBlockers: input.walletCreditBlockers ?? [],
+      walletCreditReadiness: input.walletCreditReadiness ?? (financialControlsReady ? 'PREREQUISITES_PRESENT_REQUIRES_EXPLICIT_APPROVAL' : 'BLOCKED'),
+      makerCheckerMigration: input.makerCheckerMigration ?? 'UNKNOWN',
+      walletLedgerIntegrity: input.walletLedgerIntegrity ?? 'UNKNOWN',
+      creditRequestLedgerLinks: input.creditRequestLedgerLinks ?? 'UNKNOWN',
+      fundingRequestLedgerLinks: input.fundingRequestLedgerLinks ?? 'UNKNOWN',
+      fundingProvenance: input.fundingProvenance ?? 'UNKNOWN',
+      activeSuperAdminCountStatus: input.activeSuperAdminCountStatus ?? 'UNKNOWN',
+      externalBankReconciliation: input.externalBankReconciliation ?? 'NOT_VERIFIED',
+      walletProductionApproved: input.walletProductionApproved ?? false,
+      activeSuperAdminCount: input.activeSuperAdminCount ?? 0,
+      fundingWorkflowEnabled: input.walletFundingEnabled === true,
+      creditWorkflowEnabled: input.walletCreditsEnabled === true,
+      settlementCashAccount: cashAccount,
+      adminAdjustmentControlsReady: financialControlsReady,
       superAdminWalletCreditsEnabled: financialControlsReady,
-      superAdminCreditPrerequisitesReady: false,
-      productionEnablementSupported: false,
-      explanation: 'Production financial operations and manual wallet adjustments are blocked by the deployed server configuration. Keep credits disabled until a provider, documented funding source, reconciliation controls, dual approval, and independent production approval are established.',
+      superAdminCreditPrerequisitesReady: financialControlsReady,
+      productionEnablementSupported: true,
+      explanation: 'Maker-checker requests, funding journals, reconciliation, and audit are implemented. The dedicated Admin workflow remains separate from general payment and payout operations. Production use still requires a legitimate cleared source, external statement reconciliation, distinct maker/checker people, explicit production approval, and passing migration and ledger-integrity checks.',
     },
     editableSettings: [] as string[],
     message: 'System configuration is read-only here. Secrets and financial-operation controls cannot be edited in the Admin UI.',

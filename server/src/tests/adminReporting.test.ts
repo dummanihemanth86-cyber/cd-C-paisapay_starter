@@ -33,8 +33,23 @@ describe('Admin report inputs and summaries', () => {
   it('exposes safe read-only settings without secrets or mutation controls', () => {
     const result = safeSettingsSnapshot({ nodeEnv: 'test', financialOperationsEnabled: false, paymentProvider: 'disabled', otpProvider: 'disabled', databaseConfigured: false, walletAdjustmentEnabled: false, walletAdjustmentAdminConfigured: false, adjustmentFundAccount: { status: 'PROVISIONED', balancePaise: '0' } });
     expect(result).toMatchObject({ financialOperationsEnabled: false, paymentProvider: 'disabled', editableSettings: [] });
-    expect(result.financialSafety).toMatchObject({ walletAdjustmentsEnabled: false, dedicatedAdminAdjustmentAccount: 'PROVISIONED', adjustmentFundBalancePaise: '0', adjustmentFundHasFunds: false, independentApprovalImplemented: false, adminAdjustmentControlsReady: false, superAdminWalletCreditsEnabled: false, superAdminCreditPrerequisitesReady: false, productionEnablementSupported: false });
+    expect(result.financialSafety).toMatchObject({ walletAdjustmentsEnabled: false, dedicatedAdminAdjustmentAccount: 'PROVISIONED', adjustmentFundBalancePaise: '0', adjustmentFundHasFunds: false, independentApprovalImplemented: true, independentApprovalAvailable: false, adminAdjustmentControlsReady: false, superAdminWalletCreditsEnabled: false, superAdminCreditPrerequisitesReady: false, productionEnablementSupported: true });
     expect(Object.keys(result).join(',')).not.toMatch(/secret|password|token|databaseUrl|apiKey/i);
     expect(result.message).toContain('read-only');
+  });
+
+  it('reports the dedicated wallet workflow ready only when release gates and database checks are all satisfied', () => {
+    const result = safeSettingsSnapshot({
+      nodeEnv: 'production', financialOperationsEnabled: false, paymentProvider: 'disabled', otpProvider: 'renflair-v1', databaseConfigured: true,
+      walletAdjustmentEnabled: true, walletFundingEnabled: true, walletCreditsEnabled: true, walletProductionApproved: true,
+      walletCreditReadiness: 'READY', activeSuperAdminCount: 2, independentCheckerAvailable: true,
+      makerCheckerMigration: 'APPLIED', walletLedgerIntegrity: 'BALANCED', creditRequestLedgerLinks: 'RECONCILED', fundingRequestLedgerLinks: 'RECONCILED',
+      activeSuperAdminCountStatus: 'VERIFIED', externalBankReconciliation: 'CHECKER_ATTESTED_REQUIRES_EXTERNAL_RECONCILIATION',
+      walletAdjustmentAdminConfigured: false,
+      settlementCashAccount: { status: 'PROVISIONED', balancePaise: '15000' },
+      adjustmentFundAccount: { status: 'PROVISIONED', balancePaise: '12000' },
+    });
+    expect(result.financialSafety).toMatchObject({ adminAdjustmentControlsReady: true, superAdminWalletCreditsEnabled: true, superAdminCreditPrerequisitesReady: true, walletProductionApproved: true });
+    expect(result.financialOperationsEnabled).toBe(false);
   });
 });

@@ -51,6 +51,7 @@ describe('PaisaPay API foundation', () => {
       ['GET', '/admin/reports'], ['GET', '/admin/settings'],
       ['GET', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credits'],
       ['POST', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credit'],
+      ['GET', '/admin/wallet/credits/requests'], ['GET', '/admin/wallet/funding/requests'], ['GET', '/admin/wallet/reconciliation'],
     ];
     for (const [method, path] of protectedRoutes) {
       const response = await request(app)[method.toLowerCase() as 'get' | 'post'](`/api/v1${path}`);
@@ -105,10 +106,12 @@ describe('PaisaPay API foundation', () => {
       'post /deposits/orders/{id}/confirm', 'post /deposits/orders/{id}/handoff-attempt', 'post /deposits/orders/{id}/payment-reference',
       'post /orders/{id}/dispute', 'post /admin/p2p/offers/{id}/cancel', 'post /admin/p2p/claims/{id}/review',
       'post /support/tickets', 'post /admin/users/{id}/status',
+      'post /admin/wallet/credits/requests', 'post /admin/wallet/credits/requests/{id}/decision',
+      'post /admin/wallet/funding/requests', 'post /admin/wallet/funding/requests/{id}/decision',
       'patch /admin/referrals/config', 'patch /admin/referrals/milestones/{key}', 'post /admin/support/tickets/{id}/reply',
       'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}',
     ];
-    expect(new Set(documentedJsonHandlers).size).toBe(38);
+    expect(new Set(documentedJsonHandlers).size).toBe(42);
     for (const entry of documentedJsonHandlers) {
       const separator = entry.indexOf(' ');
       const method = entry.slice(0, separator);
