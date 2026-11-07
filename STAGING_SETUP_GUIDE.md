@@ -2,27 +2,32 @@
 
 **Project:** `C:\paisapay_starter`
 **Purpose:** isolated, non-payment staging only
-**Status:** instructions only; no cloud resource, database, migration, or deployment was created or accessed while preparing this guide.
+**Status (2026-11-08):** isolated Render project and free PostgreSQL database are provisioned. No API service exists, no migration has run, and no deploy is active. The database expires on 2026-12-08 unless upgraded.
 
 ## Safety boundary
 
-Staging must use a separate Render service and a dedicated Neon project/database containing only disposable staging data. Do not reuse the production Render service, Render environment group, Neon project/branch, connection string, OTP credential, or app build environment. Keep `PAYMENT_PROVIDER=disabled`, `FINANCIAL_OPERATIONS_ENABLED=false`, rewards disabled, and `DEPOSIT_RECEIVER_UPI_ID` unset. The server rejects attempts to enable financial operations in production mode; financial endpoints return HTTP 503 with `FINANCIAL_OPERATIONS_DISABLED`.
+Staging must use the isolated Render project/database described below and a separate Render API service containing only disposable staging data. Do not reuse the production Render service, database, environment group, connection string, OTP credential, or app build environment. Keep `PAYMENT_PROVIDER=disabled`, `FINANCIAL_OPERATIONS_ENABLED=false`, rewards disabled, and `DEPOSIT_RECEIVER_UPI_ID` unset. The server rejects attempts to enable financial operations in production mode; financial endpoints return HTTP 503 with `FINANCIAL_OPERATIONS_DISABLED`.
 
 If the two database URLs cannot be positively identified as staging-only, or if staging OTP credentials and a controlled test phone are unavailable, stop before deploying.
 
-## 1. Create a separate Neon staging database
+## 1. Confirm the isolated Render staging database
 
-1. Sign in to Neon and create a new project named clearly, for example `paisapay-staging`. Prefer a separate project rather than a branch of production so staging cannot inherit production data.
-2. Choose a region close to the Render Singapore service if available. Create a dedicated staging database and a least-privilege application role. Do not use the production role or a personal superuser.
-3. In Neon connection details, obtain:
-   - A **pooled** connection URL for application runtime (`DATABASE_URL`).
-   - A **direct/unpooled** connection URL for Prisma migrations (`DIRECT_DATABASE_URL`).
-4. Confirm in the Neon dashboard that both connections belong to the new staging project, database, and intended staging branch/endpoint. Ensure TLS is enabled (`sslmode=require` or stricter). Record the project/branch name and host separately; never paste full URLs in chat, source, tickets, or logs.
-5. Keep the database empty before the first staging migration. If it is not empty or already contains data, stop and determine who owns it; do not reset or drop it.
+The database has already been created in Render; do not create another one or use a production database.
+
+| Resource | Confirmed value |
+|---|---|
+| Render project | `PaisaPay Admin Staging` (`prj-dbnnpo2jnfac73ct66f0`) |
+| Environment | `Staging` (`evm-dbnnpo2jnfac73ct66fg`) |
+| PostgreSQL service | `paisapay-admin-staging-db` (`dpg-dbnnr3jl550s73fnn4f0-a`) |
+| Database | `paisapay_staging` |
+| Region / plan | Oregon / Free |
+| Current status | Available; expires 2026-12-08 unless upgraded |
+
+The staging Blueprint links this exact Render database to the staging API; it does not accept an arbitrary database URL. Render's generated internal URL has no query parameters by default, so before any deployment add `?sslmode=require` to the linked `DATABASE_URL` in the staging service's Environment page. If a URL already has query parameters, append `&sslmode=require`. Replace any existing weaker `sslmode` value. Do the same for any configured `DIRECT_DATABASE_URL` or `DATABASE_URL_UNPOOLED`. The API and migration config validate TLS before use; Prisma migrations prefer `DIRECT_DATABASE_URL`, then `DATABASE_URL_UNPOOLED`, then `DATABASE_URL`. Keep the database empty before the first migration; do not reset or drop it if it unexpectedly contains data. Never set `NODE_TLS_REJECT_UNAUTHORIZED=0` or use `sslmode=disable`.
 
 ### Verify the staging target without printing credentials
 
-In Render, store each URL as a secret environment variable. Compare the URL host shown by the Neon dashboard with the host in the matching Render value without printing the entire URL. If using a local staging-only PowerShell session, a URI host can be inspected like this (set the variables from staging values only; do not import production values):
+In Render, link the database to the staging service so Render supplies its connection values. Confirm the database resource ID above in the project. Never print the full URL. If an authorized operator needs to inspect a URL host in a private staging-only PowerShell session, use staging values only (never import production values):
 
 ```powershell
 $runtimeUri = [Uri]$env:DATABASE_URL
@@ -31,22 +36,22 @@ $runtimeUri.DnsSafeHost
 $migrationUri.DnsSafeHost
 ```
 
-Both hosts must match the staging endpoint details provided by Neon. The app's Prisma config prefers `DIRECT_DATABASE_URL`, then `DATABASE_URL_UNPOOLED`, then `DATABASE_URL`; the runtime Prisma client uses `DATABASE_URL`. Render does not display or log these values in this guide. Keep staging and production Render services in different environment groups so production values cannot be inherited accidentally.
+Both hosts must identify the Render staging database above. The app's Prisma config prefers `DIRECT_DATABASE_URL`, then `DATABASE_URL_UNPOOLED`, then `DATABASE_URL`; the runtime Prisma client uses `DATABASE_URL`. Keep staging and production Render services in different environments so production values cannot be inherited accidentally.
 
 ## 2. Configure the Render staging service
 
-Create a **new Web Service** in Render from the PaisaPay repository. Do not modify or reuse the existing production service. Use these settings based on the current root `render.yaml`:
+Create a staging-only Blueprint from `render.staging.yaml` in the PaisaPay repository. In the Blueprint setup, select this file explicitly; the existing root `render.yaml` describes the other API service and must not be synced for staging. The staging Blueprint pins the branch, staging project/environment, Oregon region, service name, database link and financial-off settings:
 
 | Render setting | Staging value |
 |---|---|
 | Service name | `paisapay-api-staging` |
 | Runtime | Node |
-| Region | Singapore (or the nearest supported region to the staging Neon project) |
-| Plan | Starter, subject to Render's current pre-deploy command availability |
+| Region | Oregon, matching the existing staging database |
+| Plan | Free to avoid creating a recurring charge; it may sleep between requests. Do not upgrade without approval. |
 | Root directory | `server` |
-| Branch | A dedicated staging branch or the exact reviewed source branch; never allow unreviewed pushes to production service |
-| Build command | `npm ci --include=dev && npm run build` |
-| Pre-deploy command | `npm run db:deploy` — runs migrations; see the migration safeguards below |
+| Branch | `codex/admin-wallet-credit-staging` |
+| Build command | `npm ci --include=dev && npm run db && npm run build` |
+| Pre-deploy command | None on Free tier; `npm run db` applies migrations during the build. |
 | Start command | `npm start` (`node dist/src/server.js`) |
 | Health check path | `/ready` |
 
@@ -62,8 +67,9 @@ Set these in the **staging service's private Render Environment settings**. Neve
 | `NODE_ENV` | `production` (production-mode validation also protects the staging service) |
 | `HOST` | `0.0.0.0` |
 | `PORT` | Let Render set it; do not hardcode a port. |
-| `DATABASE_URL` | Staging Neon pooled TLS URL only. |
-| `DIRECT_DATABASE_URL` | Staging Neon direct TLS URL only; Prisma migration config prefers this. |
+| `DATABASE_URL` | Blueprint-linked URL for `paisapay-admin-staging-db`; manually append `sslmode=require` before deploying. |
+| `DIRECT_DATABASE_URL` | Optional direct Render staging migration URL with `sslmode=require`; if set, it must point to the same staging database. |
+| `DATABASE_URL_UNPOOLED` | Optional migration URL with `sslmode=require`; if set, it must point to the same staging database. |
 | `SESSION_HASH_SECRET` | New random staging-only secret; at least 32 characters. |
 | `BANK_ACCOUNT_ENCRYPTION_KEY` | New random staging-only 32-byte key encoded as 64 hex characters. |
 | `OTP_PROVIDER` | `renflair-v1` |
@@ -126,11 +132,11 @@ Store recovery copies in the organization's approved password/secret manager. Lo
 
 Prisma is configured in `server/prisma.config.ts` with schema `prisma/schema.prisma` and migrations under `prisma/migrations`. Migration connection selection is `DIRECT_DATABASE_URL` → `DATABASE_URL_UNPOOLED` → `DATABASE_URL`. Runtime data access uses the pooled `DATABASE_URL`.
 
-Render's configured `preDeployCommand: npm run db:deploy` executes `prisma migrate deploy`. This applies checked-in pending migrations as part of deployment; it is not a read-only check. Prisma client generation during `npm run build` does not apply migrations.
+`npm run db` is an alias for `npm run db:deploy`, which executes `prisma migrate deploy`. It applies checked-in pending migrations and is not a read-only check. The staging Blueprint runs it in the build command, as requested; the existing root `render.yaml` uses a separate pre-deploy command for its own service. Prisma client generation during `npm run build` does not apply migrations. In production mode, `prisma.config.ts` validates every configured database URL and stops before migration if TLS is missing/disabled or no database URL is present.
 
 Before the first staging deploy:
 
-1. Confirm both Render database URLs target the disposable staging database by matching the host/project/branch in Neon. Verify the migration connection is direct/unpooled.
+1. Confirm the Blueprint-linked `DATABASE_URL` identifies service `dpg-dbnnr3jl550s73fnn4f0-a` and database `paisapay_staging`; confirm it includes `sslmode=require`. Any separate migration URL must resolve to that same database and include `sslmode=require` or `verify-full`.
 2. Review the exact checked-in migration files in `server/prisma/migrations/` and the Git diff. Confirm each migration is expected and safe for a fresh staging database.
 3. Using **staging URLs only**, check migration state from `C:\paisapay_starter\server`:
 
@@ -139,16 +145,16 @@ Before the first staging deploy:
    ```
 
    This contacts the configured database to inspect migration state; ensure environment variables point to staging before running it. This guide itself did not execute it.
-4. If staging contains data worth preserving, take a Neon staging snapshot/branch and confirm restore access. Prefer a fresh disposable database.
-5. Only after reviewing the target and migration set should an authorized operator deploy the staging service and permit Render's `db:deploy` pre-deploy step.
+4. If staging contains data worth preserving, take a Render staging backup/snapshot and confirm restore access. The newly created database should otherwise remain disposable and empty.
+5. Only after reviewing the target and migration set should an authorized operator deploy the staging service and permit its configured `db:deploy` step. On the selected Free tier this runs in the build command, not a pre-deploy phase.
 6. Review Render's migration log and verify expected migration IDs afterwards. Never use `prisma migrate reset`, `db push`, `migrate dev`, or seed commands against production. Do not treat rollback of application code as rollback of database schema.
 
 ## 7. Staging deployment sequence
 
-1. Complete separate Neon project/database creation and save the staging-only connection URLs in the staging Render service.
+1. Use `render.staging.yaml` and select the staging Render project/environment; verify its `fromDatabase` reference points to `paisapay-admin-staging-db`.
 2. Complete all environment settings above; verify payment and financial flags are false/disabled and no deposit recipient is configured.
 3. Review the exact source commit, migration SQL, service root, commands, and host/project IDs. Confirm the Render service is `paisapay-api-staging` and separate from production.
-4. Trigger the staging deploy. Render should install dependencies, build the app, run the pre-deploy migration, then start the already-built API. Monitor each phase; do not copy logs containing environment values.
+4. Before triggering a deploy, manually add `sslmode=require` to the service's linked `DATABASE_URL` and set the two required secret values. Render should install dependencies, validate and apply the reviewed migration against the linked staging database during the build command, build the app, then start the API. Monitor each phase; do not copy logs containing environment values. The TLS guard in `npm run db` must fail before contacting PostgreSQL if TLS is absent or disabled.
 5. If build or migration fails, stop and inspect the staging logs. Do not retry against another database until the configured target has been positively confirmed.
 6. Proceed to smoke checks only after deploy succeeds.
 
@@ -199,9 +205,9 @@ Record the commit, staging database project/branch identifier (not connection st
 1. If the API fails after a deploy, use Render's dashboard to disable/stop the **staging service** or roll back to the last known-good staging deployment. Do not touch the production service.
 2. An application rollback does not reverse database migrations. Do not run `migrate reset`, manually drop tables, or edit `_prisma_migrations` to force a rollback.
 3. If a migration is additive and compatible with the old app version, roll back the app only after confirming compatibility. Otherwise keep staging unavailable and prepare a reviewed forward-fix migration.
-4. Restore a Neon snapshot only for the staging database, only after evaluating data created since the snapshot and confirming the restore target. Restore may discard later staging data. Never restore a staging snapshot over production.
+4. Restore a Render snapshot only for the staging database, only after evaluating data created since the snapshot and confirming the restore target. Restore may discard later staging data. Never restore a staging snapshot over production.
 5. Recheck `/health`, `/ready`, docs, OTP and gate behavior after recovery before resuming staging tests.
 
 ## Current verification status
 
-This document is a setup guide, not a deployment. Source configuration currently defines the Render build/start/health/pre-deploy commands above. Financial operations are fail-closed and production startup rejects enabling them. Local validation reported `npm test`: 137 passed and 52 database tests skipped with `DATABASE_URL` blank; `npm run build`: passed; `git diff --check`: passed with line-ending warnings only. No Neon/Render resource, database, migration, live OTP, or Android staging flow was accessed or tested for this guide. Staging remains blocked until a separate service/database and staging OTP credential are configured and the live checks above pass.
+This guide records a Render staging project and an available, isolated free PostgreSQL database. No staging API service, migration, authenticated API read, live OTP, or maker-checker ledger workflow has yet been deployed or tested. Staging is blocked until a dedicated staging Renflair key and controlled test phone, two separate staging SUPER_ADMIN identities, and a new staging API service are configured. End-to-end funding/credit testing additionally requires cleared funds received into a separately designated staging bank account. Existing local tests and builds passed as recorded in `audit-reports/ADMIN_REPAIR_REPORT.md`; they do not verify deployment or real ledger posting.

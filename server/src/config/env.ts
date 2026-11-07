@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { assertProductionDatabaseUrl } from './databaseUrlSecurity.js';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -19,6 +20,8 @@ const schema = z.object({
   UPI_DEPOSIT_REWARD_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   UPI_DEPOSIT_REWARD_FUNDING_SOURCE: z.string().trim().default(''),
   DATABASE_URL: z.string().optional(),
+  DIRECT_DATABASE_URL: z.string().optional(),
+  DATABASE_URL_UNPOOLED: z.string().optional(),
   SESSION_HASH_SECRET: z.string().min(32).optional(),
   BANK_ACCOUNT_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   OTP_PROVIDER: z.enum(['console', 'disabled', 'twilio', 'android-gateway', 'renflair-v1', 'demo']).default('disabled'),
@@ -120,15 +123,12 @@ if (values.NODE_ENV === 'production') {
   if (missing.length) throw new Error(`Production configuration is incomplete: ${missing.join(', ')}`);
   if (values.SESSION_HASH_SECRET?.toLowerCase().includes('replace-with-')) throw new Error('SESSION_HASH_SECRET still contains the example placeholder. Generate a private random value before production startup.');
   if (values.DATABASE_URL?.includes('CHANGE_ME')) throw new Error('DATABASE_URL still contains the example password placeholder. Configure private database credentials before production startup.');
-  if (values.DATABASE_URL) {
-    let databaseUrl: URL;
-    try { databaseUrl = new URL(values.DATABASE_URL); } catch { throw new Error('DATABASE_URL must be a valid PostgreSQL connection URL.'); }
-    if (!['postgres:', 'postgresql:'].includes(databaseUrl.protocol) || ['localhost', '127.0.0.1', '::1'].includes(databaseUrl.hostname)) {
-      throw new Error('Production DATABASE_URL must point to a remote PostgreSQL service, not localhost.');
-    }
-    if (!['require', 'verify-full'].includes(databaseUrl.searchParams.get('sslmode') ?? '')) {
-      throw new Error('Production DATABASE_URL must enable TLS with sslmode=require or sslmode=verify-full.');
-    }
+  for (const [name, value] of [
+    ['DATABASE_URL', values.DATABASE_URL],
+    ['DIRECT_DATABASE_URL', values.DIRECT_DATABASE_URL],
+    ['DATABASE_URL_UNPOOLED', values.DATABASE_URL_UNPOOLED],
+  ] as const) {
+    if (value) assertProductionDatabaseUrl(name, value);
   }
   const productionOrigins = values.APP_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean);
   if (productionOrigins.some((origin) => {
