@@ -8,6 +8,8 @@
     "start:go": "expo start --go --lan",
     "start:dev-client": "expo start --dev-client --lan",
     "android": "expo run:android",
+    "android:deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/admin-android-deploy.ps1",
+    "android:watch": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/admin-android-watch.ps1",
     "prebuild:android": "expo prebuild --platform android",
     "build:android:debug": "cd android && gradlew.bat assembleDebug",
     "build:android:staging": "set EXPO_PUBLIC_API_URL=https://paisapay-api-staging.onrender.com&& cd android && gradlew.bat assembleRelease",
