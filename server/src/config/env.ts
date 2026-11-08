@@ -40,6 +40,7 @@ const schema = z.object({
   WALLET_ADJUSTMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_FUNDING_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_STAGING_DIRECT_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   WALLET_ADJUSTMENT_ADMIN_USER_ID: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value, z.string().uuid().optional()),
@@ -66,9 +67,13 @@ const values = parsed.data;
 // Render's project/environment labels are not injected into the process. Require an
 // explicit deployment label plus Render's immutable service identity for the one
 // approved staging service before allowing financial routes in production mode.
-const isExplicitRenderStaging = values.PAISAPAY_DEPLOYMENT_ENV === 'staging'
+const isExplicitRenderStaging = values.NODE_ENV === 'production'
+  && values.PAISAPAY_DEPLOYMENT_ENV === 'staging'
   && process.env.RENDER === 'true'
   && process.env.RENDER_SERVICE_NAME === 'paisapay-api-staging';
+if (values.ADMIN_STAGING_DIRECT_CREDITS_ENABLED && !isExplicitRenderStaging) {
+  throw new Error('ADMIN_STAGING_DIRECT_CREDITS_ENABLED may be enabled only on the explicitly identified paisapay-api-staging Render service with PAISAPAY_DEPLOYMENT_ENV=staging.');
+}
 if (Math.min(values.MAX_DEPOSIT_PAISE, 1_000_000) < values.MIN_DEPOSIT_PAISE) throw new Error('MIN_DEPOSIT_PAISE must not exceed the ₹10,000 deposit cap or MAX_DEPOSIT_PAISE.');
 if (Boolean(values.SMS_GATEWAY_URL) !== Boolean(values.SMS_GATEWAY_API_KEY)) {
   throw new Error('SMS_GATEWAY_URL and SMS_GATEWAY_API_KEY must either both be configured or both be empty.');
@@ -202,6 +207,8 @@ export const env = {
   walletAdjustmentsEnabled: values.WALLET_ADJUSTMENTS_ENABLED,
   adminWalletFundingEnabled: values.ADMIN_WALLET_FUNDING_ENABLED,
   adminWalletCreditsEnabled: values.ADMIN_WALLET_CREDITS_ENABLED,
+  stagingDirectWalletCreditsEnabled: values.ADMIN_STAGING_DIRECT_CREDITS_ENABLED && isExplicitRenderStaging,
+  isExplicitRenderStaging,
   adminWalletProductionApproved: values.ADMIN_WALLET_PRODUCTION_APPROVED,
   adminWalletExternalReconciliationVerified: values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED,
   walletAdjustmentAdminUserId: values.WALLET_ADJUSTMENT_ADMIN_USER_ID,

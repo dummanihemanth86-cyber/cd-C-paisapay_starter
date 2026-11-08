@@ -156,6 +156,68 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
     expect(operation.responses['409'].content?.['application/json']?.schema).toEqual({ $ref: '#/components/schemas/ApiError' });
   });
 
+  it('keeps the new direct-credit route unavailable outside explicit staging and write-free', async () => {
+    const previous = { enabled: env.stagingDirectWalletCreditsEnabled, staging: env.isExplicitRenderStaging };
+    env.stagingDirectWalletCreditsEnabled = false;
+    env.isExplicitRenderStaging = false;
+    fakeDatabase.administrator.role = 'SUPER_ADMIN';
+    fakeDatabase.writes.length = 0;
+    try {
+      const response = await request(app)
+        .post('/api/v1/admin/wallet/credits/direct')
+        .set(authorization)
+        .set('Idempotency-Key', 'a4f63025-05b9-41af-a714-59e44bc92a4e')
+        .send({})
+        .expect(404);
+      expect(response.body.error.code).toBe('STAGING_DIRECT_CREDIT_UNAVAILABLE');
+      assertOpenApiResponse(openapi, 'POST', '/admin/wallet/credits/direct', response);
+      expect(fakeDatabase.writes).toEqual([]);
+    } finally {
+      env.stagingDirectWalletCreditsEnabled = previous.enabled;
+      env.isExplicitRenderStaging = previous.staging;
+    }
+  });
+
+  it('keeps direct staging credit disabled without the dedicated flag, even on staging', async () => {
+    const previous = { enabled: env.stagingDirectWalletCreditsEnabled, staging: env.isExplicitRenderStaging };
+    env.stagingDirectWalletCreditsEnabled = false;
+    env.isExplicitRenderStaging = true;
+    fakeDatabase.administrator.role = 'SUPER_ADMIN';
+    fakeDatabase.writes.length = 0;
+    try {
+      const response = await request(app)
+        .post('/api/v1/admin/wallet/credits/direct')
+        .set(authorization)
+        .set('Idempotency-Key', 'c965733c-8d85-4597-87ec-20c7ca1187bf')
+        .send({})
+        .expect(503);
+      expect(response.body.error.code).toBe('STAGING_DIRECT_CREDIT_DISABLED');
+      assertOpenApiResponse(openapi, 'POST', '/admin/wallet/credits/direct', response);
+      expect(fakeDatabase.writes).toEqual([]);
+    } finally {
+      env.stagingDirectWalletCreditsEnabled = previous.enabled;
+      env.isExplicitRenderStaging = previous.staging;
+    }
+  });
+
+  it('rejects direct-credit mutations from non-SUPER_ADMIN roles before financial checks', async () => {
+    const previousRole = fakeDatabase.administrator.role;
+    fakeDatabase.administrator.role = 'ADMIN';
+    fakeDatabase.writes.length = 0;
+    try {
+      const response = await request(app)
+        .post('/api/v1/admin/wallet/credits/direct')
+        .set(authorization)
+        .send({})
+        .expect(403);
+      expect(response.body.error.code).toBe('ADMIN_PERMISSION_DENIED');
+      assertOpenApiResponse(openapi, 'POST', '/admin/wallet/credits/direct', response);
+      expect(fakeDatabase.writes).toEqual([]);
+    } finally {
+      fakeDatabase.administrator.role = previousRole;
+    }
+  });
+
   it('retires the legacy adjustment endpoint regardless of admin role', async () => {
     const previous = { adminId: env.walletAdjustmentAdminUserId, role: fakeDatabase.administrator.role };
     env.walletAdjustmentAdminUserId = fakeDatabase.user.id;

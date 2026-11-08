@@ -106,6 +106,8 @@ export function safeSettingsSnapshot(input: {
   activeSuperAdminCountStatus?: string;
   externalBankReconciliation?: string;
   walletProductionApproved?: boolean;
+  stagingDirectWalletCreditsEnabled?: boolean;
+  stagingDirectWalletCreditBlockers?: string[];
   settlementCashAccount?: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
   adjustmentFundAccount: { status: 'PROVISIONED' | 'MISSING' | 'CHECK_FAILED'; balancePaise: string | null };
 }) {
@@ -138,6 +140,8 @@ export function safeSettingsSnapshot(input: {
       fundingProvenance: input.fundingProvenance ?? 'UNKNOWN',
       activeSuperAdminCountStatus: input.activeSuperAdminCountStatus ?? 'UNKNOWN',
       externalBankReconciliation: input.externalBankReconciliation ?? 'NOT_VERIFIED',
+      stagingDirectWalletCreditsEnabled: input.stagingDirectWalletCreditsEnabled ?? false,
+      stagingDirectWalletCreditBlockers: input.stagingDirectWalletCreditBlockers ?? [],
       walletProductionApproved: input.walletProductionApproved ?? false,
       activeSuperAdminCount: input.activeSuperAdminCount ?? 0,
       fundingWorkflowEnabled: input.walletFundingEnabled === true,

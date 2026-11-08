@@ -67,10 +67,15 @@ export async function readWalletCreditReadiness(db: PrismaClient) {
     ...(approvedFundingCount <= 0 ? ['No independently approved funding request is recorded'] : []),
     ...(adjustmentFundAccount.status !== 'PROVISIONED' || adjustmentFundBalancePaise <= 0n ? ['ADMIN_ADJUSTMENT_FUND has no positive posted ledger balance'] : []),
   ];
+  const directCreditBlockers = [
+    ...baseBlockers.filter((blocker) => !blocker.startsWith('Fewer than two active SUPER_ADMIN accounts')),
+    ...(approvedFundingCount <= 0 ? ['No independently approved funding request is recorded'] : []),
+    ...(adjustmentFundAccount.status !== 'PROVISIONED' || adjustmentFundBalancePaise <= 0n ? ['ADMIN_ADJUSTMENT_FUND has no positive posted ledger balance'] : []),
+  ];
   return {
     adjustmentFundAccount, settlementCashAccount, migration, ledgerIntegrity, creditRequestLedgerLinks,
     fundingRequestLedgerLinks, fundingProvenance, activeSuperAdminCount, activeSuperAdminCountStatus: activeAdmins.status,
-    approvedFundingCount, fundingBlockers, creditBlockers,
+    approvedFundingCount, fundingBlockers, creditBlockers, directCreditBlockers,
     externalBankReconciliation: approvedFundingCount > 0 ? 'CHECKER_ATTESTED_REQUIRES_EXTERNAL_RECONCILIATION' : 'NOT_VERIFIED',
   };
 }

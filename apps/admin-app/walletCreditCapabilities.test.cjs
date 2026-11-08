@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canDecideWalletRequest, canRequestWalletCredit } = require('./walletCreditCapabilities.cjs');
+const { canDecideWalletRequest, canRequestWalletCredit, canDirectWalletCredit } = require('./walletCreditCapabilities.cjs');
 
 const ready = {
   role: 'SUPER_ADMIN',
@@ -21,4 +21,10 @@ test('credit and funding decisions are disabled unless their matching server cap
   assert.equal(canDecideWalletRequest({ ...ready, walletFundingRequestsEnabled: false }, 'funding'), false);
   assert.equal(canDecideWalletRequest({ ...ready, role: 'FINANCE' }, 'credit'), false);
   assert.equal(canDecideWalletRequest(ready, 'unknown'), false);
+});
+
+test('direct wallet credit requires the staging-specific server capability and SUPER_ADMIN role', () => {
+  assert.equal(canDirectWalletCredit({ ...ready, stagingDirectWalletCreditsEnabled: true }), true);
+  assert.equal(canDirectWalletCredit(ready), false);
+  assert.equal(canDirectWalletCredit({ ...ready, role: 'ADMIN', stagingDirectWalletCreditsEnabled: true }), false);
 });

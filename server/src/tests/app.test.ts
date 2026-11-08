@@ -51,6 +51,7 @@ describe('PaisaPay API foundation', () => {
       ['GET', '/admin/reports'], ['GET', '/admin/settings'],
       ['GET', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credits'],
       ['POST', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credit'],
+      ['POST', '/admin/wallet/credits/direct'],
       ['GET', '/admin/wallet/credits/requests'], ['GET', '/admin/wallet/funding/requests'], ['GET', '/admin/wallet/reconciliation'],
     ];
     for (const [method, path] of protectedRoutes) {
@@ -410,6 +411,7 @@ describe('PaisaPay API foundation', () => {
     ['POST', '/api/v1/deposits/quick-match'], ['GET', '/api/v1/deposits/orders/my'],
     ['GET', '/api/v1/notifications'], ['GET', '/api/v1/support/tickets'], ['POST', '/api/v1/support/tickets'],
     ['GET', '/api/v1/admin/me'], ['POST', '/api/v1/admin/push-devices'], ['GET', '/api/v1/admin/push-events'],
+    ['POST', '/api/v1/admin/wallet/credits/direct'],
     ['GET', '/api/v1/admin/p2p/offers'], ['GET', '/api/v1/admin/p2p/orders'], ['GET', '/api/v1/admin/p2p/claims'],
     ['GET', '/api/v1/admin/reconciliation/claims'],
   ])('requires authentication for %s %s', async (method, path) => {

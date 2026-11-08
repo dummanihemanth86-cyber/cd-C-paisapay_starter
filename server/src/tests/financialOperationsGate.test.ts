@@ -30,6 +30,7 @@ describe('financial operations safety gate policy', () => {
       UPI_DEPOSIT_REWARD_ENABLED: 'false',
       PAYMENT_PROVIDER: 'disabled',
       FINANCIAL_OPERATIONS_ENABLED: 'false',
+      ADMIN_STAGING_DIRECT_CREDITS_ENABLED: 'false',
       DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
       ...overrides,
     };
@@ -42,6 +43,7 @@ describe('financial operations safety gate policy', () => {
 
   it('defaults to disabled in the test environment and has a stable error code', () => {
     expect(env.financialOperationsEnabled).toBe(false);
+    expect(env.stagingDirectWalletCreditsEnabled).toBe(false);
     expect(env.walletAdjustmentsEnabled).toBe(false);
     expect(FINANCIAL_OPERATIONS_DISABLED_CODE).toBe('FINANCIAL_OPERATIONS_DISABLED');
   });
@@ -102,6 +104,27 @@ describe('financial operations safety gate policy', () => {
       FINANCIAL_OPERATIONS_ENABLED: 'false',
     });
     expect(result.status).toBe(0);
+  });
+
+  it('allows the separate direct-credit flag only on the explicitly identified staging service', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
+      ADMIN_STAGING_DIRECT_CREDITS_ENABLED: 'true',
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('rejects direct staging credits on the production Render service even if the staging label is set', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      ADMIN_STAGING_DIRECT_CREDITS_ENABLED: 'true',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('ADMIN_STAGING_DIRECT_CREDITS_ENABLED may be enabled only');
   });
 
   it('rejects financial operations in production even if the staging label is mistakenly set', () => {

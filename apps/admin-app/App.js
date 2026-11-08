@@ -9,7 +9,7 @@ const { adminRecordDetailPath } = require('../../shared/adminRecordNavigation.cj
 const { financialActionState } = require('../../shared/adminFinancialUx.cjs');
 const { parseRupeesToPaise, walletAdjustmentUiState, newIdempotencyKey } = require('../../shared/walletAdjustmentUi.cjs');
 const { adminPhoneInputDigits, normalizeAdminPhone, canSubmitAdminPasswordReset } = require('./adminPasswordResetUi.cjs');
-const { canDecideWalletRequest, canRequestWalletCredit } = require('./walletCreditCapabilities.cjs');
+const { canDecideWalletRequest, canRequestWalletCredit, canDirectWalletCredit } = require('./walletCreditCapabilities.cjs');
 
 
 const API = (process.env.EXPO_PUBLIC_API_URL || 'https://paisapay-api.onrender.com').trim().replace(/\/$/, '');
@@ -135,7 +135,8 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
   const [searchError, setSearchError] = useState('');
   const submissionKey = useRef('');
   const submissionFingerprint = useRef('');
-  const creditEnabled = canRequestWalletCredit(profile);
+  const directCreditEnabled = canDirectWalletCredit(profile);
+  const creditEnabled = directCreditEnabled || canRequestWalletCredit(profile);
   const amountPaise = parseRupeesToPaise(rupees);
   const search = async () => {
     if (profile?.role !== 'SUPER_ADMIN') return;
@@ -168,10 +169,12 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
     if (submissionFingerprint.current !== fingerprint) { submissionFingerprint.current = fingerprint; submissionKey.current = newIdempotencyKey(); }
     setBusy(true); setSearchError('');
     try {
-      const result = await request('/api/v1/admin/wallet/credits/requests', {
+      const result = await request(directCreditEnabled ? '/api/v1/admin/wallet/credits/direct' : '/api/v1/admin/wallet/credits/requests', {
         token: access, method: 'POST', headers: { 'Idempotency-Key': submissionKey.current }, body: { targetUserId: selected.id, verifiedPublicId: selected.publicId, verifiedPhoneMasked: selected.phoneMasked, verifiedWalletBalancePaise: Number(selected.walletBalancePaise), amountPaise, reason: reason.trim() },
       });
-      setInfo(`${result.message} Request ${result.request?.id || 'submitted'}.`);
+      setInfo(directCreditEnabled
+        ? `${result.message} New wallet balance ${formatPaise(result.balancePaise)}. Ledger transaction ${result.credit?.id || 'recorded'}.`
+        : `${result.message} Request ${result.request?.id || 'submitted'}.`);
       submissionKey.current = ''; submissionFingerprint.current = ''; setRupees(''); setReason(''); await select(selected); await loadSection('walletCredits');
     } catch (error) { setSearchError(error.message); }
     finally { setBusy(false); }
@@ -188,19 +191,19 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
         return;
       }
       setSelected(verified);
-      Alert.alert('Confirm wallet credit request', `Request ${formatPaise(amountPaise)} for ${verified.displayName || 'PaisaPay user'}?\nPublic ID: ${verified.publicId}\nAccount ID: ${verified.id}\nPhone: ${verified.phoneMasked}\nCurrent available balance: ${formatPaise(verified.walletBalancePaise)}\n\nA different SUPER_ADMIN must approve. No balance changes until approval posts a ledger transaction.`, [
-        { text: 'Cancel', style: 'cancel' }, { text: 'Submit request', onPress: () => { void submit(); } },
+      Alert.alert(directCreditEnabled ? 'Confirm direct staging credit' : 'Confirm wallet credit request', `${directCreditEnabled ? 'Post' : 'Request'} ${formatPaise(amountPaise)} for ${verified.displayName || 'PaisaPay user'}?\nPublic ID: ${verified.publicId}\nAccount ID: ${verified.id}\nPhone: ${verified.phoneMasked}\nCurrent available balance: ${formatPaise(verified.walletBalancePaise)}\n${directCreditEnabled ? 'A real ledger credit will post immediately from the funded staging adjustment account.' : 'A different SUPER_ADMIN must approve. No balance changes until approval posts a ledger transaction.'}`, [
+        { text: 'Cancel', style: 'cancel' }, { text: directCreditEnabled ? 'Credit wallet' : 'Submit request', onPress: () => { void submit(); } },
       ]);
     } catch (error) { setSearchError(error.message); }
     finally { setBusy(false); }
   };
   return <View>
-    <View style={styles.card}><Text style={styles.cardEyebrow}>SUPER ADMIN · MAKER</Text><Text style={styles.cardTitle}>Request a wallet credit</Text><Text style={styles.cardNote}>Search by public ID, phone number, account UUID, or name. Confirm returned account details. A separate active SUPER_ADMIN must approve a request before it can post.</Text>{!creditEnabled ? <FinancialActionNotice title="Credit requests are disabled" reason={[!profile?.walletAdjustmentsEnabled && 'WALLET_ADJUSTMENTS_ENABLED is false', !profile?.adminWalletCreditsEnabled && 'ADMIN_WALLET_CREDITS_ENABLED is false', ...(profile?.walletCreditBlockers || [])].filter(Boolean).join('; ') || 'The deployed service requires explicit finance and security authorization before these controls can be enabled.'}/> : null}
+    <View style={styles.card}><Text style={styles.cardEyebrow}>{directCreditEnabled ? 'SUPER ADMIN · STAGING DIRECT CREDIT' : 'SUPER ADMIN · MAKER'}</Text><Text style={styles.cardTitle}>{directCreditEnabled ? 'Direct wallet credit' : 'Request a wallet credit'}</Text><Text style={styles.cardNote}>Search by public ID, phone number, account UUID, or name. Confirm the returned account details and balance. {directCreditEnabled ? 'This staging-only action posts immediately from the verified funded adjustment account and records a ledger transaction and audit entry.' : 'A separate active SUPER_ADMIN must approve a request before it can post.'}</Text>{!creditEnabled ? <FinancialActionNotice title="Credit requests are disabled" reason={[!profile?.walletAdjustmentsEnabled && 'WALLET_ADJUSTMENTS_ENABLED is false', !profile?.adminWalletCreditsEnabled && 'ADMIN_WALLET_CREDITS_ENABLED is false', ...(profile?.walletCreditBlockers || []), ...(profile?.stagingDirectWalletCreditBlockers || [])].filter(Boolean).join('; ') || 'The deployed service requires explicit finance and security authorization before these controls can be enabled.'}/> : null}
       <Text style={styles.label}>User lookup</Text><TextInput style={styles.input} value={query} onChangeText={setQuery} placeholder="User ID, phone, or name" placeholderTextColor={COLORS.muted} autoCapitalize="none" onSubmitEditing={search}/><Button title={busy ? 'Searching…' : 'Search users'} onPress={search} disabled={busy}/>
       {matches.map(user => <Pressable key={user.id} style={styles.detailGroup} onPress={() => select(user)}><Text style={styles.detailSectionTitle}>{user.displayName || 'PaisaPay user'} · {user.publicId || user.id}</Text><Text style={styles.rowDetail}>{user.phoneMasked} · {user.status} · Balance {formatPaise(user.walletBalancePaise)}</Text></Pressable>)}
       {selected ? <><View style={styles.detailGroup}><Text style={styles.detailSectionTitle}>Verified account details</Text><DetailFields value={selected}/><Text style={styles.detailValue}>Current available balance · {formatPaise(selected.walletBalancePaise)}</Text><Text style={styles.detailValue}>Reserved balance · {formatPaise(selected.reservedBalancePaise)}</Text></View>
-        <Text style={styles.label}>Credit amount (₹100–₹10,000)</Text><TextInput style={styles.input} value={rupees} onChangeText={setRupees} keyboardType="decimal-pad" placeholder="100.00" placeholderTextColor={COLORS.muted}/><Text style={styles.label}>Required reason (8–500 characters)</Text><TextInput style={[styles.input, styles.multiline]} value={reason} onChangeText={setReason} multiline maxLength={500} placeholder="Explain why this credit is requested" placeholderTextColor={COLORS.muted}/><Button title={busy ? 'Submitting…' : `Request ${amountPaise == null ? '' : formatPaise(amountPaise)}`} onPress={confirm} disabled={!creditEnabled || busy || amountPaise === null || amountPaise < 10000 || amountPaise > 1000000 || reason.trim().length < 8}/>
-        <Text style={styles.label}>Credit requests and decisions</Text>{creditRequests.length ? creditRequests.map(item => <View key={item.id} style={styles.row}><Text style={styles.rowTitle}>{formatPaise(item.amountPaise)} · {item.displayStatus === 'APPROVED' ? 'APPROVED · ledger posting missing' : item.displayStatus === 'COMPLETED' ? 'COMPLETED · approved and posted' : item.displayStatus === 'REJECTED' ? 'REJECTED' : 'PENDING APPROVAL'}</Text><Text style={styles.rowDetail}>{item.reason} · Requested {new Date(item.createdAt).toLocaleString()}</Text>{item.checkerUser ? <Text style={styles.rowDetail}>Checked by {item.checkerUser.displayName || item.checkerUser.publicId} · {item.decisionReason || 'No decision reason returned'}</Text> : null}{item.ledgerTransactionId ? <Text style={styles.rowDetail}>Ledger transaction · {item.ledgerTransactionId}</Text> : null}</View>) : <Text style={styles.cardNote}>No Admin credit requests recorded for this user.</Text>}
+        <Text style={styles.label}>Credit amount (₹100–₹10,000)</Text><TextInput style={styles.input} value={rupees} onChangeText={setRupees} keyboardType="decimal-pad" placeholder="100.00" placeholderTextColor={COLORS.muted}/><Text style={styles.label}>Required reason (8–500 characters)</Text><TextInput style={[styles.input, styles.multiline]} value={reason} onChangeText={setReason} multiline maxLength={500} placeholder="Explain why this credit is requested" placeholderTextColor={COLORS.muted}/><Button title={busy ? 'Submitting…' : `${directCreditEnabled ? 'Direct credit' : 'Request'} ${amountPaise == null ? '' : formatPaise(amountPaise)}`} onPress={confirm} disabled={!creditEnabled || busy || amountPaise === null || amountPaise < 10000 || amountPaise > 1000000 || reason.trim().length < 8}/>
+        <Text style={styles.label}>Credit requests and decisions</Text>{creditRequests.length ? creditRequests.map(item => <View key={item.id} style={styles.row}><Text style={styles.rowTitle}>{formatPaise(item.amountPaise)} · {item.displayStatus === 'APPROVED' ? 'APPROVED · ledger posting missing' : item.displayStatus === 'COMPLETED' ? 'COMPLETED · approved and posted' : item.displayStatus === 'REJECTED' ? 'REJECTED' : 'PENDING APPROVAL'}</Text><Text style={styles.rowDetail}>{item.reason} · Requested {new Date(item.createdAt).toLocaleString()}</Text>{item.checkerUser ? <Text style={styles.rowDetail}>Checked by {item.checkerUser.displayName || item.checkerUser.publicId} · {item.decisionReason || 'No decision reason returned'}</Text> : !item.checkerUser && item.status === 'APPROVED' ? <Text style={styles.rowDetail}>Authorized direct staging credit · no checker approval</Text> : null}{item.ledgerTransactionId ? <Text style={styles.rowDetail}>Ledger transaction · {item.ledgerTransactionId}</Text> : null}</View>) : <Text style={styles.cardNote}>No Admin credit requests recorded for this user.</Text>}
         <Text style={styles.label}>Completed Admin credit ledger history</Text>{credits.length ? credits.map(item => <View key={item.id} style={styles.row}><Text style={styles.rowTitle}>{formatPaise(item.amountPaise)} · {new Date(item.createdAt).toLocaleString()}</Text><Text style={styles.rowDetail}>{item.reason} · {item.transactionReference}</Text></View>) : <Text style={styles.cardNote}>No Admin credits have been posted to this wallet.</Text>}
       </> : null}
       {searchError ? <Text style={styles.error}>{searchError}</Text> : null}

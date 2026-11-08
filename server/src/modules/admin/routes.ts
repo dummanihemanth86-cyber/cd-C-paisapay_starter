@@ -14,6 +14,7 @@ import { env } from '../../config/env.js';
 import { formatReportResult, hasMoney, reportQuerySchema, safeSettingsSnapshot, type ReportKind } from './reporting.js';
 import { MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from './walletAdjustment.js';
 import { createCreditRequest, decideCreditRequest, createFundingRequest, decideFundingRequest, ADMIN_ADJUSTMENT_FUND_ID, ADMIN_SETTLEMENT_CASH_ID } from './walletCreditWorkflow.js';
+import { createStagingDirectCredit } from './stagingDirectWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
 import { createOtpChallenge } from '../auth/routes.js';
 
@@ -191,6 +192,8 @@ adminRouter.get('/settings', asyncRoute(async (req, res) => {
     activeSuperAdminCountStatus: readiness.activeSuperAdminCountStatus,
     externalBankReconciliation: env.adminWalletExternalReconciliationVerified ? 'OPERATOR_ATTESTED_REQUIRES_RETAINED_FINANCE_EVIDENCE' : readiness.externalBankReconciliation,
     walletCreditReadiness,
+    stagingDirectWalletCreditsEnabled: env.stagingDirectWalletCreditsEnabled,
+    stagingDirectWalletCreditBlockers: stagingDirectWalletCreditBlockers(readiness),
     walletAdjustmentAdminConfigured: Boolean(env.walletAdjustmentAdminUserId),
     settlementCashAccount: readiness.settlementCashAccount,
     adjustmentFundAccount: readiness.adjustmentFundAccount,
@@ -217,6 +220,7 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
   ];
   const walletCreditBlockers = [...(walletReadiness?.creditBlockers ?? []), ...releaseBlockers];
   const walletFundingBlockers = [...(walletReadiness?.fundingBlockers ?? []), ...releaseBlockers];
+  const directCreditBlockers = walletReadiness ? stagingDirectWalletCreditBlockers(walletReadiness) : ['Only SUPER_ADMIN can view staging direct-credit readiness'];
   const walletCreditRequestsEnabled = walletCreditsAllowed && walletProductionAuthorized && env.adminWalletCreditsEnabled && env.walletAdjustmentsEnabled && walletReadiness?.creditBlockers.length === 0;
   const walletFundingRequestsEnabled = walletCreditsAllowed && walletProductionAuthorized && env.adminWalletFundingEnabled && env.adminWalletCreditsEnabled && env.walletAdjustmentsEnabled && walletReadiness?.fundingBlockers.length === 0;
   const allowedSections = [...(roleViews[role] || common)];
@@ -240,6 +244,8 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     walletFundingRequestsEnabled,
     walletCreditBlockers,
     walletFundingBlockers,
+    stagingDirectWalletCreditsEnabled: walletCreditsAllowed && env.stagingDirectWalletCreditsEnabled && directCreditBlockers.length === 0,
+    stagingDirectWalletCreditBlockers: directCreditBlockers,
   });
 }));
 
@@ -451,14 +457,52 @@ adminRouter.post('/users/:id/wallet/credit', adminMutationLimit, asyncRoute(asyn
   throw new HttpError(409, 'MAKER_CHECKER_REQUIRED', 'Direct wallet credits are retired. Submit a credit request and obtain approval from a different active SUPER_ADMIN. No balance was changed.');
 }));
 
+adminRouter.post('/wallet/credits/direct', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  await assertStagingDirectWalletCreditEnabled();
+  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({
+    targetUserId: z.string().uuid(),
+    verifiedPublicId: z.string().trim().min(1).max(50),
+    verifiedPhoneMasked: z.string().trim().min(4).max(32),
+    verifiedWalletBalancePaise: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    amountPaise: z.number().int().min(MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE).max(MAX_ADMIN_ADJUSTMENT_PAISE),
+    reason: z.string().trim().min(8).max(500),
+  }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => createStagingDirectCredit(tx, { actorUserId: req.auth!.userId, idempotencyKey, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(result.replayed ? 200 : 201).json({
+    request: walletWorkflowRequestForApi(result.request),
+    credit: result.credit,
+    replayed: result.replayed,
+    balancePaise: result.credit.balancePaise,
+    message: result.replayed ? 'The matching staging direct credit was already posted; no duplicate ledger entries were created.' : 'Staging direct credit posted atomically from the funded adjustment account with ledger and audit records.',
+  });
+}));
+
 function assertWalletProductionApproval() {
   if (env.nodeEnv === 'production' && (!env.adminWalletProductionApproved || !env.adminWalletExternalReconciliationVerified)) throw new HttpError(503, 'WALLET_PRODUCTION_APPROVAL_REQUIRED', 'The dedicated Admin wallet production release and independent external bank reconciliation have not both been explicitly approved. No financial change was made.');
+}
+function stagingDirectWalletCreditBlockers(readiness: Awaited<ReturnType<typeof readWalletCreditReadiness>>) {
+  return [
+    ...(!env.isExplicitRenderStaging ? ['Service is not the explicitly identified Render staging API'] : []),
+    ...(!env.stagingDirectWalletCreditsEnabled ? ['ADMIN_STAGING_DIRECT_CREDITS_ENABLED is false'] : []),
+    ...readiness.directCreditBlockers,
+  ];
 }
 async function assertWalletCreditWorkflowEnabled() {
   if (!env.adminWalletCreditsEnabled || !env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_CREDITS_DISABLED', 'Wallet credit requests are disabled by dedicated server financial controls. No balance was changed.');
   assertWalletProductionApproval();
   const readiness = await readWalletCreditReadiness(databaseRequired());
   if (readiness.creditBlockers.length) throw new HttpError(503, 'WALLET_CREDITS_NOT_READY', `Wallet credit prerequisites are not ready: ${readiness.creditBlockers.join('; ')}. No balance was changed.`);
+}
+async function assertStagingDirectWalletCreditEnabled() {
+  if (!env.isExplicitRenderStaging) throw new HttpError(404, 'STAGING_DIRECT_CREDIT_UNAVAILABLE', 'Direct wallet credits are available only on the explicitly identified staging service.');
+  if (!env.stagingDirectWalletCreditsEnabled) throw new HttpError(503, 'STAGING_DIRECT_CREDIT_DISABLED', 'Direct staging credits are disabled by ADMIN_STAGING_DIRECT_CREDITS_ENABLED. No balance was changed.');
+  const readiness = await readWalletCreditReadiness(databaseRequired());
+  if (readiness.directCreditBlockers.length) {
+    throw new HttpError(503, 'STAGING_DIRECT_CREDIT_NOT_READY', `Staging direct-credit prerequisites are not ready: ${readiness.directCreditBlockers.join('; ')}. No balance was changed.`);
+  }
 }
 async function assertWalletFundingWorkflowEnabled() {
   if (!env.adminWalletFundingEnabled || !env.adminWalletCreditsEnabled || !env.walletAdjustmentsEnabled) throw new HttpError(503, 'WALLET_FUNDING_DISABLED', 'Wallet funding is disabled by dedicated server financial controls. No ledger balance was changed.');
