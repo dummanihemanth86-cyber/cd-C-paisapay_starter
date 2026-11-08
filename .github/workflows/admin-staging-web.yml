@@ -48,7 +48,7 @@ jobs:
           WEB_URL="https://dummanihemanth86-cyber.github.io/cd-C-paisapay_starter/"
           API_URL="https://paisapay-api-staging.onrender.com"
           mkdir -p apps/admin-app/public
-          APP_VERSION="$APP_VERSION" BUILD_ID="$BUILD_ID" BUILD_CODE="$BUILD_CODE" node -e 'const fs=require("node:fs");const data={appId:"com.paisapay.admin",version:process.env.APP_VERSION,buildId:process.env.BUILD_ID,buildCode:Number(process.env.BUILD_CODE),deploymentEnvironment:"staging",deployedAt:new Date().toISOString()};fs.writeFileSync("apps/admin-app/public/admin-version.json",JSON.stringify(data)+"\n");'
+          APP_VERSION="$APP_VERSION" BUILD_ID="$BUILD_ID" BUILD_CODE="$BUILD_CODE" API_URL="$API_URL" node -e 'const fs=require("node:fs");const data={appId:"com.paisapay.admin",version:process.env.APP_VERSION,buildId:process.env.BUILD_ID,buildCode:Number(process.env.BUILD_CODE),apiBase:process.env.API_URL,deploymentEnvironment:"staging",deployedAt:new Date().toISOString()};fs.writeFileSync("apps/admin-app/public/admin-version.json",JSON.stringify(data)+"\n");'
           {
             echo "EXPO_NO_DOTENV=1"
             echo "EXPO_PUBLIC_API_URL=$API_URL"
@@ -76,7 +76,7 @@ jobs:
           fi
           test -s apps/admin-app/dist/index.html
           test -s apps/admin-app/dist/admin-version.json
-          grep -q 'paisapay-api-staging.onrender.com' apps/admin-app/dist/admin-version.json
+          grep -q '"apiBase":"https://paisapay-api-staging.onrender.com"' apps/admin-app/dist/admin-version.json
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

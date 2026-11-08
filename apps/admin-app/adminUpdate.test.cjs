@@ -9,7 +9,7 @@ const {
 } = require('./adminUpdate.cjs');
 
 const stagingApi = { service: 'paisapay-api', deploymentEnvironment: 'staging', buildId: 'abcdef1234567890' };
-const latestRelease = { appId: 'com.paisapay.admin', buildId: 'fedcba0987654321', buildCode: 4_000_123, version: '1.0.3', deploymentEnvironment: 'staging' };
+const latestRelease = { appId: 'com.paisapay.admin', buildId: 'fedcba0987654321', buildCode: 4_000_123, version: '1.0.3', apiBase: 'https://paisapay-api-staging.onrender.com', deploymentEnvironment: 'staging' };
 
 test('version check points only to the staging API release endpoint and Pages app', () => {
   assert.equal(ADMIN_API_VERSION_PATH, '/api/v1/admin/app-version');
@@ -37,4 +37,5 @@ test('invalid, production, or malformed release metadata fails closed', () => {
   assert.equal(adminUpdateState(4, { ...stagingApi, deploymentEnvironment: 'production' }, latestRelease).available, false);
   assert.equal(adminUpdateState(4, stagingApi, { ...latestRelease, buildCode: 'NaN' }).available, false);
   assert.equal(adminUpdateState(4, stagingApi, { ...latestRelease, appId: 'another-app' }).available, false);
+  assert.equal(adminUpdateState(4, stagingApi, { ...latestRelease, apiBase: 'https://paisapay-api.onrender.com' }).available, false);
 });

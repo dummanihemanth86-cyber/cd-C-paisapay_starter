@@ -13,6 +13,7 @@ function isValidAdminRelease(value) {
     && value.appId === ADMIN_APP_ID
     && typeof value.buildId === 'string' && /^[a-f0-9-]{7,64}$/i.test(value.buildId)
     && normalizeBuildCode(value.buildCode) !== null
+    && value.apiBase === 'https://paisapay-api-staging.onrender.com'
     && value.deploymentEnvironment === 'staging'
     && typeof value.version === 'string' && value.version.length <= 32);
 }
