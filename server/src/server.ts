@@ -6,6 +6,7 @@ import app from './app.js';
 import { expireUnpaidUpiDeposits } from './modules/payments/depositExpiry.js';
 import { expireP2pOffersBatch } from './modules/p2p/service.js';
 import { runAdminPushOutboxBatch } from './modules/admin/pushNotifications.js';
+import { singleFlight } from './lib/singleFlight.js';
 
 const server = app.listen(env.port, env.host, () => {
   logger.info({ host: env.host, port: env.port, databaseConfigured: Boolean(env.databaseUrl), otpProvider: env.otpProvider, paymentProvider: env.paymentProvider }, 'PaisaPay API started');
@@ -15,7 +16,6 @@ const server = app.listen(env.port, env.host, () => {
 });
 
 let p2pExpiryWorkerRunning = false;
-let adminPushWorkerRunning = false;
 const runFinancialWorker = createFinancialWorkerGate(env.financialOperationsEnabled, () => {
   logger.info('Financial background workers are disabled by FINANCIAL_OPERATIONS_ENABLED=false.');
 });
@@ -27,13 +27,11 @@ async function runP2pExpiryWorker() {
   finally { p2pExpiryWorkerRunning = false; }
 }
 
-async function runAdminPushWorker() {
-  if (!prisma || adminPushWorkerRunning) return;
-  adminPushWorkerRunning = true;
+const runAdminPushWorker = singleFlight(async () => {
+  if (!prisma) return;
   try { await runAdminPushOutboxBatch(prisma); }
   catch (error) { logger.warn({ err: error }, 'Could not process admin push notification outbox'); }
-  finally { adminPushWorkerRunning = false; }
-}
+});
 
 function runFinancialWorkers() {
   runFinancialWorker(() => {
