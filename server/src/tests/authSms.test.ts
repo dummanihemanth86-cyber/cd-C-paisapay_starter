@@ -136,6 +136,24 @@ integration('Android gateway OTP routes (PostgreSQL integration)', () => {
     await request(app).post('/api/v1/admin/auth/login').send({ phoneE164, password: newPassword }).expect(200);
   });
 
+  it('rejects an Admin reset code submitted for another phone and an expired Admin challenge', async () => {
+    const phoneE164 = newPhone();
+    const otherPhone = newPhone();
+    const oldPassword = 'OldAdminPassword789!';
+    const admin = await db.user.create({ data: { phoneE164, displayName: 'Admin OTP Boundary Test', status: 'ACTIVE', passwordHash: await hashPassword(oldPassword) } });
+    await db.adminUser.create({ data: { userId: admin.id, role: 'ADMIN' } });
+
+    const requested = await request(app).post('/api/v1/admin/auth/forgot-password/request-otp').send({ phoneE164 }).expect(202);
+    const challenge = await db.otpChallenge.findUniqueOrThrow({ where: { id: requested.body.challengeId } });
+    const code = lastMessage.match(/code is (\d{6})/)?.[1];
+    expect(code).toBeDefined();
+
+    await request(app).post('/api/v1/admin/auth/password/reset').send({ phoneE164: otherPhone, challengeId: challenge.id, code, newPassword: 'NewAdminPassword789!' }).expect(401);
+    await db.otpChallenge.update({ where: { id: challenge.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await request(app).post('/api/v1/admin/auth/password/reset').send({ phoneE164, challengeId: challenge.id, code, newPassword: 'NewAdminPassword789!' }).expect(401);
+    await request(app).post('/api/v1/admin/auth/login').send({ phoneE164, password: oldPassword }).expect(200);
+  });
+
   it('does not send reset SMS or change a normal user password through Admin reset endpoints', async () => {
     const phoneE164 = newPhone();
     const oldPassword = 'NormalUserPassword123!';

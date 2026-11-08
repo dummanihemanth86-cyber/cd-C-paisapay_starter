@@ -38,9 +38,10 @@ export async function sendRenflairV1Otp(
       throw new SmsGatewayError('SMS_GATEWAY_BAD_RESPONSE', 'Renflair V1 returned a response that PaisaPay could not parse.');
     }
 
-    // The sample does not publish response fields. Reject obvious failure
-    // forms without assuming a provider-specific success field.
-    const record = body && typeof body === 'object' ? body as Record<string, unknown> : undefined;
+    // V1 documents JSON decoding but no response schema. Require a JSON object
+    // and reject explicit failures without inventing undocumented success keys.
+    const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
+    if (!record) throw new SmsGatewayError('SMS_GATEWAY_BAD_RESPONSE', 'Renflair V1 returned an unsupported JSON response.');
     const explicitlyFailed = record && (
       record.success === false || record.status === 0 || record.status === false ||
       typeof record.error === 'string' && record.error.length > 0

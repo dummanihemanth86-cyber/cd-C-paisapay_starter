@@ -38,12 +38,14 @@ describe('Renflair V1 OTP adapter', () => {
     expect(result).toEqual({ status: 'PENDING', state: 'ACCEPTED', smsId: null, requestId: 'challenge-1' });
   });
 
-  it('rejects explicit failure responses and malformed JSON', async () => {
+  it('rejects explicit failure responses, non-object JSON and malformed JSON', async () => {
     configure();
     const rejected = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ status: 0, msg: 'failed' }), { status: 200 }));
     await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-2' }, rejected)).rejects.toMatchObject({ code: 'SMS_GATEWAY_REJECTED' });
     const malformed = vi.fn<typeof fetch>().mockResolvedValue(new Response('not-json', { status: 200 }));
     await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-3' }, malformed)).rejects.toMatchObject({ code: 'SMS_GATEWAY_BAD_RESPONSE' });
+    const primitive = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify('not-an-object'), { status: 200 }));
+    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-8' }, primitive)).rejects.toMatchObject({ code: 'SMS_GATEWAY_BAD_RESPONSE' });
   });
 
   it('fails closed for HTTP errors, timeouts, missing configuration, and unsupported numbers', async () => {

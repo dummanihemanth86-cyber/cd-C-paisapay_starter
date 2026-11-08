@@ -9,14 +9,16 @@ import { assertFinancialOperationsEnabled } from '../../middleware/financialOper
 import { Prisma } from '../../generated/prisma/client.js';
 import { getPaymentMethodAvailability } from '../payments/availability.js';
 import { verifyPassword, hashPassword } from '../../lib/password.js';
-import { hashOtp, hashToken, newOpaqueToken, safeHashEqual } from '../../lib/security.js';
+import { hashToken, newOpaqueToken } from '../../lib/security.js';
 import { env } from '../../config/env.js';
+import { logger } from '../../lib/logger.js';
 import { formatReportResult, hasMoney, reportQuerySchema, safeSettingsSnapshot, type ReportKind } from './reporting.js';
 import { MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from './walletAdjustment.js';
 import { createCreditRequest, decideCreditRequest, createFundingRequest, decideFundingRequest, ADMIN_ADJUSTMENT_FUND_ID, ADMIN_SETTLEMENT_CASH_ID } from './walletCreditWorkflow.js';
 import { createStagingDirectCredit } from './stagingDirectWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
 import { createOtpChallenge } from '../auth/routes.js';
+import { adminPasswordResetRejectionReason, isActiveAdminResetAccount } from './passwordResetOtp.js';
 
 export const adminRouter = Router();
 export const adminAuthRouter = Router();
@@ -56,20 +58,26 @@ adminAuthRouter.post('/password/reset', adminPasswordResetIpLimit, adminPassword
   const reset = await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM otp_challenges WHERE id = ${input.challengeId}::uuid FOR UPDATE`;
     const challenge = await tx.otpChallenge.findUnique({ where: { id: input.challengeId } });
-    if (!challenge || challenge.purpose !== 'ADMIN_PASSWORD_RESET' || challenge.phoneE164 !== input.phoneE164 || challenge.consumedAt || challenge.expiresAt <= new Date()) {
-      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    const rejectionReason = adminPasswordResetRejectionReason({
+      challenge,
+      phoneE164: input.phoneE164,
+      code: input.code,
+      now: new Date(),
+      allowDemoChallenge: env.isTest && env.otpProvider === 'demo',
+    });
+    if (rejectionReason) {
+      logger.warn({ requestId: req.requestId, reason: rejectionReason, provider: env.otpProvider, deliveryState: challenge?.deliveryStatus ?? 'UNKNOWN' }, 'Admin password reset OTP rejected');
+      if (rejectionReason === 'attempts_exceeded') throw new HttpError(429, 'ADMIN_PASSWORD_RESET_ATTEMPTS_EXCEEDED', 'Too many incorrect codes. Request a new code.');
     }
-    const isTestDemo = env.isTest && env.otpProvider === 'demo' && challenge.deliveryStatus === 'DEMO';
-    if (!isTestDemo && !['ACCEPTED', 'SENT', 'DELIVERED'].includes(challenge.deliveryStatus ?? '')) {
-      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
-    }
-    if (challenge.attempts >= 5) throw new HttpError(429, 'ADMIN_PASSWORD_RESET_ATTEMPTS_EXCEEDED', 'Too many incorrect codes. Request a new code.');
-    if (!safeHashEqual(challenge.codeHash, hashOtp(input.phoneE164, input.code))) {
+    if (rejectionReason === 'code_mismatch' && challenge) {
       await tx.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } });
       return false;
     }
+    if (rejectionReason) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+    if (!challenge) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
     const admin = await tx.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { id: true, status: true, adminRole: { select: { id: true } } } });
-    if (!admin || admin.status !== 'ACTIVE' || !admin.adminRole) {
+    if (!admin || !isActiveAdminResetAccount({ status: admin.status, hasAdminRole: Boolean(admin.adminRole) })) {
+      logger.warn({ requestId: req.requestId, reason: 'admin_account_unavailable', provider: env.otpProvider, deliveryState: challenge.deliveryStatus ?? 'UNKNOWN' }, 'Admin password reset rejected');
       throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
     }
     const now = new Date();

@@ -153,7 +153,11 @@ export async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | '
         deliveryStatus: gateway.state,
       },
     });
-    logger.info({ challengeId: challenge.id, deliveryState: gateway.state, provider: env.otpProvider }, 'OTP request accepted by SMS provider');
+    if (env.otpProvider === 'renflair-v1') {
+      logger.info({ challengeId: challenge.id, deliveryState: gateway.state, provider: env.otpProvider, handsetDeliveryVerified: false }, 'Renflair accepted the OTP request; handset delivery is unconfirmed');
+    } else {
+      logger.info({ challengeId: challenge.id, deliveryState: gateway.state, provider: env.otpProvider }, 'OTP request accepted by SMS provider');
+    }
     return {
       challengeId: challenge.id,
       expiresInSeconds: 300,
