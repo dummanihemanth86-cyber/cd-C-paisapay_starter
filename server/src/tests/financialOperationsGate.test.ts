@@ -12,6 +12,34 @@ import { expireUnpaidUpiDeposits } from '../modules/payments/depositExpiry.js';
 import { recordVerifiedReferralCommission } from '../modules/users/referralCommission.js';
 
 describe('financial operations safety gate policy', () => {
+  const runProductionConfig = (overrides: NodeJS.ProcessEnv) => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      NODE_ENV: 'production',
+      PAISAPAY_DEPLOYMENT_ENV: 'production',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      APP_ORIGIN: '',
+      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
+      SESSION_HASH_SECRET: 'a'.repeat(64),
+      BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
+      OTP_PROVIDER: 'renflair-v1',
+      RENFLAIR_API_KEY: 'test-only-placeholder',
+      OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      WELCOME_BONUS_ENABLED: 'false',
+      UPI_DEPOSIT_REWARD_ENABLED: 'false',
+      PAYMENT_PROVIDER: 'disabled',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
+      ...overrides,
+    };
+    delete childEnv.DEMO_LOGIN_PHONE_E164;
+    delete childEnv.DEMO_LOGIN_PASSWORD;
+    delete childEnv.SMS_GATEWAY_URL;
+    delete childEnv.SMS_GATEWAY_API_KEY;
+    return spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+  };
+
   it('defaults to disabled in the test environment and has a stable error code', () => {
     expect(env.financialOperationsEnabled).toBe(false);
     expect(env.walletAdjustmentsEnabled).toBe(false);
@@ -56,32 +84,35 @@ describe('financial operations safety gate policy', () => {
     }
   });
 
-  it('rejects production startup when financial operations are explicitly enabled in this provider-disabled build', () => {
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      NODE_ENV: 'production',
-      APP_ORIGIN: '',
-      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
-      SESSION_HASH_SECRET: 'a'.repeat(64),
-      BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
-      OTP_PROVIDER: 'renflair-v1',
-      RENFLAIR_API_KEY: 'test-only-placeholder',
-      OTP_RATE_LIMIT_BYPASS_PHONE: '',
-      WELCOME_BONUS_ENABLED: 'false',
-      UPI_DEPOSIT_REWARD_ENABLED: 'false',
-      PAYMENT_PROVIDER: 'disabled',
+  it('allows financial operations in production mode only for explicitly identified Render staging', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
       FINANCIAL_OPERATIONS_ENABLED: 'true',
-      ADMIN_WALLET_PRODUCTION_APPROVED: 'false',
-      ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'false',
-      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
-    };
-    delete childEnv.DEMO_LOGIN_PHONE_E164;
-    delete childEnv.DEMO_LOGIN_PASSWORD;
-    delete childEnv.SMS_GATEWAY_URL;
-    delete childEnv.SMS_GATEWAY_API_KEY;
-    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('allows the explicitly identified Render staging service to start with financial operations disabled', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('rejects financial operations in production even if the staging label is mistakenly set', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      FINANCIAL_OPERATIONS_ENABLED: 'true',
+    });
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('FINANCIAL_OPERATIONS_ENABLED cannot be enabled in production');
+    expect(result.stderr).toContain('only for the explicitly identified paisapay-api-staging Render service');
   });
 
   it('rejects production startup when private wallet adjustments are explicitly enabled', () => {

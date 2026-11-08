@@ -5,6 +5,7 @@ import { assertProductionDatabaseUrl } from './databaseUrlSecurity.js';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  PAISAPAY_DEPLOYMENT_ENV: z.enum(['development', 'test', 'staging', 'production']).optional(),
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   HOST: z.string().default('0.0.0.0'),
   APP_ORIGIN: z.string().default(''),
@@ -62,6 +63,12 @@ if (!parsed.success) {
 }
 
 const values = parsed.data;
+// Render's project/environment labels are not injected into the process. Require an
+// explicit deployment label plus Render's immutable service identity for the one
+// approved staging service before allowing financial routes in production mode.
+const isExplicitRenderStaging = values.PAISAPAY_DEPLOYMENT_ENV === 'staging'
+  && process.env.RENDER === 'true'
+  && process.env.RENDER_SERVICE_NAME === 'paisapay-api-staging';
 if (Math.min(values.MAX_DEPOSIT_PAISE, 1_000_000) < values.MIN_DEPOSIT_PAISE) throw new Error('MIN_DEPOSIT_PAISE must not exceed the ₹10,000 deposit cap or MAX_DEPOSIT_PAISE.');
 if (Boolean(values.SMS_GATEWAY_URL) !== Boolean(values.SMS_GATEWAY_API_KEY)) {
   throw new Error('SMS_GATEWAY_URL and SMS_GATEWAY_API_KEY must either both be configured or both be empty.');
@@ -137,7 +144,9 @@ if (values.NODE_ENV === 'production') {
   })) throw new Error('Every production APP_ORIGIN must be an HTTPS origin without a path or trailing slash.');
   if (values.OTP_PROVIDER !== 'renflair-v1') throw new Error('Production requires the configured Renflair V1 OTP provider; no other live OTP adapter is implemented.');
   if (values.PAYMENT_PROVIDER !== 'disabled') throw new Error('No production payment provider adapter is implemented in this build. Keep payments disabled until one is approved and implemented.');
-  if (values.FINANCIAL_OPERATIONS_ENABLED) throw new Error('FINANCIAL_OPERATIONS_ENABLED cannot be enabled in production until an authorized payment and payout provider is implemented and independently verified.');
+  if (values.FINANCIAL_OPERATIONS_ENABLED && !isExplicitRenderStaging) {
+    throw new Error('FINANCIAL_OPERATIONS_ENABLED may be enabled in production mode only for the explicitly identified paisapay-api-staging Render service with PAISAPAY_DEPLOYMENT_ENV=staging.');
+  }
   const anyAdminWalletGate = values.WALLET_ADJUSTMENTS_ENABLED || values.ADMIN_WALLET_FUNDING_ENABLED || values.ADMIN_WALLET_CREDITS_ENABLED;
   const allAdminWalletGates = values.WALLET_ADJUSTMENTS_ENABLED && values.ADMIN_WALLET_FUNDING_ENABLED && values.ADMIN_WALLET_CREDITS_ENABLED;
   if ((anyAdminWalletGate && (!allAdminWalletGates || !values.ADMIN_WALLET_PRODUCTION_APPROVED || !values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED)) || ((values.ADMIN_WALLET_PRODUCTION_APPROVED || values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED) && !allAdminWalletGates)) {
