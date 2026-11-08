@@ -74,6 +74,38 @@ describe('Admin wallet credit Maker-Checker workflow', () => {
     await expect(decideCreditRequest(nonAdminChecker.tx, { requestId, checkerUserId: checker, decision: 'REJECT', reason: 'Rejected by finance reviewer' })).rejects.toMatchObject({ code: 'SUPER_ADMIN_REQUIRED' });
   });
 
+  it('rejects a duplicate approval without creating a second ledger transaction or audit event', async () => {
+    const alreadyApproved = { ...pendingCredit, status: 'APPROVED', checkerUserId: checker, ledgerTransactionId: 'ledger-id' };
+    const requestUpdate = vi.fn();
+    const duplicate = workflowTx({
+      user: { findUnique: vi.fn(async () => ({ ...activeSuper, id: checker })) },
+      adminWalletCreditRequest: { findUnique: vi.fn(async () => alreadyApproved), update: requestUpdate, create: vi.fn() },
+    });
+    await expect(decideCreditRequest(duplicate.tx, { requestId, checkerUserId: checker, decision: 'APPROVE', reason: 'Duplicate approval retry' }))
+      .rejects.toMatchObject({ code: 'CREDIT_REQUEST_ALREADY_DECIDED' });
+    expect(duplicate.calls.ledgerCreate).not.toHaveBeenCalled();
+    expect(requestUpdate).not.toHaveBeenCalled();
+    expect(duplicate.calls.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it('fails approval when the cleared adjustment fund is insufficient and leaves request and ledger untouched', async () => {
+    const requestUpdate = vi.fn();
+    const insufficientFund = workflowTx({
+      user: { findUnique: vi.fn(async ({ where }: any) => where.id === targetId ? { id: targetId, publicId: 'USER12345', status: 'ACTIVE', adminRole: null } : { ...activeSuper, id: checker }) },
+      adminWalletCreditRequest: { findUnique: vi.fn(async () => pendingCredit), update: requestUpdate, create: vi.fn() },
+      $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
+        const sql = parts.join('');
+        if (sql.includes('SUM(credit_paise - debit_paise)')) return [{ accountId: ADMIN_ADJUSTMENT_FUND_ID, balance: 0n }, { accountId: availableId, balance: 0n }];
+        return [];
+      }),
+    });
+    await expect(decideCreditRequest(insufficientFund.tx, { requestId, checkerUserId: checker, decision: 'APPROVE', reason: 'Fund check must fail closed' }))
+      .rejects.toMatchObject({ code: 'WALLET_ADJUSTMENT_FUND_INSUFFICIENT' });
+    expect(insufficientFund.calls.ledgerCreate).not.toHaveBeenCalled();
+    expect(requestUpdate).not.toHaveBeenCalled();
+    expect(insufficientFund.calls.auditCreate).not.toHaveBeenCalled();
+  });
+
   it('approves through one funded, balanced wallet ledger operation and remains idempotency-protected', async () => {
     const tx = workflowTx({ user: { findUnique: vi.fn(async ({ where }: any) => where.id === targetId || where.publicId === 'USER12345' ? { id: targetId, publicId: 'USER12345', status: 'ACTIVE', adminRole: null } : { ...activeSuper, id: checker }) }, adminWalletCreditRequest: { findUnique: vi.fn(async () => pendingCredit), update: vi.fn(async () => ({ ...pendingCredit, status: 'APPROVED', checkerUserId: checker })), create: vi.fn() } });
     const result = await decideCreditRequest(tx.tx, { requestId, checkerUserId: checker, decision: 'APPROVE', reason: 'Independent customer adjustment approval' });

@@ -9,6 +9,7 @@ const { adminRecordDetailPath } = require('../../shared/adminRecordNavigation.cj
 const { financialActionState } = require('../../shared/adminFinancialUx.cjs');
 const { parseRupeesToPaise, walletAdjustmentUiState, newIdempotencyKey } = require('../../shared/walletAdjustmentUi.cjs');
 const { adminPhoneInputDigits, normalizeAdminPhone, canSubmitAdminPasswordReset } = require('./adminPasswordResetUi.cjs');
+const { canDecideWalletRequest, canRequestWalletCredit } = require('./walletCreditCapabilities.cjs');
 
 
 const API = (process.env.EXPO_PUBLIC_API_URL || 'https://paisapay-api.onrender.com').trim().replace(/\/$/, '');
@@ -42,6 +43,13 @@ const NAV = [
   ['ledger', 'Wallet Ledger', '/api/v1/admin/wallets/ledger'],
   ['walletAdjustments', 'Wallet Adjustment', null],
   ['walletCredits', 'Super Admin Credits', null],
+  ['walletCreditApprovals', 'Credit Approvals', null],
+  ['walletCreditRejections', 'Credit Rejections', null],
+  ['walletFunding', 'Funding Evidence', null],
+  ['walletFundingApprovals', 'Funding Approvals', null],
+  ['walletFundingRejections', 'Funding Rejections', null],
+  ['walletReconciliation', 'Wallet Reconciliation', null],
+  ['settings', 'Settings', '/api/v1/admin/settings'],
   ['providers', 'Payment Providers', '/api/v1/admin/providers'],
   ['commissions', 'Commissions', '/api/v1/admin/commissions'],
   ['referrals', 'Referral & Team', '/api/v1/admin/referrals'],
@@ -120,18 +128,19 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
   const [matches, setMatches] = useState([]);
   const [selected, setSelected] = useState(null);
   const [credits, setCredits] = useState([]);
+  const [creditRequests, setCreditRequests] = useState([]);
   const [rupees, setRupees] = useState('');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [searchError, setSearchError] = useState('');
   const submissionKey = useRef('');
   const submissionFingerprint = useRef('');
-  const creditEnabled = profile?.role === 'SUPER_ADMIN' && profile?.walletCreditsEnabled === true;
+  const creditEnabled = canRequestWalletCredit(profile);
   const amountPaise = parseRupeesToPaise(rupees);
   const search = async () => {
     if (profile?.role !== 'SUPER_ADMIN') return;
     if (query.trim().length < 3) { setSearchError('Enter at least 3 characters of a public ID, account ID, name, or phone number.'); return; }
-    setBusy(true); setSearchError(''); setSelected(null); setCredits([]);
+    setBusy(true); setSearchError(''); setSelected(null); setCredits([]); setCreditRequests([]);
     try {
       const result = await request(`/api/v1/admin/users?page=1&pageSize=25&q=${encodeURIComponent(query.trim())}`, { token: access });
       setMatches(asArray(result.users));
@@ -144,9 +153,9 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
     try {
       const [detail, history] = await Promise.all([
         request(`/api/v1/admin/users/${encodeURIComponent(user.id)}`, { token: access }),
-        request(`/api/v1/admin/users/${encodeURIComponent(user.id)}/wallet/credits`, { token: access }),
+        request(`/api/v1/admin/users/${encodeURIComponent(user.id)}/wallet/credits?page=1&pageSize=100`, { token: access }),
       ]);
-      setSelected(detail.user || user); setCredits(asArray(history.credits));
+      setSelected(detail.user || user); setCredits(asArray(history.credits)); setCreditRequests(asArray(history.requests));
     } catch (error) { setSearchError(error.message); }
     finally { setBusy(false); }
   };
@@ -159,28 +168,103 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
     if (submissionFingerprint.current !== fingerprint) { submissionFingerprint.current = fingerprint; submissionKey.current = newIdempotencyKey(); }
     setBusy(true); setSearchError('');
     try {
-      const result = await request(`/api/v1/admin/users/${encodeURIComponent(selected.id)}/wallet/credit`, {
-        token: access, method: 'POST', headers: { 'Idempotency-Key': submissionKey.current }, body: { amountPaise, reason: reason.trim() },
+      const result = await request('/api/v1/admin/wallet/credits/requests', {
+        token: access, method: 'POST', headers: { 'Idempotency-Key': submissionKey.current }, body: { targetUserId: selected.id, verifiedPublicId: selected.publicId, verifiedPhoneMasked: selected.phoneMasked, verifiedWalletBalancePaise: Number(selected.walletBalancePaise), amountPaise, reason: reason.trim() },
       });
-      setInfo(`${result.message} Ledger transaction ${result.credit?.id || 'recorded'}.`);
+      setInfo(`${result.message} Request ${result.request?.id || 'submitted'}.`);
       submissionKey.current = ''; submissionFingerprint.current = ''; setRupees(''); setReason(''); await select(selected); await loadSection('walletCredits');
     } catch (error) { setSearchError(error.message); }
     finally { setBusy(false); }
   };
-  const confirm = () => Alert.alert('Confirm wallet credit', `Credit ${formatPaise(amountPaise)} to ${selected?.displayName || selected?.publicId}? This action creates an audited ledger transaction.`, [
-    { text: 'Cancel', style: 'cancel' }, { text: 'Confirm credit', onPress: () => { void submit(); } },
-  ]);
+  const confirm = async () => {
+    if (!selected || busy) return;
+    setBusy(true); setSearchError('');
+    try {
+      const latest = await request(`/api/v1/admin/users/${encodeURIComponent(selected.id)}`, { token: access });
+      const verified = latest.user;
+      if (!verified || verified.id !== selected.id || verified.publicId !== selected.publicId || verified.phoneMasked !== selected.phoneMasked || Number(verified.walletBalancePaise) !== Number(selected.walletBalancePaise)) {
+        if (verified) setSelected(verified);
+        setSearchError('User identity or balance changed since these details were loaded. Review the refreshed details and confirm again.');
+        return;
+      }
+      setSelected(verified);
+      Alert.alert('Confirm wallet credit request', `Request ${formatPaise(amountPaise)} for ${verified.displayName || 'PaisaPay user'}?\nPublic ID: ${verified.publicId}\nAccount ID: ${verified.id}\nPhone: ${verified.phoneMasked}\nCurrent available balance: ${formatPaise(verified.walletBalancePaise)}\n\nA different SUPER_ADMIN must approve. No balance changes until approval posts a ledger transaction.`, [
+        { text: 'Cancel', style: 'cancel' }, { text: 'Submit request', onPress: () => { void submit(); } },
+      ]);
+    } catch (error) { setSearchError(error.message); }
+    finally { setBusy(false); }
+  };
   return <View>
-    <View style={styles.card}><Text style={styles.cardEyebrow}>SUPER ADMIN · AUDITED LEDGER</Text><Text style={styles.cardTitle}>Credit a user wallet</Text><Text style={styles.cardNote}>Search by public ID, phone number, account UUID, or name. Confirm the returned account details before crediting.</Text>{!creditEnabled ? <FinancialActionNotice title="Wallet credits are disabled" reason="The server has not enabled the required financial controls and funded adjustment account. User balances cannot be changed until those controls are enabled."/> : null}
+    <View style={styles.card}><Text style={styles.cardEyebrow}>SUPER ADMIN · MAKER</Text><Text style={styles.cardTitle}>Request a wallet credit</Text><Text style={styles.cardNote}>Search by public ID, phone number, account UUID, or name. Confirm returned account details. A separate active SUPER_ADMIN must approve a request before it can post.</Text>{!creditEnabled ? <FinancialActionNotice title="Credit requests are disabled" reason={[!profile?.walletAdjustmentsEnabled && 'WALLET_ADJUSTMENTS_ENABLED is false', !profile?.adminWalletCreditsEnabled && 'ADMIN_WALLET_CREDITS_ENABLED is false', ...(profile?.walletCreditBlockers || [])].filter(Boolean).join('; ') || 'The deployed service requires explicit finance and security authorization before these controls can be enabled.'}/> : null}
       <Text style={styles.label}>User lookup</Text><TextInput style={styles.input} value={query} onChangeText={setQuery} placeholder="User ID, phone, or name" placeholderTextColor={COLORS.muted} autoCapitalize="none" onSubmitEditing={search}/><Button title={busy ? 'Searching…' : 'Search users'} onPress={search} disabled={busy}/>
       {matches.map(user => <Pressable key={user.id} style={styles.detailGroup} onPress={() => select(user)}><Text style={styles.detailSectionTitle}>{user.displayName || 'PaisaPay user'} · {user.publicId || user.id}</Text><Text style={styles.rowDetail}>{user.phoneMasked} · {user.status} · Balance {formatPaise(user.walletBalancePaise)}</Text></Pressable>)}
       {selected ? <><View style={styles.detailGroup}><Text style={styles.detailSectionTitle}>Verified account details</Text><DetailFields value={selected}/><Text style={styles.detailValue}>Current available balance · {formatPaise(selected.walletBalancePaise)}</Text><Text style={styles.detailValue}>Reserved balance · {formatPaise(selected.reservedBalancePaise)}</Text></View>
-        <Text style={styles.label}>Credit amount (₹100–₹10,000)</Text><TextInput style={styles.input} value={rupees} onChangeText={setRupees} keyboardType="decimal-pad" placeholder="100.00" placeholderTextColor={COLORS.muted}/><Text style={styles.label}>Required reason (8–500 characters)</Text><TextInput style={[styles.input, styles.multiline]} value={reason} onChangeText={setReason} multiline maxLength={500} placeholder="Explain why this credit is approved" placeholderTextColor={COLORS.muted}/><Button title={busy ? 'Recording…' : `Confirm credit ${amountPaise == null ? '' : formatPaise(amountPaise)}`} onPress={confirm} disabled={!creditEnabled || busy || amountPaise === null || amountPaise < 10000 || amountPaise > 1000000 || reason.trim().length < 8}/>
-        <Text style={styles.label}>Recent Admin credits</Text>{credits.length ? credits.map(item => <View key={item.id} style={styles.row}><Text style={styles.rowTitle}>{formatPaise(item.amountPaise)} · {new Date(item.createdAt).toLocaleString()}</Text><Text style={styles.rowDetail}>{item.reason} · {item.transactionReference}</Text></View>) : <Text style={styles.cardNote}>No Admin credits recorded for this user.</Text>}
+        <Text style={styles.label}>Credit amount (₹100–₹10,000)</Text><TextInput style={styles.input} value={rupees} onChangeText={setRupees} keyboardType="decimal-pad" placeholder="100.00" placeholderTextColor={COLORS.muted}/><Text style={styles.label}>Required reason (8–500 characters)</Text><TextInput style={[styles.input, styles.multiline]} value={reason} onChangeText={setReason} multiline maxLength={500} placeholder="Explain why this credit is requested" placeholderTextColor={COLORS.muted}/><Button title={busy ? 'Submitting…' : `Request ${amountPaise == null ? '' : formatPaise(amountPaise)}`} onPress={confirm} disabled={!creditEnabled || busy || amountPaise === null || amountPaise < 10000 || amountPaise > 1000000 || reason.trim().length < 8}/>
+        <Text style={styles.label}>Credit requests and decisions</Text>{creditRequests.length ? creditRequests.map(item => <View key={item.id} style={styles.row}><Text style={styles.rowTitle}>{formatPaise(item.amountPaise)} · {item.displayStatus === 'APPROVED' ? 'APPROVED · ledger posting missing' : item.displayStatus === 'COMPLETED' ? 'COMPLETED · approved and posted' : item.displayStatus === 'REJECTED' ? 'REJECTED' : 'PENDING APPROVAL'}</Text><Text style={styles.rowDetail}>{item.reason} · Requested {new Date(item.createdAt).toLocaleString()}</Text>{item.checkerUser ? <Text style={styles.rowDetail}>Checked by {item.checkerUser.displayName || item.checkerUser.publicId} · {item.decisionReason || 'No decision reason returned'}</Text> : null}{item.ledgerTransactionId ? <Text style={styles.rowDetail}>Ledger transaction · {item.ledgerTransactionId}</Text> : null}</View>) : <Text style={styles.cardNote}>No Admin credit requests recorded for this user.</Text>}
+        <Text style={styles.label}>Completed Admin credit ledger history</Text>{credits.length ? credits.map(item => <View key={item.id} style={styles.row}><Text style={styles.rowTitle}>{formatPaise(item.amountPaise)} · {new Date(item.createdAt).toLocaleString()}</Text><Text style={styles.rowDetail}>{item.reason} · {item.transactionReference}</Text></View>) : <Text style={styles.cardNote}>No Admin credits have been posted to this wallet.</Text>}
       </> : null}
       {searchError ? <Text style={styles.error}>{searchError}</Text> : null}
     </View>
   </View>;
+}
+function WalletCreditControlsSection({ section, request, access, profile, payload, setInfo, setError, loadSection }) {
+  const [form, setForm] = useState({ amount: '', source: '', bankReference: '', evidenceReference: '', evidenceSha256: '', statementDate: new Date().toISOString().slice(0, 10), reason: '' });
+  const [decisionReasons, setDecisionReasons] = useState({});
+  const [busyId, setBusyId] = useState('');
+  const fundingEnabled = profile?.role === 'SUPER_ADMIN' && profile?.walletFundingRequestsEnabled === true;
+  const format = (paise) => formatPaise(Number(paise || 0));
+  const decide = async (kind, row, decision) => {
+    if (profile?.role !== 'SUPER_ADMIN') return;
+    const decisionReason = (decisionReasons[row.id] || '').trim();
+    if (decisionReason.length < 8) { setError('Enter an approval or rejection reason of at least 8 characters.'); return; }
+    if (kind === 'funding' && decision === 'APPROVE') {
+      Alert.alert('Verify actual funding', 'Confirm that you independently checked the original bank statement, cleared cash receipt, source account and exact amount. This posts an accounting journal.', [
+        { text: 'Cancel', style: 'cancel' }, { text: 'I verified the cleared funds', onPress: () => void sendDecision(kind, row, decision, decisionReason, true) },
+      ]);
+      return;
+    }
+    if (kind === 'credit' && decision === 'APPROVE') {
+      Alert.alert('Approve wallet credit', `Approve ${format(row.amountPaise)} for ${row.targetUser?.publicId || row.targetUserId}? This posts only if the adjustment fund has enough ledger balance.`, [
+        { text: 'Cancel', style: 'cancel' }, { text: 'Approve credit', onPress: () => void sendDecision(kind, row, decision, decisionReason, false) },
+      ]);
+      return;
+    }
+    Alert.alert('Reject request', 'Reject this pending request? Rejection creates an audit record and no ledger entries.', [
+      { text: 'Cancel', style: 'cancel' }, { text: 'Reject', style: 'destructive', onPress: () => void sendDecision(kind, row, decision, decisionReason, false) },
+    ]);
+  };
+  const sendDecision = async (kind, row, decision, decisionReason, evidenceVerified) => {
+    setBusyId(row.id); setError('');
+    try {
+      const root = kind === 'funding' ? 'funding' : 'credits';
+      const result = await request(`/api/v1/admin/wallet/${root}/requests/${encodeURIComponent(row.id)}/decision`, { token: access, method: 'POST', body: { decision, reason: decisionReason, ...(kind === 'funding' ? { evidenceVerified } : {}) } });
+      setInfo(result.message); await loadSection(section);
+    } catch (error) { setError(error.message); }
+    finally { setBusyId(''); }
+  };
+  const createFunding = async () => {
+    const amountPaise = parseRupeesToPaise(form.amount);
+    if (!fundingEnabled || amountPaise === null || amountPaise < 1 || form.source.trim().length < 3 || form.bankReference.trim().length < 6 || form.evidenceReference.trim().length < 3 || !/^[a-fA-F0-9]{64}$/.test(form.evidenceSha256) || form.reason.trim().length < 8) { setError('Enter amount, bank source label, unique bank reference, evidence reference and SHA-256, date, and a reason of at least 8 characters.'); return; }
+    setBusyId('funding'); setError('');
+    try {
+      const result = await request('/api/v1/admin/wallet/funding/requests', { token: access, method: 'POST', headers: { 'Idempotency-Key': newIdempotencyKey() }, body: { amountPaise, sourceAccountLabel: form.source.trim(), externalReference: form.bankReference.trim(), evidenceReference: form.evidenceReference.trim(), evidenceSha256: form.evidenceSha256.toLowerCase(), statementDate: form.statementDate, reason: form.reason.trim() } });
+      setInfo(result.message); setForm({ ...form, amount: '', bankReference: '', evidenceReference: '', evidenceSha256: '', reason: '' }); await loadSection(section);
+    } catch (error) { setError(error.message); }
+    finally { setBusyId(''); }
+  };
+  const rows = Array.isArray(payload?.requests) ? payload.requests : [];
+  const isCredit = section === 'walletCreditApprovals' || section === 'walletCreditRejections';
+  const isFunding = section === 'walletFundingApprovals' || section === 'walletFundingRejections';
+  if (section === 'walletFunding') return <View style={styles.card}><Text style={styles.cardEyebrow}>SUPER ADMIN · FUNDING MAKER</Text><Text style={styles.cardTitle}>Record real adjustment-fund receipt</Text><Text style={styles.cardNote}>Only submit a cleared receipt that exists in the organization’s bank statement. This does not create funds. A different SUPER_ADMIN must independently verify the original statement and approve.</Text>{!fundingEnabled ? <FinancialActionNotice title="Funding workflow disabled" reason="Server-side funding and credit feature gates are off. No funding request can be submitted."/> : null}
+    {[['Amount received (₹)', 'amount'], ['Source bank account label (no account number)', 'source'], ['Bank statement transaction reference', 'bankReference'], ['Evidence record reference', 'evidenceReference'], ['Evidence file SHA-256', 'evidenceSha256'], ['Statement date (YYYY-MM-DD)', 'statementDate'], ['Accounting reason', 'reason']].map(([label, key]) => <View key={key}><Text style={styles.label}>{label}</Text><TextInput style={[styles.input, key === 'reason' && styles.multiline]} value={form[key]} onChangeText={value => setForm(prev => ({ ...prev, [key]: value }))} editable={fundingEnabled && busyId !== 'funding'} multiline={key === 'reason'} maxLength={key === 'reason' ? 500 : 200} autoCapitalize="none" placeholder={key === 'evidenceSha256' ? '64-character SHA-256' : ''} placeholderTextColor={COLORS.muted}/></View>)}
+    <Button title={busyId === 'funding' ? 'Submitting…' : 'Submit funding evidence'} onPress={createFunding} disabled={!fundingEnabled || busyId === 'funding'}/>{payload?.requests?.length ? <DetailFields value={payload.requests}/> : null}</View>;
+  if (section === 'walletReconciliation') return <View style={styles.card}><Text style={styles.cardEyebrow}>READ ONLY · LEDGER</Text><Text style={styles.cardTitle}>Wallet funding reconciliation</Text><Text style={styles.cardNote}>Totals are computed from posted ledger entries. The bank statement must still be reconciled independently by finance.</Text>{payload ? <DetailFields value={payload}/> : <Text style={styles.cardNote}>Loading reconciliation…</Text>}</View>;
+  if (!isCredit && !isFunding) return null;
+  const action = section === 'walletCreditApprovals' || section === 'walletFundingApprovals' ? 'APPROVE' : 'REJECT';
+  const kind = isFunding ? 'funding' : 'credit';
+  const decisionEnabled = canDecideWalletRequest(profile, kind);
+  const decisionBlockers = kind === 'credit' ? profile?.walletCreditBlockers : profile?.walletFundingBlockers;
+  return <View style={styles.card}><Text style={styles.cardEyebrow}>SUPER ADMIN · INDEPENDENT CHECKER</Text><Text style={styles.cardTitle}>{action === 'APPROVE' ? `Pending ${kind} approvals` : `Pending ${kind} rejections`}</Text><Text style={styles.cardNote}>Only a different active SUPER_ADMIN can decide. {kind === 'funding' ? 'Approval requires independently verifying cleared bank funds.' : 'Approval creates balanced ledger entries only within the funded adjustment balance.'}</Text>{!decisionEnabled ? <FinancialActionNotice title={`${kind === 'credit' ? 'Credit' : 'Funding'} decisions are disabled`} reason={Array.isArray(decisionBlockers) && decisionBlockers.length ? decisionBlockers.join('; ') : 'The server readiness capability is disabled. No decision can be recorded.'}/> : null}{rows.length ? rows.map(row => <View key={row.id} style={styles.detailGroup}><Text style={styles.detailSectionTitle}>{kind === 'credit' ? `${format(row.amountPaise)} · ${row.targetUser?.publicId || row.targetUserId}` : `${format(row.amountPaise)} · ${row.sourceAccountLabel}`}</Text><DetailFields value={row}/><Text style={styles.label}>Decision reason (8–500 characters)</Text><TextInput style={styles.input} value={decisionReasons[row.id] || ''} onChangeText={value => setDecisionReasons(prev => ({ ...prev, [row.id]: value }))} maxLength={500} placeholder={action === 'APPROVE' ? 'Approval basis' : 'Reason for rejection'} placeholderTextColor={COLORS.muted}/><Button title={busyId === row.id ? 'Saving…' : action === 'APPROVE' ? `Approve ${kind}` : `Reject ${kind}`} secondary={action === 'REJECT'} disabled={busyId === row.id || !decisionEnabled} onPress={() => decide(kind, row, action)}/></View>) : <Text style={styles.cardNote}>No pending {kind} requests.</Text>}</View>;
 }
 function SecureEvidenceImage({ uri, accessToken, requestRaw, onZoom }) {
   const [sourceUri, setSourceUri] = useState('');
@@ -236,7 +320,7 @@ function AppBody() {
   const request = useCallback((path, options) => clientRef.current.request(path, options), []);
   const requestRaw = useCallback((url, options) => clientRef.current.requestRaw(url, options), []);
   const loadSection = useCallback(async (key, token = access, requestedPage = listPage) => {
-    const item = NAV.find(x => x[0] === key); if ((!item && key !== 'walletCredits') || !token) return;
+    const item = NAV.find(x => x[0] === key); if (!item || !token) return;
     setBusy(true); setError(''); if (key === 'reports') setPayloadSection(null);
     if (key === 'walletAdjustments') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
     if (key === 'walletCredits') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
@@ -246,6 +330,9 @@ function AppBody() {
     if (['users','deposits','withdrawals','transactions','ledger','referrals','commissions','disputes','support','admins','audit','alerts','p2p'].includes(key)) { queryParams.set('page', String(requestedPage)); queryParams.set('pageSize', String(listPageSize)); }
     const suffix = queryParams.toString() ? `?${queryParams.toString()}` : '';
     const fetchSectionPayload = async (activeToken) => {
+      if (key === 'walletCreditApprovals' || key === 'walletCreditRejections') return request('/api/v1/admin/wallet/credits/requests?status=PENDING_APPROVAL&page=1&pageSize=100', { token: activeToken });
+      if (key === 'walletFunding' || key === 'walletFundingApprovals' || key === 'walletFundingRejections') return request('/api/v1/admin/wallet/funding/requests?status=PENDING_APPROVAL&page=1&pageSize=100', { token: activeToken });
+      if (key === 'walletReconciliation') return request('/api/v1/admin/wallet/reconciliation', { token: activeToken });
       if (key === 'reconciliation' && !financialActionState('paymentVerification', profile?.role, profile?.financialOperationsEnabled).enabled) return { claims: [] };
       if (key === 'p2p') {
         const offersParams = new URLSearchParams({ page: String(requestedPage), pageSize: String(listPageSize) });
@@ -511,6 +598,7 @@ function AppBody() {
       {section === 'ledger' && walletAdjustment.visible ? <FinancialActionNotice title="Wallet adjustments unavailable" reason={walletAdjustment.reason} /> : null}
       {section === 'walletAdjustments' ? <WalletAdjustmentAdminSection request={request} access={access} profile={profile} setInfo={setInfo} setError={setError} /> : null}
       {section === 'walletCredits' ? <SuperAdminWalletCreditsSection request={request} access={access} profile={profile} setInfo={setInfo} setError={setError} loadSection={loadSection} /> : null}
+      {['walletCreditApprovals','walletCreditRejections','walletFunding','walletFundingApprovals','walletFundingRejections','walletReconciliation'].includes(section) ? <WalletCreditControlsSection section={section} request={request} access={access} profile={profile} payload={payloadSection === section ? payload : null} setInfo={setInfo} setError={setError} loadSection={loadSection}/> : null}
       {section === 'health' && payoutProcessing.visible ? <FinancialActionNotice title="Payout processing unavailable" reason={payoutProcessing.reason} /> : null}
       {busy ? <ActivityIndicator color={COLORS.blue} size="large" style={{ marginTop: 30 }} /> : null}
       {section === 'overview' && payloadSection === section && payload ? <><View style={styles.card}><Text style={styles.cardEyebrow}>LIVE · DATABASE</Text><Text style={styles.cardTitle}>Operations overview</Text><Text style={styles.cardNote}>Tap a metric to open its related records. Figures come from the PaisaPay backend. Gross transaction volume and ledger balances are separate measures.</Text></View><View style={styles.grid}>{Object.entries(payload.metrics || {}).filter(([, v]) => typeof v === 'number' || typeof v === 'string' || v === null).map(([k, v]) => <Pressable key={k} onPress={() => selectSection(k.toLowerCase().includes('deposit') ? 'deposits' : k.toLowerCase().includes('withdraw') ? 'withdrawals' : k.toLowerCase().includes('user') ? 'users' : 'transactions')} style={({ pressed }) => [styles.metric, pressed && styles.pressed]}><Text style={styles.metricLabel}>{k.replace(/([A-Z])/g, ' $1').replace(/Paise$/i, '')}</Text><Text style={styles.metricValue}>{v === null ? 'Not configured' : /Paise$/i.test(k) ? `₹${(Number(v) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : String(v)}</Text><Text style={styles.metricHint}>View records ›</Text></Pressable>)}</View><View style={styles.card}><Text style={styles.cardTitle}>Transaction and registration trends</Text><View style={styles.decisionRow}>{[['daily','7 days'],['weekly','4 weeks'],['monthly','12 months']].map(([key,title]) => <Button key={key} title={chartRange === key ? `✓ ${title}` : title} secondary onPress={() => setChartRange(key)}/>)}</View><View style={styles.chartLegend}><Text style={styles.rowDetail}>● Deposits</Text><Text style={[styles.rowDetail,{color:COLORS.gold}]}>● Withdrawals</Text><Text style={[styles.rowDetail,{color:COLORS.green}]}>● New users</Text></View>{(payload.charts?.[chartRange] || []).map((point, index, list) => { const max = Math.max(1, ...list.map(x => Number(x.depositsPaise) + Number(x.withdrawalsPaise))); const dep = Math.max(4, 92 * Number(point.depositsPaise) / max); const wd = Math.max(4, 92 * Number(point.withdrawalsPaise) / max); const users = Math.min(24, Number(point.registrations) * 3); return <View key={`${point.date}-${index}`} style={styles.chartRow}><Text style={styles.chartDate}>{new Date(point.date).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}</Text><View style={styles.chartTrack}><View style={[styles.chartDeposit,{width:`${dep}%`}]}/><View style={[styles.chartWithdraw,{width:`${wd}%`}]}/></View><Text style={styles.chartUsers}>{Number(point.registrations)} users</Text></View>; })}</View></> : null}

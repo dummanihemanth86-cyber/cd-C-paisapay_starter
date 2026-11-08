@@ -10,6 +10,14 @@
       "distribution": "internal",
       "android": { "buildType": "apk" }
     },
+    "staging-apk": {
+      "environment": "preview",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://paisapay-api-staging.onrender.com"
+      },
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
+    },
     "production-apk": {
       "environment": "production",
       "env": {

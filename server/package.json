@@ -12,6 +12,7 @@
     "build": "npm run db:generate && tsc -p tsconfig.build.json",
     "typecheck": "npm run db:generate && tsc --noEmit -p tsconfig.build.json",
     "test": "vitest run --maxWorkers=1 --no-file-parallelism",
+    "test:staging-wallet-credit": "vitest run src/tests/stagingWalletCredit.e2e.test.ts --maxWorkers=1 --no-file-parallelism",
     "db": "npm run db:deploy",
     "db:generate": "prisma generate --config prisma.config.ts",
     "db:migrate": "prisma migrate dev",

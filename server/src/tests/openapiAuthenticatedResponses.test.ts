@@ -141,6 +141,21 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
     }
   });
 
+  it('keeps the retired per-user direct credit route non-successful and write-free', async () => {
+    fakeDatabase.administrator.role = 'SUPER_ADMIN';
+    fakeDatabase.writes.length = 0;
+    const response = await request(app)
+      .post(`/api/v1/admin/users/${fakeDatabase.user.id}/wallet/credit`)
+      .set(authorization)
+      .send({ amountPaise: 10_000, reason: 'Must use maker checker' })
+      .expect(409);
+    expect(response.body.error.code).toBe('MAKER_CHECKER_REQUIRED');
+    expect(fakeDatabase.writes).toEqual([]);
+    const operation = openapi.paths['/admin/users/{id}/wallet/credit'].post;
+    expect(Object.keys(operation.responses).some((status) => status.startsWith('2'))).toBe(false);
+    expect(operation.responses['409'].content?.['application/json']?.schema).toEqual({ $ref: '#/components/schemas/ApiError' });
+  });
+
   it('retires the legacy adjustment endpoint regardless of admin role', async () => {
     const previous = { adminId: env.walletAdjustmentAdminUserId, role: fakeDatabase.administrator.role };
     env.walletAdjustmentAdminUserId = fakeDatabase.user.id;
