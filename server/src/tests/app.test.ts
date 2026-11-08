@@ -146,7 +146,7 @@ describe('PaisaPay API foundation', () => {
             }
           }
         }
-        const isPublic = path === '/config' || path.startsWith('/auth/') || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
+        const isPublic = path === '/config' || path.startsWith('/auth/') || path === '/admin/app-version' || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
         if (!isPublic) expect(operation.security, `${method.toUpperCase()} ${path} security`).toEqual([{ bearerAuth: [] }]);
       }
     }

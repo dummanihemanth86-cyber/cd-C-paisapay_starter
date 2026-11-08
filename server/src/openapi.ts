@@ -9,6 +9,32 @@ const openapiBase = {
     schemas: { Error: { type: 'object', properties: { error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } }, required: ['code', 'message'] } } } },
   },
   paths: {
+    '/admin/app-version': {
+      get: {
+        security: [],
+        summary: 'Public Admin app/API build metadata for staging update checks; returns no secrets or account data',
+        responses: {
+          '200': {
+            description: 'Public PaisaPay API version and deployment metadata',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['service', 'apiVersion', 'buildId', 'deploymentEnvironment'],
+                  additionalProperties: false,
+                  properties: {
+                    service: { type: 'string', enum: ['paisapay-api'] },
+                    apiVersion: { type: 'string' },
+                    buildId: { type: 'string', maxLength: 40 },
+                    deploymentEnvironment: { type: 'string', enum: ['staging', 'production', 'development', 'test'] },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     '/config': { get: { summary: 'Public INR/payment-method configuration', responses: { '200': { description: 'Configuration' } } } },
     '/auth/request-otp': { post: {
       summary: 'Request an OTP delivered through the configured server-side SMS provider',

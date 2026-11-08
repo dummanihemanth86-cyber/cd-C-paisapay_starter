@@ -4,6 +4,8 @@ import * as SecureStore from 'expo-secure-store';
 import Constants from 'expo-constants';
 import { isRunningInExpoGo } from 'expo';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import AdminUpdateBanner from './AdminUpdateBanner';
+const { createAdminSessionStorage } = require('./adminSessionStorage.cjs');
 import responseHelpers from './responseHelpers.cjs';
 const { adminRecordDetailPath } = require('../../shared/adminRecordNavigation.cjs');
 const { financialActionState } = require('../../shared/adminFinancialUx.cjs');
@@ -12,7 +14,7 @@ const { adminPhoneInputDigits, normalizeAdminPhone, canSubmitAdminPasswordReset 
 const { canDecideWalletRequest, canRequestWalletCredit, canDirectWalletCredit } = require('./walletCreditCapabilities.cjs');
 
 
-const API = (process.env.EXPO_PUBLIC_API_URL || 'https://paisapay-api.onrender.com').trim().replace(/\/$/, '');
+const API = (process.env.EXPO_PUBLIC_API_URL || 'https://paisapay-api-staging.onrender.com').trim().replace(/\/$/, '');
 if (!__DEV__ && !API.startsWith('https://')) throw new Error('PaisaPay Admin production builds require an HTTPS API URL.');
 if (!__DEV__) {
   try {
@@ -27,8 +29,15 @@ const REFRESH_KEY = 'paisapay.admin.refresh';
 const IS_EXPO_GO = isRunningInExpoGo();
 // expo-notifications logs a warning as soon as its package is evaluated in Expo Go.
 // Require it only in a native/development build, where remote push is supported.
-const Notifications = IS_EXPO_GO ? null : require('expo-notifications');
+const Notifications = IS_EXPO_GO || Platform.OS === 'web' ? null : require('expo-notifications');
 if (Notifications) Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
+const adminSessionStorage = createAdminSessionStorage({
+  platform: Platform.OS,
+  secureStore: SecureStore,
+  getWebStorage: () => typeof window === 'undefined' ? null : window.sessionStorage,
+});
+const ADMIN_BUILD_CODE = Number(process.env.EXPO_PUBLIC_ADMIN_BUILD_CODE || Constants.expoConfig?.android?.versionCode || 0);
+const IS_STAGING_BUILD = process.env.EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV === 'staging' || API === 'https://paisapay-api-staging.onrender.com';
 const { asArray, asRecord, normalizeListPayload, normalizeP2pPayload, normalizeSupportTicket } = responseHelpers;
 const { paginationState, formatPaise } = responseHelpers;
 const { createAdminApiClient } = require('./sessionApiClient.cjs');
@@ -66,6 +75,14 @@ const NAV = [
 const COLORS = { bg: '#F7F9FC', navy: '#FFFFFF', panel: '#FFFFFF', panelRaised: '#EFF6FF', blue: '#2563EB', cyan: '#2563EB', text: '#17243B', muted: '#64748B', border: '#E5EAF2', danger: '#DC4242', green: '#159B72', gold: '#D99018' };
 
 function Button({ title, onPress, disabled, secondary }) { return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, secondary && styles.secondaryButton, disabled && styles.disabled, pressed && styles.pressed]}><Text style={[styles.buttonText, secondary && styles.secondaryButtonText]}>{title}</Text></Pressable>; }
+function confirmAdminAction(title, message, buttons, options) {
+  if (Platform.OS !== 'web') return Alert.alert(title, message, buttons, options);
+  const accepted = typeof window !== 'undefined' && window.confirm(`${title}\n\n${message}`);
+  const selected = accepted
+    ? [...buttons].reverse().find((button) => button.style !== 'cancel')
+    : buttons.find((button) => button.style === 'cancel');
+  selected?.onPress?.();
+}
 function PaginationBar({ page, pageCount, total, hasPrevious, hasNext, busy, onPrevious, onNext }) {
   return <View style={styles.pagination}><Button title="Previous" secondary disabled={!hasPrevious || busy} onPress={onPrevious}/><Text style={styles.paginationLabel}>Page {page} of {pageCount} · {total} records</Text><Button title="Next" secondary disabled={!hasNext || busy} onPress={onNext}/></View>;
 }
@@ -104,7 +121,7 @@ function WalletAdjustmentAdminSection({ request, access, profile, setInfo, setEr
     } catch (error) { setError(error.message); }
     finally { requestInFlight.current = false; setSubmitting(false); }
   };
-  const confirm = () => Alert.alert('Confirm wallet adjustment', `${direction} ₹${(amountPaise / 100).toFixed(2)} for user ${targetPublicId.trim()}? The backend records an immutable, audited ledger transaction.`, [
+  const confirm = () => confirmAdminAction('Confirm wallet adjustment', `${direction} ₹${(amountPaise / 100).toFixed(2)} for user ${targetPublicId.trim()}? The backend records an immutable, audited ledger transaction.`, [
     { text: 'Back', style: 'cancel', onPress: () => { confirmationOpen.current = false; } }, { text: 'Confirm', style: 'destructive', onPress: () => { confirmationOpen.current = false; void submit(); } },
   ]);
   return <View style={styles.card}>
@@ -191,7 +208,7 @@ function SuperAdminWalletCreditsSection({ request, access, profile, setInfo, set
         return;
       }
       setSelected(verified);
-      Alert.alert(directCreditEnabled ? 'Confirm direct staging credit' : 'Confirm wallet credit request', `${directCreditEnabled ? 'Post' : 'Request'} ${formatPaise(amountPaise)} for ${verified.displayName || 'PaisaPay user'}?\nPublic ID: ${verified.publicId}\nAccount ID: ${verified.id}\nPhone: ${verified.phoneMasked}\nCurrent available balance: ${formatPaise(verified.walletBalancePaise)}\n${directCreditEnabled ? 'A real ledger credit will post immediately from the funded staging adjustment account.' : 'A different SUPER_ADMIN must approve. No balance changes until approval posts a ledger transaction.'}`, [
+      confirmAdminAction(directCreditEnabled ? 'Confirm direct staging credit' : 'Confirm wallet credit request', `${directCreditEnabled ? 'Post' : 'Request'} ${formatPaise(amountPaise)} for ${verified.displayName || 'PaisaPay user'}?\nPublic ID: ${verified.publicId}\nAccount ID: ${verified.id}\nPhone: ${verified.phoneMasked}\nCurrent available balance: ${formatPaise(verified.walletBalancePaise)}\n${directCreditEnabled ? 'A real ledger credit will post immediately from the funded staging adjustment account.' : 'A different SUPER_ADMIN must approve. No balance changes until approval posts a ledger transaction.'}`, [
         { text: 'Cancel', style: 'cancel' }, { text: directCreditEnabled ? 'Credit wallet' : 'Submit request', onPress: () => { void submit(); } },
       ]);
     } catch (error) { setSearchError(error.message); }
@@ -221,18 +238,18 @@ function WalletCreditControlsSection({ section, request, access, profile, payloa
     const decisionReason = (decisionReasons[row.id] || '').trim();
     if (decisionReason.length < 8) { setError('Enter an approval or rejection reason of at least 8 characters.'); return; }
     if (kind === 'funding' && decision === 'APPROVE') {
-      Alert.alert('Verify actual funding', 'Confirm that you independently checked the original bank statement, cleared cash receipt, source account and exact amount. This posts an accounting journal.', [
+      confirmAdminAction('Verify actual funding', 'Confirm that you independently checked the original bank statement, cleared cash receipt, source account and exact amount. This posts an accounting journal.', [
         { text: 'Cancel', style: 'cancel' }, { text: 'I verified the cleared funds', onPress: () => void sendDecision(kind, row, decision, decisionReason, true) },
       ]);
       return;
     }
     if (kind === 'credit' && decision === 'APPROVE') {
-      Alert.alert('Approve wallet credit', `Approve ${format(row.amountPaise)} for ${row.targetUser?.publicId || row.targetUserId}? This posts only if the adjustment fund has enough ledger balance.`, [
+      confirmAdminAction('Approve wallet credit', `Approve ${format(row.amountPaise)} for ${row.targetUser?.publicId || row.targetUserId}? This posts only if the adjustment fund has enough ledger balance.`, [
         { text: 'Cancel', style: 'cancel' }, { text: 'Approve credit', onPress: () => void sendDecision(kind, row, decision, decisionReason, false) },
       ]);
       return;
     }
-    Alert.alert('Reject request', 'Reject this pending request? Rejection creates an audit record and no ledger entries.', [
+    confirmAdminAction('Reject request', 'Reject this pending request? Rejection creates an audit record and no ledger entries.', [
       { text: 'Cancel', style: 'cancel' }, { text: 'Reject', style: 'destructive', onPress: () => void sendDecision(kind, row, decision, decisionReason, false) },
     ]);
   };
@@ -310,12 +327,12 @@ function AppBody() {
   const clientRef = useRef(null);
   const persistSession = useCallback(async (session) => {
     sessionRef.current = session;
-    await Promise.all([SecureStore.setItemAsync(ACCESS_KEY, session.accessToken), SecureStore.setItemAsync(REFRESH_KEY, session.refreshToken)]);
+    await Promise.all([adminSessionStorage.setItemAsync(ACCESS_KEY, session.accessToken), adminSessionStorage.setItemAsync(REFRESH_KEY, session.refreshToken)]);
     setAccess(session.accessToken);
   }, []);
   const clearLocalSession = useCallback(async (reason) => {
     sessionRef.current = { accessToken: '', refreshToken: '' };
-    await Promise.all([SecureStore.deleteItemAsync(ACCESS_KEY), SecureStore.deleteItemAsync(REFRESH_KEY)]);
+    await Promise.all([adminSessionStorage.deleteItemAsync(ACCESS_KEY), adminSessionStorage.deleteItemAsync(REFRESH_KEY)]);
     setAccess(''); setProfile(null); setPayload(null); setPayloadSection(null); setPassword(''); setModal(null); setDetailsModal(null); setSupportModal(null);
     if (reason?.code !== 'SESSION_CLEARED') setError('Admin session expired. Sign in again.');
   }, []);
@@ -378,7 +395,7 @@ function AppBody() {
     setPushSetupStatus('Sign in to register this device.');
   }, [request]);
   useEffect(() => { let active = true; (async () => {
-    const storedAccess = await SecureStore.getItemAsync(ACCESS_KEY); const storedRefresh = await SecureStore.getItemAsync(REFRESH_KEY);
+    const storedAccess = await adminSessionStorage.getItemAsync(ACCESS_KEY); const storedRefresh = await adminSessionStorage.getItemAsync(REFRESH_KEY);
     if (!active || !storedAccess || !storedRefresh) return;
     sessionRef.current = { accessToken: storedAccess, refreshToken: storedRefresh };
     try {
@@ -670,7 +687,7 @@ function AppBody() {
     <Modal visible={Boolean(detailsModal)} transparent animationType="fade" onRequestClose={() => setDetailsModal(null)}><View style={styles.modalShade}><ScrollView style={styles.modalCard} contentContainerStyle={{ paddingBottom: 24 }}><Text style={styles.cardEyebrow}>RECORD DETAILS</Text><Text style={styles.cardTitle}>{detailsModal?.title || 'Details'}</Text><DetailFields value={detailsModal?.record} /><Button title="Close details" onPress={() => setDetailsModal(null)} secondary/></ScrollView></View></Modal>
     </View>;
 }
-export default function App() { return <SafeAreaProvider><SafeAreaView style={styles.safe}><StatusBar barStyle="dark-content" backgroundColor={COLORS.navy}/><AppBody/></SafeAreaView></SafeAreaProvider>; }
+export default function App() { return <SafeAreaProvider><SafeAreaView style={styles.safe}><StatusBar barStyle="dark-content" backgroundColor={COLORS.navy}/><AdminUpdateBanner apiBase={API} currentBuildCode={ADMIN_BUILD_CODE} stagingBuild={IS_STAGING_BUILD}/><AppBody/></SafeAreaView></SafeAreaProvider>; }
 
 function DetailFields({ value, depth = 0 }) {
   if (value == null) return <Text style={styles.cardNote}>No additional details returned by the server.</Text>;

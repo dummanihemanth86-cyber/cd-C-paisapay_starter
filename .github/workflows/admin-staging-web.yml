@@ -1,0 +1,91 @@
+name: Deploy PaisaPay Admin staging web
+
+on:
+  push:
+    branches:
+      - codex/admin-wallet-credit-staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: admin-staging-pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/admin-wallet-credit-staging
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/admin-app/package-lock.json
+
+      - name: Install Admin web dependencies
+        working-directory: apps/admin-app
+        run: npm ci --include=dev
+
+      - name: Create public staging build manifest
+        shell: bash
+        run: |
+          APP_VERSION="$(node -p "require('./apps/admin-app/app.json').expo.version")"
+          ANDROID_CODE="$(node -p "require('./apps/admin-app/app.json').expo.android.versionCode")"
+          BUILD_CODE="$((ANDROID_CODE * 1000000 + GITHUB_RUN_NUMBER))"
+          BUILD_ID="$GITHUB_SHA"
+          WEB_URL="https://dummanihemanth86-cyber.github.io/cd-C-paisapay_starter/"
+          API_URL="https://paisapay-api-staging.onrender.com"
+          mkdir -p apps/admin-app/public
+          APP_VERSION="$APP_VERSION" BUILD_ID="$BUILD_ID" BUILD_CODE="$BUILD_CODE" node -e 'const fs=require("node:fs");const data={appId:"com.paisapay.admin",version:process.env.APP_VERSION,buildId:process.env.BUILD_ID,buildCode:Number(process.env.BUILD_CODE),deploymentEnvironment:"staging",deployedAt:new Date().toISOString()};fs.writeFileSync("apps/admin-app/public/admin-version.json",JSON.stringify(data)+"\n");'
+          {
+            echo "EXPO_NO_DOTENV=1"
+            echo "EXPO_PUBLIC_API_URL=$API_URL"
+            echo "EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV=staging"
+            echo "EXPO_PUBLIC_ADMIN_BUILD_ID=$BUILD_ID"
+            echo "EXPO_PUBLIC_ADMIN_BUILD_CODE=$BUILD_CODE"
+            echo "EXPO_PUBLIC_ADMIN_WEB_URL=$WEB_URL"
+            echo "EXPO_PUBLIC_ADMIN_VERSION_URL=${WEB_URL}admin-version.json"
+          } >> "$GITHUB_ENV"
+
+      - name: Export staging Admin web app
+        working-directory: apps/admin-app
+        run: npx expo export --platform web --no-bytecode
+
+      - name: Verify staging build has no production API or credentials
+        shell: bash
+        run: |
+          if grep -R -n --include='*.js' --include='*.json' 'paisapay-api.onrender.com' apps/admin-app/dist; then
+            echo 'Production API URL was found in the exported staging bundle.' >&2
+            exit 1
+          fi
+          if grep -R -n --include='*.js' --include='*.json' -E '(RENFLAIR_API_KEY|SESSION_HASH_SECRET|BANK_ACCOUNT_ENCRYPTION_KEY|DATABASE_URL=)' apps/admin-app/dist; then
+            echo 'A server secret name was found in the exported frontend bundle.' >&2
+            exit 1
+          fi
+          test -s apps/admin-app/dist/index.html
+          test -s apps/admin-app/dist/admin-version.json
+          grep -q 'paisapay-api-staging.onrender.com' apps/admin-app/dist/admin-version.json
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: apps/admin-app/dist
+
+      - name: Deploy staging Admin web app
+        id: deployment
+        uses: actions/deploy-pages@v4

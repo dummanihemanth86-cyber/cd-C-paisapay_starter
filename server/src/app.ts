@@ -22,13 +22,13 @@ import { getPaymentMethodAvailability } from './modules/payments/availability.js
 import { openapi } from './openapi.js';
 import { adminAuthRouter, adminRouter } from './modules/admin/routes.js';
 import { financialOperationsGate } from './middleware/financialOperations.js';
+import { isAllowedApiOrigin } from './config/adminWebOrigin.js';
 
 export const app = express();
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({ origin: (origin, callback) => {
-  if (!origin || origin === 'https://paisapay-api.onrender.com' || env.appOrigins.includes(origin)) return callback(null, true);
-  if (env.isDevelopment && (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:'))) return callback(null, true);
+  if (isAllowedApiOrigin(origin, { apiProductionOrigin: 'https://paisapay-api.onrender.com', appOrigins: env.appOrigins, isDevelopment: env.isDevelopment, isExplicitRenderStaging: env.isExplicitRenderStaging })) return callback(null, true);
   return callback(Object.assign(new Error('Origin is not allowed by CORS.'), { statusCode: 403, code: 'CORS_ORIGIN_DENIED' }));
 } }));
 app.use(express.json({ limit: '2.1mb', verify: (req, _res, buffer) => { (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
@@ -55,6 +55,16 @@ app.get('/v1/config', asyncRoute(async (_req, res) => {
   res.json({ ...await getPaymentMethodAvailability(), demoOnly: true });
 }));
 app.get('/api/v1/openapi.json', (_req, res) => res.json(openapi));
+const publicApiBuildId = /^[a-f0-9]{7,40}$/i.test(process.env.RENDER_GIT_COMMIT || '') ? process.env.RENDER_GIT_COMMIT! : 'unknown';
+app.get('/api/v1/admin/app-version', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.json({
+    service: 'paisapay-api',
+    apiVersion: '1.0.0',
+    buildId: publicApiBuildId,
+    deploymentEnvironment: env.isExplicitRenderStaging ? 'staging' : env.isProduction ? 'production' : env.isDevelopment ? 'development' : 'test',
+  });
+});
 app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(undefined, {
   swaggerOptions: { url: '/api/v1/openapi.json' },
 }));
@@ -66,7 +76,7 @@ app.use('/api/v1', (req, res, next) => {
   const path = req.path;
   const known = [
     ['/auth/request-otp', 'POST'], ['/auth/verify-otp', 'POST'], ['/auth/register/request-otp', 'POST'], ['/auth/register/verify-otp', 'POST'], ['/auth/forgot-password/request-otp', 'POST'], ['/auth/password/login', 'POST'], ['/auth/password/reset', 'POST'], ['/auth/refresh', 'POST'], ['/auth/logout', 'POST'],
-    ['/config', 'GET'], ['/wallet-methods', 'GET'], ['/wallet-references', 'GET'], ['/wallet-references', 'POST'], ['/users/me/vip', 'GET'],
+    ['/config', 'GET'], ['/wallet-methods', 'GET'], ['/wallet-references', 'GET'], ['/wallet-references', 'POST'], ['/users/me/vip', 'GET'], ['/admin/app-version', 'GET'],
     ['/deposits', 'GET'], ['/deposits', 'POST'], ['/users/me', 'GET'], ['/users/me', 'PATCH'], ['/users/me/upi', 'GET'], ['/users/me/upi', 'PATCH'], ['/users/me/upi', 'DELETE'], ['/users/me/referrals', 'GET'],
     ['/users/me/bank-accounts', 'GET'], ['/users/me/bank-accounts', 'POST'],
     ['/users/me/balance', 'GET'], ['/users/me/transactions', 'GET'], ['/orders', 'GET'], ['/orders', 'POST'],

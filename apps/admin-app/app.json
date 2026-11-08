@@ -6,6 +6,8 @@
     "version": "1.0.3",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "web": { "bundler": "metro", "output": "single" },
+    "experiments": { "baseUrl": "/cd-C-paisapay_starter" },
     "icon": "./assets/paisapay-admin-icon.png",
     "splash": {
       "image": "./assets/paisapay-admin-icon.png",
