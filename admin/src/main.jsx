@@ -35,6 +35,10 @@ function App() {
   const [adminAccess, setAdminAccess] = useState(null);
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [resetMode, setResetMode] = useState(false);
+  const [resetChallengeId, setResetChallengeId] = useState('');
+  const [resetCode, setResetCode] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
   const [claims, setClaims] = useState([]);
   const [claimsPagination, setClaimsPagination] = useState({ page: 1, pageSize: 25, total: 0 });
   const [p2pOrders, setP2pOrders] = useState([]);
@@ -107,6 +111,37 @@ function App() {
     finally { setBusy(false); }
   };
 
+  const requestAdminResetOtp = async (event) => {
+    event.preventDefault(); setBusy(true); setError(''); setInfo('');
+    try {
+      const digits = phone.replace(/\D/g, '').slice(-10);
+      if (digits.length !== 10) throw new Error('Enter a valid 10-digit Admin mobile number.');
+      const phoneE164 = `+91${digits}`;
+      const result = await api('/api/v1/admin/auth/forgot-password/request-otp', {
+        method: 'POST', body: { phoneE164 },
+      });
+      setResetChallengeId(result.challengeId);
+      setInfo(result.message || 'If an active Admin account exists, a reset code will be sent by SMS.');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const resetAdminPassword = async (event) => {
+    event.preventDefault(); setBusy(true); setError(''); setInfo('');
+    try {
+      const digits = phone.replace(/\D/g, '').slice(-10);
+      if (digits.length !== 10) throw new Error('Enter a valid 10-digit Admin mobile number.');
+      const phoneE164 = `+91${digits}`;
+      const result = await api('/api/v1/admin/auth/password/reset', {
+        method: 'POST',
+        body: { phoneE164, challengeId: resetChallengeId, code: resetCode, newPassword: resetPassword },
+      });
+      setInfo(result.message || 'Password reset. Sign in using your new password.');
+      setResetMode(false); setResetChallengeId(''); setResetCode(''); setResetPassword(''); setPassword('');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
   const logout = async () => {
     try {
       await clientRef.current.logout(async (current) => {
@@ -124,17 +159,23 @@ function App() {
 
   return <main className="live-admin" data-theme={theme}>
     <header className="live-header">
-      <div><div className="live-brand"><img src="/paisapay-neon-logo.png" alt="PaisaPay logo" /><span>PaisaPay</span></div><h1>Admin Control Center</h1><p>Live PaisaPay data · Role controlled · INR</p></div>
+      <div><div className="live-brand"><img src="/paisapay-admin-emblem.png" alt="PaisaPay Admin security emblem" /><span>PaisaPay Admin</span></div><h1>Admin Control Center</h1><p>Live PaisaPay data · Role controlled · INR</p></div>
       <div className="admin-header-actions"><button type="button" className="secondary" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Switch color theme">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</button>{token && <button className="secondary" onClick={logout}>Sign out</button>}</div>
     </header>
     <div className="live-notice"><b>UPI payment verification is not automatic.</b> A user-submitted reference is only a claim. Check the merchant bank records, exact amount, INR currency, and receiver before approving.</div>
     {error && <div className="live-alert error">{error}</div>}{info && <div className="live-alert success">{info}</div>}
-    {!token ? <form className="login-panel" onSubmit={login}>
-      <h2>Admin sign in</h2><p>Use an existing PaisaPay account that has an authorized Finance, Admin, or Super Admin role. Ordinary accounts will be denied by the backend.</p>
+    {!token ? <form className="login-panel" onSubmit={resetMode ? (resetChallengeId ? resetAdminPassword : requestAdminResetOtp) : login}>
+      <h2>{resetMode ? 'Reset Admin password' : 'Admin sign in'}</h2>
+      <p>{resetMode ? 'We will send a one-time reset code by SMS to the registered Admin mobile number.' : 'Use an existing PaisaPay account that has an authorized Finance, Admin, or Super Admin role. Ordinary accounts will be denied by the backend.'}</p>
       <label>Mobile number<input autoComplete="username" inputMode="numeric" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="10-digit number" required /></label>
-      <label>Password<input autoComplete="current-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
-      <button disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
-      <small>Session token is kept in memory for this page only. Use HTTPS outside local development.</small>
+      {!resetMode && <label>Password<input autoComplete="current-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>}
+      {resetMode && resetChallengeId && <>
+        <label>6-digit SMS code<input autoComplete="one-time-code" inputMode="numeric" value={resetCode} onChange={(e) => setResetCode(e.target.value.replace(/\D/g, '').slice(0, 6))} minLength={6} maxLength={6} required /></label>
+        <label>New password<input autoComplete="new-password" type="password" value={resetPassword} onChange={(e) => setResetPassword(e.target.value)} minLength={12} maxLength={128} required /></label>
+      </>}
+      <button disabled={busy}>{busy ? 'Please wait…' : resetMode ? (resetChallengeId ? 'Reset password' : 'Send reset OTP') : 'Sign in'}</button>
+      <button type="button" className="secondary" disabled={busy} onClick={() => { setResetMode(!resetMode); setResetChallengeId(''); setResetCode(''); setResetPassword(''); setError(''); setInfo(''); }}>{resetMode ? 'Back to sign in' : 'Forgot password?'}</button>
+      {!resetMode && <small>Session token is kept in memory for this page only. Use HTTPS outside local development.</small>}
     </form> : <AdminWorkspace api={api} apiRaw={apiRaw} token={token} access={adminAccess} claims={claims} claimsPagination={claimsPagination} p2pOrders={p2pOrders} p2pOffers={p2pOffers} p2pClaims={p2pClaims} p2pPagination={p2pPagination} loadClaims={loadClaims} loadP2p={loadP2p} setInfo={setInfo} setError={setError} />}
     <footer>API: {API} · Transaction references are sensitive business data; do not export or share this page.</footer>
   </main>;

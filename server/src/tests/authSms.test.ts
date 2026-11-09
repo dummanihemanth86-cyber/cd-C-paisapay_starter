@@ -12,6 +12,7 @@ const db = prisma!;
 const phones: string[] = [];
 let lastMessage = '';
 let lastRequestId = '';
+let lastPhoneNumber = '';
 const integration = describe.skipIf(!prisma || !env.smsGatewayConfigured);
 const originalOtpProvider = env.otpProvider;
 const originalWelcomeBonusEnabled = env.welcomeBonusEnabled;
@@ -31,7 +32,8 @@ function newPhone() {
 }
 
 function queueResponse(_url: string | URL | Request, init?: RequestInit) {
-  const payload = JSON.parse(String(init?.body)) as { message: string; request_id: string };
+  const payload = JSON.parse(String(init?.body)) as { phone_number: string; message: string; request_id: string };
+  lastPhoneNumber = payload.phone_number;
   lastMessage = payload.message;
   lastRequestId = payload.request_id;
   return Promise.resolve(new Response(JSON.stringify({ success: true, sms_id: 11, request_id: payload.request_id, status: 'PENDING' }), { status: 200 }));
@@ -42,6 +44,7 @@ integration('Android gateway OTP routes (PostgreSQL integration)', () => {
   beforeEach(() => {
     lastMessage = '';
     lastRequestId = '';
+    lastPhoneNumber = '';
     vi.stubGlobal('fetch', vi.fn(queueResponse));
   });
   afterAll(async () => {
@@ -120,6 +123,7 @@ integration('Android gateway OTP routes (PostgreSQL integration)', () => {
 
     const requested = await request(app).post('/api/v1/admin/auth/forgot-password/request-otp').send({ phoneE164 }).expect(202);
     expect(requested.body.message).toMatch(/If an active Admin account exists/);
+    expect(lastPhoneNumber).toBe(phoneE164);
     expect(JSON.stringify(requested.body)).not.toMatch(/\b\d{6}\b/);
     const challenge = await db.otpChallenge.findUniqueOrThrow({ where: { id: requested.body.challengeId } });
     expect(challenge.purpose).toBe('ADMIN_PASSWORD_RESET');
