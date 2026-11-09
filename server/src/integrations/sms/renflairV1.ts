@@ -20,6 +20,20 @@ function isExplicitFailure(value: unknown): boolean {
   return failureTokens.has(normalized) || /^[45]\d{2}$/.test(normalized) || /\b(error|failed|failure|rejected|denied)\b/i.test(value);
 }
 
+function isExplicitAcceptance(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  // Provider claims such as "sent" or "delivered" are not delivery receipts.
+  // V1 documents no response schema, so only interpret explicit request-level
+  // success/queue markers as acceptance.
+  return successTokens.has(normalized) || pendingTokens.has(normalized);
+}
+
+function hasExplicitAcceptance(record: Record<string, unknown>): boolean {
+  return [record.success, record.status, record.status_code, record.statusCode, record.result].some(isExplicitAcceptance);
+}
+
 function categorizeProviderError(value: unknown): RenflairResponseDiagnostics['providerErrorCategory'] {
   if (value === undefined || value === null || value === false || value === '') return 'none';
   if (typeof value !== 'string') return 'present_unstructured';
@@ -71,9 +85,9 @@ function categorizeProviderResponse(record: Record<string, unknown>): RenflairRe
 /**
  * Renflair V1 accepts API, PHONE and OTP as query parameters. The supplied V1
  * example only JSON-decodes the response; it does not define a response
- * schema or a delivery-status API. We therefore report only that the HTTP
- * endpoint returned a valid JSON response without an explicit rejection,
- * never handset delivery. The provider does not document a response schema.
+ * schema or a delivery-status API. We require a recognized explicit success
+ * marker before recording request acceptance. Even that means only a provider
+ * acknowledgement: this API cannot confirm that an SMS was sent or delivered.
  */
 export async function sendRenflairV1Otp(
   input: { phoneNumber: string; otp: string; requestId: string; correlationId?: string; purpose?: string; environment?: string },
@@ -107,7 +121,7 @@ export async function sendRenflairV1Otp(
   let httpStatus: number | null = null;
   let diagnostics: RenflairResponseDiagnostics = { providerResponseStatus: 'not_provided', providerErrorCategory: 'none' };
   try {
-    logger.info({ ...diagnosticsContext, providerAttempted: true, httpMethod: 'GET', endpointPath: new URL(env.renflairV1ApiUrl).pathname, timeoutMs }, 'Renflair OTP provider request started');
+    logger.info({ ...diagnosticsContext, configuration: 'available', providerAttempted: true, httpMethod: 'GET', endpointPath: new URL(env.renflairV1ApiUrl).pathname, timeoutMs }, 'Renflair OTP provider request started');
     const response = await fetchImpl(url, {
       method: 'GET',
       headers: { Accept: 'application/json' },
@@ -125,8 +139,8 @@ export async function sendRenflairV1Otp(
       throw new SmsGatewayError('SMS_GATEWAY_BAD_RESPONSE', 'Renflair V1 returned a response that PaisaPay could not parse.');
     }
 
-    // V1 documents JSON decoding but no response schema. Require a JSON object
-    // and reject explicit failures without inventing undocumented success keys.
+    // V1 documents JSON decoding but no response schema. Require an object and
+    // a recognized success marker; never turn an unknown body into acceptance.
     const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
     if (!record) {
       diagnostics = { providerResponseStatus: 'non_scalar', providerErrorCategory: 'present_unstructured' };
@@ -138,10 +152,14 @@ export async function sendRenflairV1Otp(
     const explicitlyFailed = isExplicitFailure(record.success) || isExplicitFailure(record.status)
       || isExplicitFailure(record.status_code) || isExplicitFailure(record.statusCode)
       || isExplicitFailure(record.result) || hasProviderError;
-    const providerExplicitlyAccepted = ['accepted', 'pending', 'sent'].includes(diagnostics.providerResponseStatus);
+    const providerExplicitlyAccepted = hasExplicitAcceptance(record);
     if (!response.ok || explicitlyFailed) {
       logger.warn({ ...diagnosticsContext, httpStatus, durationMs: Math.round(performance.now() - startedAt), ...diagnostics }, 'Renflair did not accept the OTP request');
       throw new SmsGatewayError('SMS_GATEWAY_REJECTED', rejectionMessage(diagnostics.providerErrorCategory, httpStatus));
+    }
+    if (!providerExplicitlyAccepted) {
+      logger.warn({ ...diagnosticsContext, httpStatus, durationMs: Math.round(performance.now() - startedAt), ...diagnostics, providerRequestReferenceAvailable: false }, 'Renflair response did not confirm request acceptance');
+      throw new SmsGatewayError('SMS_GATEWAY_BAD_RESPONSE', 'Renflair returned a response that did not confirm OTP request acceptance. SMS delivery is unknown; contact support before retrying.');
     }
 
     logger.info({ ...diagnosticsContext, httpStatus, durationMs: Math.round(performance.now() - startedAt), ...diagnostics, providerStatusRecognized: providerExplicitlyAccepted, providerRequestReferenceAvailable: false, deliveryReceipt: 'unsupported_by_documented_v1_api', handsetDeliveryVerified: false }, 'Renflair returned a successful HTTP response without an explicit rejection; handset delivery is unconfirmed');

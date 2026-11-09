@@ -32,8 +32,10 @@ app.use(cors({ origin: (origin, callback) => {
   return callback(Object.assign(new Error('Origin is not allowed by CORS.'), { statusCode: 403, code: 'CORS_ORIGIN_DENIED' }));
 } }));
 app.use(express.json({ limit: '2.1mb', verify: (req, _res, buffer) => { (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
-app.use((req, _res, next) => { req.requestId = req.header('x-request-id')?.slice(0, 100) || randomUUID(); next(); });
-app.use(pinoHttp({ logger, genReqId: (req) => req.requestId!, redact: ['req.headers.authorization'], customProps: (req) => ({ requestId: req.requestId }) }));
+// Always generate correlation IDs server-side; never promote caller-controlled
+// header contents (which might contain a phone, OTP, or credential) into logs.
+app.use((req, _res, next) => { req.requestId = randomUUID(); next(); });
+app.use(pinoHttp({ logger, genReqId: (req) => req.requestId!, redact: ['req.headers.authorization', 'req.headers.x-request-id'], customProps: (req) => ({ requestId: req.requestId }) }));
 
 app.get('/', (_req, res) => res.json({ service: 'paisapay-api', docs: '/api/v1/docs', health: '/health', readiness: '/ready' }));
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'paisapay-api' }));
@@ -145,9 +147,9 @@ app.use('/api/v1/admin', adminRouter);
 app.use((_req, res) => res.status(404).json({ error: { code: 'ROUTE_NOT_FOUND', message: 'The requested API route was not found.' } }));
 
 const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
-  if (error instanceof ZodError) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check the request fields.', fields: error.issues.map((issue) => ({ field: issue.path.join('.'), message: issue.message })) } });
+  if (error instanceof ZodError) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check the request fields.', fields: error.issues.map((issue) => ({ field: issue.path.join('.'), message: issue.message })) }, requestId: req.requestId });
   if (error instanceof HttpError || (typeof error?.statusCode === 'number' && typeof error?.code === 'string')) {
-    const status = error.statusCode as number; return res.status(status).json({ error: { code: error.code, message: error.message } });
+    const status = error.statusCode as number; return res.status(status).json({ error: { code: error.code, message: error.message }, requestId: req.requestId });
   }
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: { code: 'REQUEST_TOO_LARGE', message: 'Request body is too large.' } });
   if (error instanceof SyntaxError && 'body' in error) return res.status(400).json({ error: { code: 'INVALID_JSON', message: 'Request body must be valid JSON.' } });

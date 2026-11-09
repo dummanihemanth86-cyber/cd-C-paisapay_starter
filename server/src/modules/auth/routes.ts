@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { rateLimit } from 'express-rate-limit';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
@@ -106,7 +106,12 @@ authRouter.post('/password/login', passwordLoginLimit, passwordPhoneLimit, async
   res.json({ accessToken: pair.accessToken, refreshToken: pair.refreshToken, accessExpiresInSeconds: 900, user: { id: result.user.id, publicId: result.user.publicId, displayName: result.user.displayName, status: result.user.status, referralCode: result.user.referralCode }, welcomeBonus: { status: result.welcomeBonus, amountPaise: result.welcomeBonus === 'CREDITED' ? env.welcomeBonusAmountPaise : 0 } });
 }));
 
-export async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | 'REGISTER' | 'PASSWORD_RESET' | 'ADMIN_PASSWORD_RESET', referralCode?: string) {
+export async function createOtpChallenge(
+  phoneE164: string,
+  purpose: 'LOGIN' | 'REGISTER' | 'PASSWORD_RESET' | 'ADMIN_PASSWORD_RESET',
+  referralCode?: string,
+  requestId: string = randomUUID(),
+) {
   // Production OTP is allowed only through a configured server-side provider;
   // environment validation rejects all other real providers in production.
   if (env.otpProvider === 'disabled' || (env.otpProvider === 'demo' && !env.isTest)) throw new HttpError(503, 'OTP_PROVIDER_UNAVAILABLE', 'OTP delivery is disabled. Contact the app administrator.');
@@ -126,8 +131,10 @@ export async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | '
   const isDemo = env.otpProvider === 'demo';
   const code = isDemo ? '123456' : randomOtp();
   const challenge = await db.otpChallenge.create({ data: { phoneE164, purpose, ...(purpose === 'REGISTER' && referralCode ? { referralCode } : {}), codeHash: hashOtp(phoneE164, code), expiresAt: new Date(now.getTime() + 5 * 60 * 1000), resendAt: new Date(now.getTime() + 60 * 1000), deliveryStatus: isDemo ? 'DEMO' : null } });
+  const environment = env.isExplicitRenderStaging ? 'staging' : env.isProduction ? 'production' : env.isDevelopment ? 'development' : 'test';
+  logger.info({ requestId, challengeId: challenge.id, environment, provider: env.otpProvider, purpose, challengePersistence: 'created' }, 'OTP challenge persisted');
   if (isDemo) {
-    logger.info({ challengeId: challenge.id, deliveryState: 'DEMO' }, 'Development demo OTP challenge created; no SMS was sent');
+    logger.info({ requestId, challengeId: challenge.id, purpose, environment, challengePersistence: 'created', providerAttempted: false, deliveryState: 'DEMO' }, 'Development demo OTP challenge created; no SMS was sent');
     return {
       challengeId: challenge.id,
       expiresInSeconds: 300,
@@ -137,14 +144,28 @@ export async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | '
       message: 'Development demo mode is active. No SMS was sent; use the documented demo code.',
     };
   }
+  let gateway: Awaited<ReturnType<typeof sendRenflairV1Otp>> | Awaited<ReturnType<typeof sendGatewaySms>>;
   try {
-    const gateway = env.otpProvider === 'renflair-v1'
-      ? await sendRenflairV1Otp({ phoneNumber: phoneE164, otp: code, requestId: challenge.id })
+    gateway = env.otpProvider === 'renflair-v1'
+      ? await sendRenflairV1Otp({ phoneNumber: phoneE164, otp: code, requestId: challenge.id, correlationId: requestId, purpose, environment })
       : await sendGatewaySms({
         phoneNumber: phoneE164,
         message: `Your PaisaPay verification code is ${code}. It expires in 5 minutes. Never share this code.`,
         requestId: challenge.id,
       });
+  } catch (error) {
+    const gatewayError = error instanceof SmsGatewayError ? error : new SmsGatewayError('SMS_GATEWAY_UNAVAILABLE', 'SMS gateway is offline or unreachable.');
+    try {
+      await db.otpChallenge.update({ where: { id: challenge.id }, data: { gatewayRequestId: challenge.id, deliveryStatus: gatewayError.code === 'SMS_GATEWAY_REJECTED' || gatewayError.code === 'SMS_GATEWAY_BAD_RESPONSE' ? 'FAILED' : 'UNKNOWN' } });
+      logger.info({ requestId, challengeId: challenge.id, environment, provider: env.otpProvider, purpose, challengePersistence: 'updated', deliveryState: gatewayError.code === 'SMS_GATEWAY_REJECTED' || gatewayError.code === 'SMS_GATEWAY_BAD_RESPONSE' ? 'FAILED' : 'UNKNOWN' }, 'OTP provider failure state persisted');
+    } catch {
+      logger.error({ requestId, challengeId: challenge.id, environment, provider: env.otpProvider, purpose, challengePersistence: 'failed', providerErrorCode: gatewayError.code }, 'Failed to persist OTP provider failure state');
+    }
+    logger.warn({ requestId, challengeId: challenge.id, environment, provider: env.otpProvider, purpose, providerErrorCode: gatewayError.code, providerAttempted: true }, 'OTP SMS delivery could not be confirmed');
+    throw new HttpError(503, gatewayError.code, gatewayError.message);
+  }
+
+  try {
     await db.otpChallenge.update({
       where: { id: challenge.id },
       data: {
@@ -153,30 +174,24 @@ export async function createOtpChallenge(phoneE164: string, purpose: 'LOGIN' | '
         deliveryStatus: gateway.state,
       },
     });
-    if (env.otpProvider === 'renflair-v1') {
-      logger.info({ challengeId: challenge.id, deliveryState: gateway.state, provider: env.otpProvider, handsetDeliveryVerified: false }, 'Renflair accepted the OTP request; handset delivery is unconfirmed');
-    } else {
-      logger.info({ challengeId: challenge.id, deliveryState: gateway.state, provider: env.otpProvider }, 'OTP request accepted by SMS provider');
-    }
-    return {
-      challengeId: challenge.id,
-      expiresInSeconds: 300,
-      resendAfterSeconds: 60,
-      deliveryState: gateway.state,
-      gatewayStatus: gateway.status,
-      message: gateway.status === 'PENDING' ? 'The gateway accepted the SMS request. This does not confirm SMS delivery.' : 'The gateway reported the current SMS state.',
-    };
-  } catch (error) {
-    const gatewayError = error instanceof SmsGatewayError ? error : new SmsGatewayError('SMS_GATEWAY_UNAVAILABLE', 'SMS gateway is offline or unreachable.');
-    await db.otpChallenge.update({ where: { id: challenge.id }, data: { gatewayRequestId: challenge.id, deliveryStatus: gatewayError.code === 'SMS_GATEWAY_REJECTED' || gatewayError.code === 'SMS_GATEWAY_BAD_RESPONSE' ? 'FAILED' : 'UNKNOWN' } });
-    logger.warn({ challengeId: challenge.id, code: gatewayError.code }, 'OTP SMS delivery could not be confirmed');
-    throw new HttpError(503, gatewayError.code, gatewayError.message);
+  } catch {
+    logger.error({ requestId, challengeId: challenge.id, environment, provider: env.otpProvider, purpose, providerAcceptance: gateway.state, challengePersistence: 'failed', providerRequestReferenceAvailable: gateway.smsId !== null }, 'Provider response received but OTP challenge delivery state could not be persisted');
+    throw new HttpError(503, 'OTP_CHALLENGE_STATE_UNAVAILABLE', 'The SMS request could not be finalized. If a code arrived, use it only once; otherwise contact support.');
   }
+  logger.info({ requestId, challengeId: challenge.id, environment, provider: env.otpProvider, purpose, challengePersistence: 'updated', providerAcceptance: gateway.state, providerRequestReferenceAvailable: gateway.smsId !== null, deliveryReceipt: env.otpProvider === 'renflair-v1' ? 'unsupported_by_documented_v1_api' : 'not_requested' }, 'OTP provider status persisted; handset delivery may remain unconfirmed');
+  return {
+    challengeId: challenge.id,
+    expiresInSeconds: 300,
+    resendAfterSeconds: 60,
+    deliveryState: gateway.state,
+    gatewayStatus: gateway.status,
+    message: gateway.status === 'PENDING' ? 'The gateway accepted the SMS request. This does not confirm SMS delivery.' : 'The gateway reported the current SMS state.',
+  };
 }
 
 authRouter.post('/request-otp', requestLimit, asyncRoute(async (req, res) => {
   const input = z.object({ phoneE164: phone }).strict().parse(req.body);
-  res.status(202).json(await createOtpChallenge(input.phoneE164, 'LOGIN'));
+  res.status(202).json(await createOtpChallenge(input.phoneE164, 'LOGIN', undefined, req.requestId));
 }));
 
 authRouter.post('/register/request-otp', requestLimit, asyncRoute(async (req, res) => {
@@ -188,7 +203,7 @@ authRouter.post('/register/request-otp', requestLimit, asyncRoute(async (req, re
   if (input.referralCode && !(await db.user.findUnique({ where: { referralCode: input.referralCode }, select: { id: true } }))) {
     throw new HttpError(400, 'REFERRAL_INVALID', 'That referral code was not found. Check it or leave the field empty.');
   }
-  res.status(202).json(await createOtpChallenge(input.phoneE164, 'REGISTER', input.referralCode));
+  res.status(202).json(await createOtpChallenge(input.phoneE164, 'REGISTER', input.referralCode, req.requestId));
 }));
 
 authRouter.post('/register/verify-otp', verifyLimit, asyncRoute(async (req, res) => {
@@ -242,7 +257,7 @@ authRouter.post('/forgot-password/request-otp', passwordResetLimit, asyncRoute(a
   const user = await db.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { id: true } });
   let challengeId: string;
   if (user) {
-    const challenge = await createOtpChallenge(input.phoneE164, 'PASSWORD_RESET');
+    const challenge = await createOtpChallenge(input.phoneE164, 'PASSWORD_RESET', undefined, req.requestId);
     challengeId = challenge.challengeId;
   } else {
     // Keep the response shape and timing flow similar for unknown accounts,

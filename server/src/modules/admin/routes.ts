@@ -18,31 +18,69 @@ import { createCreditRequest, decideCreditRequest, createFundingRequest, decideF
 import { createStagingDirectCredit } from './stagingDirectWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
 import { createOtpChallenge } from '../auth/routes.js';
-import { adminPasswordResetRejectionReason, isActiveAdminResetAccount } from './passwordResetOtp.js';
+import { commitAdminPasswordReset, createAdminPasswordResetChallenge } from './passwordResetOtp.js';
+import { adminPasswordResetIpKey } from './passwordResetRateLimit.js';
 
 export const adminRouter = Router();
 export const adminAuthRouter = Router();
 const adminLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'ADMIN_LOGIN_RATE_LIMITED', message: 'Too many admin sign-in attempts. Wait before trying again.' } } });
 const adminPhoneLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (req) => `phone:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`, message: { error: { code: 'ADMIN_LOGIN_RATE_LIMITED', message: 'Too many sign-in attempts for this account. Wait before trying again.' } } });
-const adminPasswordResetIpLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts. Wait before trying again.' } } });
-const adminPasswordResetPhoneLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (req) => `admin-reset:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`, message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts for this number. Try again later.' } } });
+const adminPasswordResetIpLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  keyGenerator: (req) => adminPasswordResetIpKey(req, env.isExplicitRenderStaging),
+  handler: (req, res, _next, options) => {
+    logger.warn({ requestId: req.requestId, limit: 'admin_password_reset_ip' }, 'Admin password reset request rate limited');
+    res.status(options.statusCode).json(options.message);
+  },
+  message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts. Wait before trying again.' } },
+});
+const adminPasswordResetPhoneLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  keyGenerator: (req) => `admin-reset:${hashToken(typeof req.body?.phoneE164 === 'string' ? req.body.phoneE164 : 'invalid')}`,
+  handler: (req, res, _next, options) => {
+    logger.warn({ requestId: req.requestId, limit: 'admin_password_reset_phone' }, 'Admin password reset request rate limited');
+    res.status(options.statusCode).json(options.message);
+  },
+  message: { error: { code: 'ADMIN_PASSWORD_RESET_RATE_LIMITED', message: 'Too many password-reset attempts for this number. Try again later.' } },
+});
 const adminPhone = z.string().regex(/^\+[1-9]\d{7,14}$/);
 const dummyAdminPasswordHash = hashPassword('paisa-pay-invalid-admin-password-dummy');
 
 adminAuthRouter.post('/forgot-password/request-otp', adminPasswordResetIpLimit, adminPasswordResetPhoneLimit, asyncRoute(async (req, res) => {
   const input = z.object({ phoneE164: adminPhone }).strict().parse(req.body);
   const db = databaseRequired();
-  const admin = await db.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { status: true, adminRole: { select: { id: true } } } });
-  const activeAdmin = admin?.status === 'ACTIVE' && Boolean(admin.adminRole);
-  const challenge = activeAdmin
-    ? await createOtpChallenge(input.phoneE164, 'ADMIN_PASSWORD_RESET')
-    : { challengeId: randomUUID() };
+  const resetRequest = await createAdminPasswordResetChallenge({
+    phoneE164: input.phoneE164,
+    findAccount: async (phoneE164) => {
+      const admin = await db.user.findUnique({ where: { phoneE164 }, select: { status: true, adminRole: { select: { id: true } } } });
+      return admin ? { status: admin.status, hasAdminRole: Boolean(admin.adminRole) } : null;
+    },
+    dispatchOtp: (phoneE164) => createOtpChallenge(phoneE164, 'ADMIN_PASSWORD_RESET', undefined, req.requestId),
+    newChallengeId: randomUUID,
+  });
+  logger.info({
+    requestId: req.requestId,
+    environment: env.isExplicitRenderStaging ? 'staging' : env.isProduction ? 'production' : env.isDevelopment ? 'development' : 'test',
+    purpose: 'ADMIN_PASSWORD_RESET',
+    eligibleActiveAdmin: resetRequest.eligibleAdmin,
+    challengePersisted: resetRequest.eligibleAdmin,
+    providerAttempted: resetRequest.providerAttempted,
+  }, 'Admin password reset OTP eligibility evaluated');
   // A generic response avoids disclosing whether the phone belongs to an active admin.
   res.status(202).json({
-    challengeId: challenge.challengeId,
-    expiresInSeconds: 300,
-    resendAfterSeconds: 60,
-    message: 'If an active Admin account exists for this number, a password-reset code will be sent by SMS.',
+    challengeId: resetRequest.challenge.challengeId,
+    expiresInSeconds: resetRequest.challenge.expiresInSeconds ?? 300,
+    resendAfterSeconds: resetRequest.challenge.resendAfterSeconds ?? 60,
+    requestId: req.requestId,
+    requestStatus: 'REQUEST_RECEIVED',
+    deliveryStatus: 'UNCONFIRMED',
+    message: 'Request received. If this number belongs to an active Admin, the SMS gateway accepted the request. Renflair does not confirm that SMS was sent or delivered to the phone.',
   });
 }));
 
@@ -55,39 +93,20 @@ adminAuthRouter.post('/password/reset', adminPasswordResetIpLimit, adminPassword
   }).strict().parse(req.body);
   const db = databaseRequired();
   const passwordHash = await hashPassword(input.newPassword);
-  const reset = await db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM otp_challenges WHERE id = ${input.challengeId}::uuid FOR UPDATE`;
-    const challenge = await tx.otpChallenge.findUnique({ where: { id: input.challengeId } });
-    const rejectionReason = adminPasswordResetRejectionReason({
-      challenge,
-      phoneE164: input.phoneE164,
-      code: input.code,
-      now: new Date(),
-      allowDemoChallenge: env.isTest && env.otpProvider === 'demo',
-    });
-    if (rejectionReason) {
-      logger.warn({ requestId: req.requestId, reason: rejectionReason, provider: env.otpProvider, deliveryState: challenge?.deliveryStatus ?? 'UNKNOWN' }, 'Admin password reset OTP rejected');
-      if (rejectionReason === 'attempts_exceeded') throw new HttpError(429, 'ADMIN_PASSWORD_RESET_ATTEMPTS_EXCEEDED', 'Too many incorrect codes. Request a new code.');
-    }
-    if (rejectionReason === 'code_mismatch' && challenge) {
-      await tx.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } });
-      return false;
-    }
-    if (rejectionReason) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
-    if (!challenge) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
-    const admin = await tx.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { id: true, status: true, adminRole: { select: { id: true } } } });
-    if (!admin || !isActiveAdminResetAccount({ status: admin.status, hasAdminRole: Boolean(admin.adminRole) })) {
-      logger.warn({ requestId: req.requestId, reason: 'admin_account_unavailable', provider: env.otpProvider, deliveryState: challenge.deliveryStatus ?? 'UNKNOWN' }, 'Admin password reset rejected');
-      throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
-    }
-    const now = new Date();
-    await tx.user.update({ where: { id: admin.id }, data: { passwordHash, loginFailedAttempts: 0, loginLockedUntil: null } });
-    await tx.otpChallenge.updateMany({ where: { phoneE164: input.phoneE164, purpose: 'ADMIN_PASSWORD_RESET', consumedAt: null }, data: { consumedAt: now } });
-    await tx.session.updateMany({ where: { userId: admin.id, revokedAt: null }, data: { revokedAt: now } });
-    await tx.auditLog.create({ data: { actorId: admin.id, action: 'ADMIN_PASSWORD_RESET', target: `ADMIN_USER:${admin.id}`, reason: 'Admin password reset using a delivered one-time code.', metadata: { requestId: req.requestId || null } } });
-    return true;
-  }, { isolationLevel: 'ReadCommitted' });
-  if (!reset) throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is incorrect.');
+  const reset = await db.$transaction((tx) => commitAdminPasswordReset(tx, {
+    phoneE164: input.phoneE164,
+    challengeId: input.challengeId,
+    code: input.code,
+    newPasswordHash: passwordHash,
+    now: new Date(),
+    requestId: req.requestId,
+    allowDemoChallenge: env.isTest && env.otpProvider === 'demo',
+  }), { isolationLevel: 'ReadCommitted' });
+  if (!reset.ok) {
+    logger.warn({ requestId: req.requestId, reason: reset.reason, provider: env.otpProvider }, 'Admin password reset OTP rejected');
+    if (reset.reason === 'attempts_exceeded') throw new HttpError(429, 'ADMIN_PASSWORD_RESET_ATTEMPTS_EXCEEDED', 'Too many incorrect codes. Request a new code.');
+    throw new HttpError(401, 'ADMIN_PASSWORD_RESET_INVALID', 'The admin reset code is invalid or expired. Request a new code.');
+  }
   res.json({ ok: true, message: 'Admin password reset. Sign in using your new password.' });
 }));
 

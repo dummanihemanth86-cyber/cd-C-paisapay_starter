@@ -55,9 +55,24 @@ describe('Renflair V1 OTP adapter', () => {
       await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-9' }, textualFailure)).rejects.toMatchObject({ code: 'SMS_GATEWAY_REJECTED' });
     }
     const unknownStatus = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ status: 'queued-but-unrecognized' }), { status: 200 }));
-    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-10' }, unknownStatus)).resolves.toMatchObject({ state: 'ACCEPTED' });
+    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-10' }, unknownStatus)).rejects.toMatchObject({ code: 'SMS_GATEWAY_BAD_RESPONSE' });
     const undocumentedShape = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ message: 'request accepted' }), { status: 200 }));
-    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-11' }, undocumentedShape)).resolves.toMatchObject({ state: 'ACCEPTED' });
+    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-11' }, undocumentedShape)).rejects.toMatchObject({ code: 'SMS_GATEWAY_BAD_RESPONSE' });
+    const explicitSuccess = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ success: true, detail: 'provider-message-id-not-logged' }), { status: 200 }));
+    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-13' }, explicitSuccess)).resolves.toMatchObject({ state: 'ACCEPTED' });
+    const providerClaimedDelivery = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ status: 'delivered' }), { status: 200 }));
+    await expect(sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-14' }, providerClaimedDelivery)).rejects.toMatchObject({ code: 'SMS_GATEWAY_BAD_RESPONSE' });
+  });
+
+  it('URL-encodes V1 query values without logging them', async () => {
+    configure();
+    env.renflairApiKey = 'synthetic+key&value/with spaces';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }));
+    await sendRenflairV1Otp({ phoneNumber: '+919876543210', otp: '123456', requestId: 'challenge-encoded' }, fetchMock);
+    const sentUrl = new URL(String(fetchMock.mock.calls[0]![0]));
+    expect(sentUrl.searchParams.get('API')).toBe('synthetic+key&value/with spaces');
+    expect(sentUrl.searchParams.get('PHONE')).toBe('9876543210');
+    expect(sentUrl.searchParams.get('OTP')).toBe('123456');
   });
 
   it('logs sanitized provider diagnostics without the URL, API key, phone or OTP', async () => {
@@ -95,7 +110,7 @@ describe('Renflair V1 OTP adapter', () => {
     }, fetchMock);
 
     const logs = JSON.stringify(info.mock.calls);
-    for (const safeValue of ['http-request-7', 'challenge-7', 'ADMIN_PASSWORD_RESET', 'staging', 'httpMethod', 'endpointPath', 'durationMs', 'unsupported_by_documented_v1_api']) {
+    for (const safeValue of ['http-request-7', 'challenge-7', 'ADMIN_PASSWORD_RESET', 'staging', 'httpMethod', 'endpointPath', 'durationMs', 'unsupported_by_documented_v1_api', 'configuration', 'available']) {
       expect(logs).toContain(safeValue);
     }
     for (const secret of ['test-api-key', '+919876543210', '9876543210', '123456', 'sms.renflair.in', 'API=']) {

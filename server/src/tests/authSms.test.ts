@@ -122,7 +122,9 @@ integration('Android gateway OTP routes (PostgreSQL integration)', () => {
     const oldSession = await request(app).post('/api/v1/admin/auth/login').send({ phoneE164, password: oldPassword }).expect(200);
 
     const requested = await request(app).post('/api/v1/admin/auth/forgot-password/request-otp').send({ phoneE164 }).expect(202);
-    expect(requested.body.message).toMatch(/If an active Admin account exists/);
+    expect(requested.body.message).toMatch(/If this number belongs to an active Admin/);
+    expect(requested.body).toMatchObject({ requestStatus: 'REQUEST_RECEIVED', deliveryStatus: 'UNCONFIRMED' });
+    expect(requested.body.message).toMatch(/does not confirm that SMS was sent or delivered/);
     expect(lastPhoneNumber).toBe(phoneE164);
     expect(JSON.stringify(requested.body)).not.toMatch(/\b\d{6}\b/);
     const challenge = await db.otpChallenge.findUniqueOrThrow({ where: { id: requested.body.challengeId } });

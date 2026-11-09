@@ -1,6 +1,8 @@
 import { hashOtp, safeHashEqual } from '../../lib/security.js';
+import type { Prisma } from '../../generated/prisma/client.js';
 
 export type AdminPasswordResetChallenge = {
+  id: string;
   purpose: string;
   phoneE164: string;
   consumedAt: Date | null;
@@ -44,4 +46,58 @@ export function adminPasswordResetRejectionReason(input: {
 
 export function isActiveAdminResetAccount(account: { status: string; hasAdminRole: boolean } | null): boolean {
   return Boolean(account && account.status === 'ACTIVE' && account.hasAdminRole);
+}
+
+export async function createAdminPasswordResetChallenge(input: {
+  phoneE164: string;
+  findAccount: (phoneE164: string) => Promise<{ status: string; hasAdminRole: boolean } | null>;
+  dispatchOtp: (phoneE164: string) => Promise<{ challengeId: string; expiresInSeconds?: number; resendAfterSeconds?: number }>;
+  newChallengeId: () => string;
+}) {
+  const account = await input.findAccount(input.phoneE164);
+  if (!isActiveAdminResetAccount(account)) {
+    return { challenge: { challengeId: input.newChallengeId() }, eligibleAdmin: false, providerAttempted: false };
+  }
+  return {
+    challenge: await input.dispatchOtp(input.phoneE164),
+    eligibleAdmin: true,
+    providerAttempted: true,
+  };
+}
+
+export async function commitAdminPasswordReset(tx: Prisma.TransactionClient, input: {
+  phoneE164: string;
+  challengeId: string;
+  code: string;
+  newPasswordHash: string;
+  now: Date;
+  requestId?: string;
+  allowDemoChallenge: boolean;
+}): Promise<{ ok: true } | { ok: false; reason: AdminPasswordResetRejectionReason | 'admin_account_unavailable' }> {
+  await tx.$queryRaw`SELECT id FROM otp_challenges WHERE id = ${input.challengeId}::uuid FOR UPDATE`;
+  const challenge = await tx.otpChallenge.findUnique({ where: { id: input.challengeId } });
+  const rejectionReason = adminPasswordResetRejectionReason({
+    challenge,
+    phoneE164: input.phoneE164,
+    code: input.code,
+    now: input.now,
+    allowDemoChallenge: input.allowDemoChallenge,
+  });
+  if (rejectionReason) {
+    if (rejectionReason === 'code_mismatch' && challenge) {
+      await tx.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } });
+    }
+    return { ok: false, reason: rejectionReason };
+  }
+
+  const admin = await tx.user.findUnique({ where: { phoneE164: input.phoneE164 }, select: { id: true, status: true, adminRole: { select: { id: true } } } });
+  if (!admin || !isActiveAdminResetAccount({ status: admin.status, hasAdminRole: Boolean(admin.adminRole) })) {
+    return { ok: false, reason: 'admin_account_unavailable' };
+  }
+
+  await tx.user.update({ where: { id: admin.id }, data: { passwordHash: input.newPasswordHash, loginFailedAttempts: 0, loginLockedUntil: null } });
+  await tx.otpChallenge.updateMany({ where: { phoneE164: input.phoneE164, purpose: 'ADMIN_PASSWORD_RESET', consumedAt: null }, data: { consumedAt: input.now } });
+  await tx.session.updateMany({ where: { userId: admin.id, revokedAt: null }, data: { revokedAt: input.now } });
+  await tx.auditLog.create({ data: { actorId: admin.id, action: 'ADMIN_PASSWORD_RESET', target: `ADMIN_USER:${admin.id}`, reason: 'Admin password reset using a verified one-time code.', metadata: { requestId: input.requestId || null } } });
+  return { ok: true };
 }

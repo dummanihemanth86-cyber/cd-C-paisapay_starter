@@ -34,7 +34,7 @@ const schema = z.object({
   SMS_GATEWAY_API_KEY: z.string().min(1).optional(),
   SMS_GATEWAY_TIMEOUT_MS: z.coerce.number().int().min(500).max(15000).default(5000),
   RENFLAIR_V1_API_URL: z.string().url().default('https://sms.renflair.in/V1.php'),
-  RENFLAIR_API_KEY: z.string().optional(),
+  RENFLAIR_API_KEY: z.string().trim().min(1).optional(),
   PAYMENT_PROVIDER: z.enum(['disabled', 'sandbox', 'cashfree-sandbox']).default('disabled'),
   FINANCIAL_OPERATIONS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   WALLET_ADJUSTMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
@@ -95,6 +95,9 @@ if (Boolean(values.DEMO_LOGIN_PHONE_E164) !== Boolean(values.DEMO_LOGIN_PASSWORD
 }
 if (values.OTP_PROVIDER === 'renflair-v1' && !values.RENFLAIR_API_KEY) {
   throw new Error('OTP_PROVIDER=renflair-v1 requires RENFLAIR_API_KEY.');
+}
+if (values.OTP_PROVIDER === 'renflair-v1' && /^(?:x{8,}|your(?:[_ -](?:renflair[_ -])?api[_ -]?)?key|replace[_ -]?with(?:[_ -].*)?|change[_ -]?me|placeholder|example)$/i.test(values.RENFLAIR_API_KEY ?? '')) {
+  throw new Error('RENFLAIR_API_KEY must be replaced with a valid provider credential in the service secret store.');
 }
 const renflairUrl = new URL(values.RENFLAIR_V1_API_URL);
 if (renflairUrl.protocol !== 'https:' || renflairUrl.hostname !== 'sms.renflair.in' || renflairUrl.pathname !== '/V1.php' || renflairUrl.username || renflairUrl.password || renflairUrl.search || renflairUrl.hash) {
