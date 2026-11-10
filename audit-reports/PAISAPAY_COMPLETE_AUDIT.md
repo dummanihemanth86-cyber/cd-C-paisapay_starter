@@ -167,3 +167,12 @@ Admin production APK details: `apps/admin-app/android/app/build/outputs/apk/rele
 - 56 database-backed tests remain skipped. No staging or production migration was run by this process; no migration/schema file changed. Production remains on its existing older commit and was untouched.
 - Production and staging financial flags remain disabled. Deposits, payouts, P2P settlement, credit posting and reward credits are not enabled or verified.
 - The Phase 2 source and report changes have not yet been committed or pushed. Staging deployment is pending the explicitly requested clean release commit/push and Render auto-deploy verification. Production deployment is not authorized or planned.
+
+## Phase 2 release follow-up — 2026-11-10
+
+- Reviewed TODOs, committed the reviewed staging release as `739afbd9c7609e666fdffc0b4f89ad6fd664ce70`, and pushed it to `origin/codex/admin-wallet-credit-staging` via fast-forward.
+- Render staging deployment is **not confirmed**. The checked-in staging manifest has automatic deploy disabled; Render API and staging hostname DNS were unavailable during verification. No manual deploy or database migration was run.
+- The final Admin APK is `apps/admin-app/android/app/build/outputs/apk/release/app-release.apk` (SHA-256 `0FC631F0742653D9BA752F0E6FBBAB92A2BCFC4332236930FB06F5A85358A414`), version `1.0.3` / code `4`, signed by the PaisaPay Admin Release certificate (SHA-256 `045714bc744847c601334d50b5898453cd35c7b29ff529252b84c9e96d414ca5`). It was not installed because the installed Admin has a different debug certificate.
+- No fresh User production APK was completed because the approved signing variables were unavailable. An existing APK file was found but is not claimed as built by this pass. ADB could not start at final verification, so neither app was installed or launched.
+- No real OTP was sent; SMS delivery remains unconfirmed. Financial gates and balances are unchanged. Production was not modified.
+- Full results and exact next steps are in [PAISAPAY_FINAL_RELEASE_REPORT.md](PAISAPAY_FINAL_RELEASE_REPORT.md).

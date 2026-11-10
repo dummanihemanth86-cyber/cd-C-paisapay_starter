@@ -32,3 +32,12 @@
 - [ ] After device unlock, capture real User/Admin screen states for loading, error, empty and success pages with personal details obscured.
 - [ ] Validate notification permission/registration and push delivery separately from API notifications.
 - [ ] Complete role-specific Admin workflow checks with staging fixtures only; use maker-checker and never create unfunded ledger entries.
+
+## Phase 2 release status
+
+- [x] Commit and push reviewed source fixes to the staging branch (`739afbd9c7609e666fdffc0b4f89ad6fd664ce70`).
+- [ ] Deploy and verify the staging service. Auto-deploy is disabled in `render.staging.yaml`; Render API/staging DNS access failed during verification. Inspect isolated DB target and pending migrations before triggering deploy.
+- [ ] Finish Admin/User device tests after ADB reconnects and the device is awake/unlocked; no app data was cleared.
+- [ ] Build the User release APK after approved signing secrets are supplied. An existing APK artifact is not certified as this pass's fresh build.
+- [ ] Run 56 skipped DB-backed tests against an isolated disposable PostgreSQL database.
+- [ ] Confirm OTP request/provider response/delivery with safe Render and Renflair diagnostics and an approved real-phone staging test.
