@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { isAllowedApiOrigin, STAGING_ADMIN_WEB_ORIGIN } from '../config/adminWebOrigin.js';
+import { isAllowedApiOrigin, STAGING_ADMIN_WEB_ORIGIN, STAGING_SWAGGER_API_ORIGIN } from '../config/adminWebOrigin.js';
 import { app } from '../app.js';
 
 const base = { apiProductionOrigin: 'https://paisapay-api.onrender.com', appOrigins: [], isDevelopment: false, isExplicitRenderStaging: false };
@@ -10,7 +10,13 @@ describe('Admin web origin policy', () => {
     expect(isAllowedApiOrigin(STAGING_ADMIN_WEB_ORIGIN, { ...base, isExplicitRenderStaging: true })).toBe(true);
     expect(isAllowedApiOrigin(STAGING_ADMIN_WEB_ORIGIN, base)).toBe(false);
   });
+  it('allows the staging Swagger origin only for the explicit Render staging service', () => {
+    expect(isAllowedApiOrigin(STAGING_SWAGGER_API_ORIGIN, { ...base, isExplicitRenderStaging: true })).toBe(true);
+    expect(isAllowedApiOrigin(STAGING_SWAGGER_API_ORIGIN, base)).toBe(false);
+    expect(isAllowedApiOrigin(STAGING_SWAGGER_API_ORIGIN, { ...base, appOrigins: [STAGING_SWAGGER_API_ORIGIN] })).toBe(false);
+  });
   it('preserves the configured origins and development loopback behavior', () => {
+    expect(isAllowedApiOrigin(base.apiProductionOrigin, base)).toBe(true);
     expect(isAllowedApiOrigin('https://admin.example.test', { ...base, appOrigins: ['https://admin.example.test'] })).toBe(true);
     expect(isAllowedApiOrigin('http://localhost:19006', { ...base, isDevelopment: true })).toBe(true);
     expect(isAllowedApiOrigin('https://untrusted.example', base)).toBe(false);

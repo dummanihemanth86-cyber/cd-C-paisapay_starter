@@ -19,6 +19,7 @@ export default function DepositHistory({ rows = [], empty, note, onRefresh, onCa
   const pendingCount = rows.filter((row) => row.method === 'UPI' && PAYABLE_STATUSES.includes(row.status)).length;
   const activeCount = rows.filter((row) => row.method === 'UPI' && ['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(row.status)).length;
   const expiredRefreshSent = useRef(false);
+  const receiverVpa = typeof upiReceiver === 'string' && upiReceiver.trim() ? upiReceiver.trim() : null;
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -50,13 +51,15 @@ export default function DepositHistory({ rows = [], empty, note, onRefresh, onCa
   }, [hasExpiredUnclaimed, onRefresh]);
 
   const copy = async (value, label) => {
+    if (!value) return note('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. Do not make a payment.');
     try { await Clipboard.setStringAsync(value); note('Copied', `${label} copied.`); }
     catch { note('Copy unavailable', value); }
   };
 
   const pay = async (row) => {
+    if (!receiverVpa) return note('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. No payment was started.');
     if (countdownFor(row) <= 0) { await onRefresh?.(); return note('Deposit expired', 'This payment request expired. If you already paid, submit a transaction image for review; do not pay again.'); }
-    try { await Linking.openURL(makeUpiIntent(upiReceiver || 'zitch@ptyes', row.amountPaise, row.merchantReference)); }
+    try { await Linking.openURL(makeUpiIntent(receiverVpa, row.amountPaise, row.merchantReference)); }
     catch { note('UPI app unavailable', 'Scan the QR or copy the receiver UPI ID. The deposit remains pending until payment is independently verified.'); }
   };
 
@@ -132,13 +135,14 @@ export default function DepositHistory({ rows = [], empty, note, onRefresh, onCa
           </View>
           <Text style={[styles.amount, { color: ink }]}>{money(row.amountPaise)}</Text>
         </View>
-        {payable && <View style={[styles.payBanner, { borderColor: blue }]}>
+        {payable && !receiverVpa && <Text style={[styles.warningText, { color: warning }]}>UPI deposits are temporarily unavailable because a recipient is not configured. Do not send money.</Text>}
+        {payable && receiverVpa && <View style={[styles.payBanner, { borderColor: blue }]}>
           <Text style={[styles.payBannerTitle, { color: blue }]}>PAY THIS DEPOSIT · EXPIRES IN {timeLabel}</Text>
-          <Text style={[styles.body, { color: muted }]}>Receiver: {upiReceiver || 'zitch@ptyes'}</Text>
+          <Text style={[styles.body, { color: muted }]}>Receiver: {receiverVpa}</Text>
           <Text style={[styles.body, { color: muted }]}>Reference: {row.merchantReference}</Text>
-          <View style={styles.qrWrap}><QRCode value={makeUpiIntent(upiReceiver || 'zitch@ptyes', row.amountPaise, row.merchantReference)} size={158} /></View>
+          <View style={styles.qrWrap}><QRCode value={makeUpiIntent(receiverVpa, row.amountPaise, row.merchantReference)} size={158} /></View>
           <TouchableOpacity style={[styles.button, { backgroundColor: blue }]} onPress={() => pay(row)} accessibilityRole="button"><Text style={styles.buttonText}>Pay this deposit</Text></TouchableOpacity>
-          <TouchableOpacity style={[styles.button, { borderColor: line, borderWidth: 1 }]} onPress={() => copy(upiReceiver || 'zitch@ptyes', 'Receiver UPI ID')} accessibilityRole="button"><Text style={[styles.secondaryText, { color: ink }]}>Copy receiver UPI ID</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.button, { borderColor: line, borderWidth: 1 }]} onPress={() => copy(receiverVpa, 'Receiver UPI ID')} accessibilityRole="button"><Text style={[styles.secondaryText, { color: ink }]}>Copy receiver UPI ID</Text></TouchableOpacity>
           <Text style={[styles.small, { color: muted }]}>PaisaPay cannot confirm a UPI app success screen. Do not pay twice for this reference.</Text>
         </View>}
         {unpaid && seconds === 0 && <Text style={[styles.warningText, { color: warning }]}>Request expired. If you already paid, submit a transaction image for review; do not pay again.</Text>}

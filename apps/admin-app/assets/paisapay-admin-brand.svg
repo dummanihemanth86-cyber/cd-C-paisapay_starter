@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101C35"/><stop offset="1" stop-color="#07101F"/></linearGradient><linearGradient id="shield" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#55C8FF"/><stop offset="1" stop-color="#2865F6"/></linearGradient></defs>
+  <rect width="1200" height="480" rx="38" fill="url(#bg)"/>
+  <path d="M205 48 375 112v132c0 136-76 228-170 293C111 472 35 380 35 244V112z" transform="translate(42 -14) scale(.8)" fill="#0E203E" stroke="url(#shield)" stroke-width="28" stroke-linejoin="round"/>
+  <rect x="126" y="140" width="170" height="148" rx="18" fill="#EAF5FF"/><path d="M151 259v-48h28v48zm49 0v-80h28v80zm49 0v-103h28v103z" fill="url(#shield)"/>
+  <path d="m163 314 37 34 76-75" fill="none" stroke="#FFC96B" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="365" y="228" fill="#F6F9FF" font-family="Arial,sans-serif" font-size="70" font-weight="700" letter-spacing="1">PaisaPay</text><text x="370" y="300" fill="#73CFFF" font-family="Arial,sans-serif" font-size="34" font-weight="700" letter-spacing="12">ADMIN CONTROL</text><text x="370" y="350" fill="#9DAEC8" font-family="Arial,sans-serif" font-size="20" letter-spacing="3">SECURE OPERATIONS · CLEAR OVERSIGHT</text>
+</svg>

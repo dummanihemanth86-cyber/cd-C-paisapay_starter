@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireAuth } from '../../middleware/auth.js';
-import { financialOperationsGate } from '../../middleware/financialOperations.js';
 
 export const supportRouter = Router();
 supportRouter.use(requireAuth);
@@ -32,19 +31,3 @@ notificationRouter.get('/', asyncRoute(async (req, res) => {
   res.json({ notifications });
 }));
 
-export const withdrawalsRouter = Router();
-withdrawalsRouter.use(requireAuth);
-withdrawalsRouter.get('/', asyncRoute(async (req, res) => {
-  const withdrawals = await databaseRequired().withdrawal.findMany({ where: { userId: req.auth!.userId }, orderBy: { createdAt: 'desc' }, take: 100 });
-  res.json({ withdrawals: withdrawals.map((row) => ({ ...row, amountPaise: Number(row.amountPaise) })) });
-}));
-withdrawalsRouter.post('/', financialOperationsGate, asyncRoute(async (req, res) => {
-  const input = z.object({ amountPaise: z.number().int().min(10000).max(100_000_000) }).strict().parse(req.body);
-  const key = req.header('idempotency-key');
-  if (!key || key.length < 8 || key.length > 120) throw new HttpError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send an Idempotency-Key header between 8 and 120 characters.');
-  const db = databaseRequired();
-  const account = await db.ledgerAccount.findFirst({ where: { userId: req.auth!.userId, type: 'AVAILABLE', currency: 'INR' }, include: { entries: { select: { debitPaise: true, creditPaise: true } } } });
-  const balancePaise = account?.entries.reduce((sum, entry) => sum + entry.creditPaise - entry.debitPaise, 0n) ?? 0n;
-  if (BigInt(input.amountPaise) > balancePaise) throw new HttpError(409, 'INSUFFICIENT_FUNDS', 'There is not enough available balance for this withdrawal.');
-  throw new HttpError(503, 'PAYOUT_PROVIDER_UNAVAILABLE', 'No approved payout provider or authorized review process is configured. No withdrawal was created or marked complete.');
-}));

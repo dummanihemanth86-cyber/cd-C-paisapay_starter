@@ -3,12 +3,14 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { app } from '../app.js';
 import { prisma } from '../lib/db.js';
+import { env } from '../config/env.js';
 import { hashToken } from '../lib/security.js';
 
 const integration = describe.skipIf(!prisma);
 
 integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integration)', () => {
   const db = prisma!;
+  const previousFinancialOperationsEnabled = env.financialOperationsEnabled;
   const sellerPhone = `+917${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '7')}`;
   const buyerPhone = `+916${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '6')}`;
   const adminPhone = `+915${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '5')}`;
@@ -31,6 +33,7 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
 
   beforeAll(async () => {
     await db.$connect();
+    env.financialOperationsEnabled = true;
     const [seller, buyer, admin] = await Promise.all([
       db.user.create({ data: { phoneE164: sellerPhone, displayName: 'P2P Seller', status: 'ACTIVE', upiId: 'seller@testbank', upiDisplayName: 'Seller Account Name' } }),
       db.user.create({ data: { phoneE164: buyerPhone, displayName: 'P2P Buyer', status: 'ACTIVE' } }),
@@ -53,6 +56,7 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
   });
 
   afterAll(async () => {
+    env.financialOperationsEnabled = previousFinancialOperationsEnabled;
     if (!sellerId || !buyerId || !adminId) return;
     await db.$transaction(async (tx) => {
       const linkedOrders = await tx.p2pDepositOrder.findMany({ where: { OR: [{ withdrawalOfferId: { in: offerIds } }, { buyerUserId: { in: [sellerId, buyerId, adminId] } }, { sellerUserId: { in: [sellerId, buyerId, adminId] } }] }, select: { id: true } });
@@ -116,9 +120,12 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     const buyerOrdersWithTimestamps = (await request(app).get('/api/v1/deposits/orders/my').set(buyerAuth).expect(200)).body.orders;
     const timelineOrder = buyerOrdersWithTimestamps.find((row: { id: string }) => row.id === order.id);
     expect(timelineOrder.timestamps).toMatchObject({ orderCreatedAt: expect.any(String), matchedAt: expect.any(String), payNowClickedAt: expect.any(String), paymentDetailsViewedAt: expect.any(String), paymentHandoffInitiatedAt: expect.any(String), expiresAt: expect.any(String) });
-    const adminOrders = await request(app).get(`/api/v1/admin/p2p/orders?q=${encodeURIComponent(order.referenceId)}`).set(adminAuth).expect(200);
+    const adminOrders = await request(app).get(`/api/v1/admin/p2p/orders?page=1&pageSize=1&status=PAYMENT_PENDING&q=${encodeURIComponent(order.referenceId)}`).set(adminAuth).expect(200);
     expect(adminOrders.body.orders[0]).toMatchObject({ id: order.id, status: 'PAYMENT_PENDING', amountPaise: 50000, buyer: { phoneMasked: expect.any(String) }, seller: { phoneMasked: expect.any(String) } });
+    expect(adminOrders.body).toMatchObject({ page: 1, pageSize: 1, total: 1 });
     expect(adminOrders.body.orders[0].timeline.some((event: { action: string }) => event.action === 'P2P_PAYMENT_HANDOFF_OPENED')).toBe(true);
+    const adminOrdersPastEnd = await request(app).get(`/api/v1/admin/p2p/orders?page=2&pageSize=1&status=PAYMENT_PENDING&q=${encodeURIComponent(order.referenceId)}`).set(adminAuth).expect(200);
+    expect(adminOrdersPastEnd.body).toMatchObject({ orders: [], page: 2, pageSize: 1, total: 1 });
     const adminOffers = await request(app).get(`/api/v1/admin/p2p/offers?q=${encodeURIComponent(offer.referenceId)}`).set(adminAuth).expect(200);
     expect(adminOffers.body.offers[0]).toMatchObject({ amountPaise: 50000, activeReservedPaise: 50000, availableAmountPaise: 0 });
     const postPayCancel = await request(app).post(`/api/v1/deposits/orders/${order.id}/cancel`).set(buyerAuth).send({}).expect(200);

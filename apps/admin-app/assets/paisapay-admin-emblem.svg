@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101C35"/><stop offset="1" stop-color="#07101F"/></linearGradient><linearGradient id="shield" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#55C8FF"/><stop offset="1" stop-color="#2865F6"/></linearGradient></defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#bg)"/><rect x="32" y="32" width="960" height="960" rx="196" fill="none" stroke="#31466B" stroke-width="5"/>
+  <path d="M512 154 760 250v190c0 201-111 334-248 430C375 774 264 641 264 440V250z" fill="#0E203E" stroke="url(#shield)" stroke-width="30" stroke-linejoin="round"/>
+  <rect x="373" y="365" width="278" height="250" rx="26" fill="#EAF5FF"/><path d="M412 554v-76h44v76zm78 0V432h44v122zm78 0V396h44v158z" fill="url(#shield)"/>
+  <path d="m430 652 55 51 111-112" fill="none" stroke="#FFC96B" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="512" y="827" text-anchor="middle" fill="#DDEBFF" font-family="Arial,sans-serif" font-size="42" font-weight="700" letter-spacing="12">ADMIN</text>
+</svg>

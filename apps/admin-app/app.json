@@ -8,18 +8,23 @@
     "userInterfaceStyle": "light",
     "web": { "bundler": "metro", "output": "single" },
     "experiments": { "baseUrl": "/cd-C-paisapay_starter" },
-    "icon": "./assets/paisapay-admin-icon.png",
+    "icon": "./assets/paisapay-admin-emblem.png",
     "splash": {
-      "image": "./assets/paisapay-admin-icon.png",
+      "image": "./assets/paisapay-admin-brand.png",
       "resizeMode": "contain",
-      "backgroundColor": "#FFFFFF"
+      "backgroundColor": "#07101F"
     },
     "android": {
       "package": "com.paisapay.admin",
       "versionCode": 4,
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
       "adaptiveIcon": {
-        "foregroundImage": "./assets/paisapay-admin-icon.png",
-        "backgroundColor": "#FFFFFF"
+        "foregroundImage": "./assets/paisapay-admin-emblem.png",
+        "backgroundColor": "#07101F"
       }
     },
     "plugins": ["./plugins/withAdminReleaseSigning", "expo-secure-store", "expo-notifications"]

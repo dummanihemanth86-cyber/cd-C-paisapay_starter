@@ -10,7 +10,7 @@ const productionEnvironment = (overrides: NodeJS.ProcessEnv = {}): NodeJS.Proces
     SESSION_HASH_SECRET: 's'.repeat(48),
     BANK_ACCOUNT_ENCRYPTION_KEY: 'a'.repeat(64),
     OTP_PROVIDER: 'renflair-v1',
-    RENFLAIR_API_KEY: 'test-only-placeholder',
+    RENFLAIR_API_KEY: 'cfg-test-key-value-not-for-use-0123456789',
     OTP_RATE_LIMIT_BYPASS_PHONE: '',
     WELCOME_BONUS_ENABLED: 'false',
     UPI_DEPOSIT_REWARD_ENABLED: 'false',
@@ -45,6 +45,19 @@ const loadPrismaMigrationConfiguration = (overrides: NodeJS.ProcessEnv = {}, exp
 );
 
 describe('production PostgreSQL TLS configuration', () => {
+  it.each(['YOUR_API_KEY', 'xxxxxxxxxxxxxxxxx', 'replace-with-renflair-api-key', 'placeholder'])('rejects a known RENFLAIR_API_KEY placeholder', (key) => {
+    const result = loadProductionConfiguration({ RENFLAIR_API_KEY: key });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('RENFLAIR_API_KEY must be replaced with a valid provider credential');
+    expect(result.stderr).not.toContain(key);
+  });
+
+  it('rejects a whitespace-only Renflair key without printing the value', () => {
+    const result = loadProductionConfiguration({ RENFLAIR_API_KEY: '   ' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('RENFLAIR_API_KEY');
+  });
+
   it.each(['require', 'verify-full'])('accepts sslmode=%s for Render internal runtime and migration URLs', (sslmode) => {
     const result = loadProductionConfiguration({
       DATABASE_URL: `postgresql://dpg-stage.internal/paisapay_staging?application_name=api&sslmode=${sslmode}`,

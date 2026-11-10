@@ -31,34 +31,45 @@ function offerStatusLabel(offer) {
   return offer.status.replace(/_/g, ' ');
 }
 
-export default function WithdrawalScreen({ amount, setAmount, create, cancelOffer, balance, bankAccounts = [], upiProfile, go, colors, working, note }) {
+export default function WithdrawalScreen({ amount, setAmount, create, cancelOffer, balance, bankAccounts = [], upiProfile, go, colors, working, note, financialOperationsEnabled, financialOperationsReason }) {
   const [offers, setOffers] = useState([]);
   const [expandedOfferIds, setExpandedOfferIds] = useState([]);
   const [activeTab, setActiveTab] = useState('withdraw');
   const upiId = upiProfile?.upiId;
   const upiName = upiProfile?.displayName;
   const hasUpiDetails = Boolean(upiId && upiName);
+  const financialActionsDisabled = financialOperationsEnabled !== true;
   const amountPaise = Number(amount) * 100;
   const amountValid = Number.isSafeInteger(amountPaise) && amountPaise >= 10000 && amountPaise <= Number(balance || 0) && (amountPaise / 100) % 100 === 0;
   const load = useCallback(async () => {
+    if (financialActionsDisabled) return;
     try { const result = await apiGet('/api/v1/withdrawals'); setOffers(result.offers || []); }
     catch (e) { note?.('Could not load withdrawals', e.message); }
-  }, []);
+  }, [financialActionsDisabled]);
   const hasLiveBuyerMatches = offers.some((offer) => ['PENDING_MATCH', 'OPEN', 'PARTIALLY_MATCHED', 'MATCHED', 'PAYMENT_PENDING', 'PAYMENT_PROCESSING', 'DISPUTED'].includes(offer.status));
-  useEffect(() => { void load(); const timer = setInterval(() => { void load(); }, hasLiveBuyerMatches ? 2000 : 15000); return () => clearInterval(timer); }, [load, hasLiveBuyerMatches]);
+  useEffect(() => {
+    if (financialActionsDisabled) return undefined;
+    void load();
+    const timer = setInterval(() => { void load(); }, hasLiveBuyerMatches ? 2000 : 15000);
+    return () => clearInterval(timer);
+  }, [financialActionsDisabled, load, hasLiveBuyerMatches]);
   const activeCount = useMemo(() => offers.filter((offer) => ['OPEN', 'PENDING_MATCH', 'PARTIALLY_MATCHED', 'MATCHED', 'PAYMENT_PENDING', 'PAYMENT_PROCESSING', 'DISPUTED'].includes(offer.status)).length, [offers]);
   const pendingOffers = useMemo(() => offers.filter((offer) => !CLOSED_OFFER_STATUSES.includes(offer.status) && remainingPendingPaise(offer) > 0), [offers]);
   const historyOffers = useMemo(() => offers.filter((offer) => CLOSED_OFFER_STATUSES.includes(offer.status) || (offer.orders || []).some((order) => order.status === 'COMPLETED')), [offers]);
   const totalPendingOfferPaise = useMemo(() => pendingOffers.reduce((sum, offer) => sum + remainingPendingPaise(offer), 0), [pendingOffers]);
   const toggleOfferDetails = (offerId) => setExpandedOfferIds((current) => current.includes(offerId) ? current.filter((id) => id !== offerId) : [...current, offerId]);
-  const confirmCancelOffer = (offer) => Alert.alert('Cancel withdrawal request?', 'This cancels the offer and returns its unmatched amount to your available balance. Any already matched buyer amount stays reserved until that order is safely completed or Finance resolves it.', [
+  const confirmCancelOffer = (offer) => {
+    if (financialActionsDisabled) return note?.('Financial actions unavailable', 'The server has disabled withdrawal changes. No cancellation was submitted.');
+    Alert.alert('Cancel withdrawal request?', 'This cancels the offer and returns its unmatched amount to your available balance. Any already matched buyer amount stays reserved until that order is safely completed or Finance resolves it.', [
     { text: 'Keep request', style: 'cancel' },
     { text: 'Cancel request', style: 'destructive', onPress: async () => { const cancelled = await cancelOffer?.(offer); if (cancelled) await load(); } },
-  ]);
+    ]);
+  };
 
   return <ScrollView style={{ flex: 1, backgroundColor: colors.bg }} contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
     <Text style={[styles.title, { color: colors.ink }]}>Withdraw</Text>
     <Text style={[styles.subtitle, { color: colors.muted }]}>Your request stays pending. The offer amount is reserved from your available balance until it settles or is cancelled.</Text>
+    {financialActionsDisabled && <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: colors.warningSurface }]}><Text style={{ color: colors.warningText, fontWeight: '900', fontSize: 12 }}>Withdrawals unavailable</Text><Text style={{ color: colors.warningText, fontSize: 11, lineHeight: 16, marginTop: 4 }}>{financialOperationsReason || 'The server has disabled withdrawal offer reads and changes.'} This page will not treat the unavailable response as an empty account or submit changes.</Text></View>}
     <View style={[styles.balanceCard, { backgroundColor: colors.navy }]}><Text style={styles.balanceLabel}>AVAILABLE BALANCE</Text><Text style={styles.balance}>{money(balance)}</Text><Text style={styles.balanceHint}>Server-reported · INR · {activeCount} active offers</Text></View>
 
     <View accessibilityRole="tablist" style={[styles.tabs, { backgroundColor: colors.card, borderColor: colors.line }]}>
@@ -99,7 +110,7 @@ export default function WithdrawalScreen({ amount, setAmount, create, cancelOffe
       </View>
       {!hasUpiDetails && <View style={[styles.notice, { backgroundColor: colors.warningSurface }]}><Text style={{ color: colors.warningText, fontSize: 11, lineHeight: 16 }}>Save both an account name and UPI ID to create an offer.</Text></View>}
       {hasUpiDetails && <View style={[styles.notice, { backgroundColor: colors.infoSurface || colors.warningSurface }]}><Text style={{ color: colors.infoText || colors.warningText, fontSize: 11, lineHeight: 16 }}>Your saved name and UPI ID can be used for P2P offers. PaisaPay does not check these details with your bank; please confirm they are correct in your UPI app. P2P offers are not bank payouts.</Text></View>}
-      <TouchableOpacity accessibilityRole="button" disabled={!amountValid || !hasUpiDetails || working} onPress={create} style={[styles.submit, { backgroundColor: amountValid && hasUpiDetails && !working ? colors.blue : colors.line }]}><Text style={styles.submitText}>{working ? 'Creating offer…' : 'Create withdrawal offer'}</Text></TouchableOpacity>
+      <TouchableOpacity accessibilityRole="button" disabled={!amountValid || !hasUpiDetails || working || financialActionsDisabled} onPress={create} style={[styles.submit, { backgroundColor: amountValid && hasUpiDetails && !working && !financialActionsDisabled ? colors.blue : colors.line }]}><Text style={styles.submitText}>{financialActionsDisabled ? 'Temporarily unavailable' : working ? 'Creating offer…' : 'Create withdrawal offer'}</Text></TouchableOpacity>
       <Text style={[styles.caption, { color: colors.muted, marginTop: 9 }]}>Creating the offer reserves its full amount from your available wallet balance. Completed portions settle separately; unresolved payment amounts remain held. This is a P2P offer, not a bank payout.</Text>
     </View>}
 

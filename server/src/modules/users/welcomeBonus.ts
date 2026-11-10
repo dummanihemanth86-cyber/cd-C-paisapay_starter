@@ -9,7 +9,7 @@ export type WelcomeBonusResult = 'DISABLED' | 'NOT_ELIGIBLE' | 'FUNDING_REQUIRED
 
 /** Grant the configured welcome credit from the seeded test pool, exactly once. */
 export async function grantWelcomeBonus(tx: Prisma.TransactionClient, userId: string): Promise<WelcomeBonusResult> {
-  if (!env.welcomeBonusEnabled) return 'DISABLED';
+  if (!env.financialOperationsEnabled || !env.welcomeBonusEnabled) return 'DISABLED';
 
   // Serialize claims against the shared reward pool before computing its balance.
   const fundAccount = await tx.ledgerAccount.findUnique({ where: { id: DEVELOPMENT_REWARD_FUND_ACCOUNT_ID }, select: { id: true } });

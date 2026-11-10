@@ -68,17 +68,20 @@ describe('PaisaPay API foundation', () => {
       { file: '../modules/payments/routes.ts', mounts: { paymentsRouter: '/api/v1' } },
       { file: '../modules/p2p/routes.ts', mounts: { p2pRouter: '/api/v1' } },
       { file: '../modules/orders/routes.ts', mounts: { ordersRouter: '/api/v1/orders' } },
-      { file: '../modules/support/routes.ts', mounts: { supportRouter: '/api/v1/support', notificationRouter: '/api/v1/notifications', withdrawalsRouter: '/api/v1/withdrawals' } },
+      { file: '../modules/support/routes.ts', mounts: { supportRouter: '/api/v1/support', notificationRouter: '/api/v1/notifications' } },
       { file: '../modules/admin/routes.ts', mounts: { adminAuthRouter: '/api/v1/admin/auth', adminRouter: '/api/v1/admin' } },
     ];
     const routes = new Set<string>();
+    const declarationCounts = new Map<string, number>();
     for (const { file, mounts } of routers) {
       const source = readFileSync(new URL(file, import.meta.url), 'utf8');
       for (const [router, base] of Object.entries(mounts)) {
         const pattern = new RegExp(String.raw`\b${router}\.(get|post|put|patch|delete)\((?:'([^']*)'|"([^"]*)")`, 'g');
         for (const match of source.matchAll(pattern)) {
           const routePath = `${base}${match[2] ?? match[3]}`.replace(/\/$/, '').replace(/:([A-Za-z0-9_]+)/g, '{$1}');
-          routes.add(`${match[1].toUpperCase()} ${routePath}`);
+          const declaration = `${match[1].toUpperCase()} ${routePath}`;
+          routes.add(declaration);
+          declarationCounts.set(declaration, (declarationCounts.get(declaration) ?? 0) + 1);
         }
       }
     }
@@ -91,6 +94,7 @@ describe('PaisaPay API foundation', () => {
       return !spec.paths[path]?.[method];
     });
     expect(missing).toEqual([]);
+    expect([...declarationCounts].filter(([, count]) => count > 1)).toEqual([]);
   });
 
   it('provides JSON request and response schemas for body-consuming/documented operations', async () => {
@@ -255,6 +259,18 @@ describe('PaisaPay API foundation', () => {
     expect(response.body.methods.find((item: { name: string }) => item.name === 'PhonePe').buyEnabled).toBe(false);
     expect(response.body.methods.every((item: { available: boolean }) => item.available === false)).toBe(true);
     expect(response.body.availabilityMessage).toMatch(/unavailable/);
+    const financialActionsAvailable = env.financialOperationsEnabled
+      && Boolean(response.body.upiDeposit.receiverVpa)
+      && response.body.methods.some((item: { method: string; available: boolean }) => item.method !== 'CASHFREE' && item.available);
+    expect(response.body.financialOperations.enabled).toBe(financialActionsAvailable);
+    expect(response.body.financialOperations.gateEnabled).toBe(env.financialOperationsEnabled);
+    expect(response.body.financialOperations.capabilities).toMatchObject({
+      addMoney: { available: financialActionsAvailable },
+      withdraw: { available: financialActionsAvailable, type: 'P2P_OFFER_NOT_BANK_PAYOUT' },
+      quickDeposit: { available: financialActionsAvailable },
+      p2pMatching: { available: financialActionsAvailable },
+    });
+    if (!financialActionsAvailable) expect(response.body.financialOperations.blockers.length).toBeGreaterThan(0);
   });
 
   it('returns helpful API information at root', async () => {

@@ -20,7 +20,7 @@ const promoBanners = [
   require('../assets/paisapay-rules-banner.png'),
 ];
 
-export default function UltraHome({ balance, pendingBalance, reservedBalance, rewardProfitPaise = 0, vipData, withdrawalPendingBalance, withdrawals = [], deposits = [], transactions = [], notifications = [], name, userId, go, note, colors }) {
+export default function UltraHome({ balance, pendingBalance, reservedBalance, rewardProfitPaise = 0, vipData, withdrawalPendingBalance, withdrawals = [], deposits = [], transactions = [], notifications = [], financialOperationsEnabled, financialOperationsReason, name, userId, go, note, colors }) {
   const [balanceVisible, setBalanceVisible] = useState(true);
   const [withdrawalOffers, setWithdrawalOffers] = useState(() => withdrawals.filter((item) => item.referenceId));
   const entrance = useRef(new Animated.Value(0)).current;
@@ -53,16 +53,16 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
   }, [bannerSlide, bannerWidth]);
   useEffect(() => {
     let active = true;
+    if (financialOperationsEnabled !== true) return () => { active = false; };
     const loadOffers = async () => {
       try {
         const result = await apiGet('/api/v1/withdrawals');
         if (active) setWithdrawalOffers(result.offers || []);
       } catch { /* Keep the last server-confirmed offer list visible while offline. */ }
     };
-    void loadOffers();
     const timer = setInterval(loadOffers, 15000);
     return () => { active = false; clearInterval(timer); };
-  }, []);
+  }, [financialOperationsEnabled]);
   useEffect(() => {
     const cachedOffers = withdrawals.filter((item) => item.referenceId);
     if (cachedOffers.length) setWithdrawalOffers(cachedOffers);
@@ -123,7 +123,7 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
   return <ScrollView style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
     <View style={styles.welcomeRow}>
       <View style={styles.brandGroup}>
-        <Image source={require('../assets/paisapay-neon-logo.png')} resizeMode="cover" style={styles.logo} />
+        <Image source={require('../assets/paisapay-customer-emblem.png')} resizeMode="cover" style={styles.logo} />
         <View style={{ flexShrink: 1 }}>
           <Text style={[styles.eyebrow, { color: palette.muted }]}>WELCOME BACK</Text>
           <Text style={[styles.welcome, { color: palette.ink }]} numberOfLines={1}>{name?.trim() || 'PaisaPay member'}</Text>
@@ -146,6 +146,11 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
       </View>
     </View>
 
+    {financialOperationsEnabled !== true && <View accessibilityRole="alert" style={[styles.financialDisabledBanner, { backgroundColor: palette.warningSurface, borderColor: palette.gold }]}>
+      <Text style={[styles.financialDisabledTitle, { color: palette.warningText }]}>Financial actions are temporarily unavailable</Text>
+      <Text style={[styles.financialDisabledCopy, { color: palette.warningText }]}>{financialOperationsReason || 'The server has disabled deposits, withdrawals and P2P matching.'} Your profile, wallet history, referrals and support remain available. No payment or balance change was made.</Text>
+    </View>}
+
     <Animated.View style={{ opacity: entrance, transform: [{ translateY: entrance.interpolate({ inputRange: [0, 1], outputRange: [11, 0] }) }] }}>
     <View style={[styles.wallet, { backgroundColor: palette.navy, borderColor: palette.electric }]}>
       <View style={styles.walletTop}>
@@ -159,8 +164,8 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="View pending withdrawal requests" activeOpacity={0.8} onPress={() => go('Withdrawals')} style={styles.balanceTile}><Text style={styles.tileLabel}>WITHDRAWAL PENDING</Text><Text style={styles.tileValue}>{balanceVisible ? money(totalWithdrawalPendingPaise) : '₹ •••'}</Text><Text style={styles.pendingHint}>View pending requests ›</Text></TouchableOpacity>
       </View>
       <View style={styles.walletButtons}>
-        <TouchableOpacity accessibilityRole="button" onPress={() => go('Deposit')} activeOpacity={0.8} style={[styles.primaryButton, { backgroundColor: palette.blue }]}><Text style={styles.primaryText}>＋  Add Money</Text></TouchableOpacity>
-        <TouchableOpacity accessibilityRole="button" onPress={() => go('Withdrawals')} activeOpacity={0.8} style={styles.secondaryButton}><Text style={styles.secondaryText}>↑  Withdraw</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" disabled={financialOperationsEnabled !== true} onPress={() => go('Deposit')} activeOpacity={0.8} style={[styles.primaryButton, { backgroundColor: palette.blue }, financialOperationsEnabled !== true && styles.disabledAction]}><Text style={styles.primaryText}>＋  Add Money</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" disabled={financialOperationsEnabled !== true} onPress={() => go('Withdrawals')} activeOpacity={0.8} style={[styles.secondaryButton, financialOperationsEnabled !== true && styles.disabledAction]}><Text style={styles.secondaryText}>↑  Withdraw</Text></TouchableOpacity>
       </View>
     </View>
     </Animated.View>
@@ -168,10 +173,10 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
     {balance !== null && balance !== undefined && Number.isFinite(Number(balance)) && Number(balance) < 20_000 && <View style={[styles.lowBalanceBanner, { backgroundColor: palette.warningSurface, borderColor: palette.gold }]}>
       <View style={{ flex: 1 }}>
         <Text style={[styles.lowBalanceTitle, { color: palette.warningText }]}>Low wallet balance 🪙</Text>
-        <Text style={[styles.lowBalanceCopy, { color: palette.warningText }]}>Balance below ₹200. Add money to continue your daily PaisaPay activity 💸</Text>
+        <Text style={[styles.lowBalanceCopy, { color: palette.warningText }]}>{financialOperationsEnabled !== true ? 'Financial actions are temporarily unavailable on this server.' : 'Balance below ₹200. Add money to continue your daily PaisaPay activity 💸'}</Text>
         <Text style={[styles.lowBalanceNote, { color: palette.muted }]}>Rewards depend on eligibility and are not guaranteed.</Text>
       </View>
-      <TouchableOpacity accessibilityRole="button" onPress={() => go('Deposit')} style={[styles.lowBalanceAction, { backgroundColor: palette.blue }]}><Text style={styles.lowBalanceActionText}>Add Money</Text></TouchableOpacity>
+      {financialOperationsEnabled === true && <TouchableOpacity accessibilityRole="button" onPress={() => go('Deposit')} style={[styles.lowBalanceAction, { backgroundColor: palette.blue }]}><Text style={styles.lowBalanceActionText}>Add Money</Text></TouchableOpacity>}
     </View>}
 
     <Animated.View style={{ opacity: entrance, transform: [{ translateY: entrance.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }}>
@@ -234,6 +239,7 @@ const styles = StyleSheet.create({
   tileLabel: { color: '#AFC8E8', fontSize: 9, fontWeight: '800', letterSpacing: 0.6 },
   tileValue: { color: 'white', fontSize: 14, fontWeight: '800', marginTop: 6 },
   pendingHint: { color: '#B9D5FF', fontSize: 8, fontWeight: '800', marginTop: 5 },
+  financialDisabledBanner: { borderWidth: 1, borderRadius: 16, padding: 13, marginBottom: 14 }, financialDisabledTitle: { fontSize: 12, fontWeight: '900' }, financialDisabledCopy: { fontSize: 11, lineHeight: 16, marginTop: 4 }, disabledAction: { opacity: 0.45 },
   lowBalanceBanner: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderRadius: 18, padding: 14, marginTop: -8, marginBottom: 18 }, lowBalanceTitle: { fontSize: 13, fontWeight: '900' }, lowBalanceCopy: { fontSize: 11, lineHeight: 16, marginTop: 4 }, lowBalanceNote: { fontSize: 9, lineHeight: 13, marginTop: 4 }, lowBalanceAction: { borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12 }, lowBalanceActionText: { color: '#fff', fontSize: 10, fontWeight: '900' },
   walletButtons: { flexDirection: 'row', gap: 9, marginTop: 16 },
   primaryButton: { flex: 1, minHeight: 46, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },

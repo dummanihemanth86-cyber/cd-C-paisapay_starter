@@ -116,9 +116,45 @@ export async function getPaymentMethodAvailability() {
       }),
     };
   });
+  const livePaymentProviderAvailable = methods.some((method) => method.available && method.method !== 'CASHFREE');
+  const financialBlockers = [
+    ...(!env.financialOperationsEnabled ? ['Financial operations are disabled by the server safety gate.'] : []),
+    ...(!livePaymentProviderAvailable ? ['No approved, operational live payment provider is available.'] : []),
+    ...(!receiverVpa ? ['No authorized UPI recipient is configured.'] : []),
+  ];
+  const financialActionsAvailable = financialBlockers.length === 0;
+  const financialReason = financialActionsAvailable ? null : financialBlockers.join(' ');
 
   return {
     currency: 'INR',
+    // This is the same server-side gate enforced by every financial mutation
+    // route. It is advisory for the client; route middleware remains decisive.
+    financialOperations: {
+      enabled: financialActionsAvailable,
+      gateEnabled: env.financialOperationsEnabled,
+      status: financialActionsAvailable ? 'AVAILABLE' : 'UNAVAILABLE',
+      reason: financialReason,
+      blockers: financialBlockers,
+      capabilities: {
+        addMoney: {
+          available: financialActionsAvailable,
+          reason: financialReason,
+        },
+        withdraw: {
+          available: financialActionsAvailable,
+          reason: financialReason,
+          type: 'P2P_OFFER_NOT_BANK_PAYOUT',
+        },
+        quickDeposit: {
+          available: financialActionsAvailable,
+          reason: financialReason,
+        },
+        p2pMatching: {
+          available: financialActionsAvailable,
+          reason: financialReason,
+        },
+      },
+    },
     upiDeposit: {
       receiverVpa,
       minAmountPaise: env.minDepositPaise,

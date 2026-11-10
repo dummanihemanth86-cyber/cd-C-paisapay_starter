@@ -13,7 +13,8 @@
     "staging-apk": {
       "environment": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://paisapay-api-staging.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://paisapay-api-staging.onrender.com",
+        "EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV": "staging"
       },
       "distribution": "internal",
       "android": { "buildType": "apk" }
@@ -21,7 +22,8 @@
     "production-apk": {
       "environment": "production",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://paisapay-api.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://paisapay-api.onrender.com",
+        "EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV": "production"
       },
       "distribution": "internal",
       "autoIncrement": true,
@@ -29,6 +31,10 @@
     },
     "production": {
       "environment": "production",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://paisapay-api.onrender.com",
+        "EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV": "production"
+      },
       "autoIncrement": true,
       "android": { "buildType": "app-bundle" }
     }

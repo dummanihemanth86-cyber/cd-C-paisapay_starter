@@ -35,7 +35,7 @@ const openapiBase = {
         },
       },
     },
-    '/config': { get: { summary: 'Public INR/payment-method configuration', responses: { '200': { description: 'Configuration' } } } },
+    '/config': { get: { summary: 'Public INR/payment-method configuration and server-authoritative financial action availability', responses: { '200': { description: 'Configuration and fail-closed financial capabilities; mutation routes remain authoritative' } } } },
     '/auth/request-otp': { post: {
       summary: 'Request an OTP delivered through the configured server-side SMS provider',
       requestBody: {
@@ -330,7 +330,7 @@ const requestBodies: Record<string, unknown> = {
 // handlers. Nested Prisma projections remain open objects because their exact
 // selected columns differ by route and are documented by the route's select.
 const responseFields: Record<string, string[]> = {
-  'get /config': ['currency', 'upiDeposit', 'livePaymentsEnabled', 'sandboxPaymentsEnabled', 'availabilityMessage', 'methods'],
+  'get /config': ['currency', 'financialOperations', 'upiDeposit', 'livePaymentsEnabled', 'sandboxPaymentsEnabled', 'availabilityMessage', 'methods'],
   'post /auth/request-otp': ['challengeId', 'expiresInSeconds', 'resendAfterSeconds', 'deliveryState', 'gatewayStatus', 'message'],
   'get /auth/otp-status/{challengeId}': ['challengeId', 'deliveryState', 'gatewayStatus', 'statusAvailable', 'message'],
   'post /auth/verify-otp': ['accessToken', 'refreshToken', 'accessExpiresInSeconds', 'user', 'welcomeBonus'],
@@ -356,7 +356,7 @@ const responseFields: Record<string, string[]> = {
   'get /users/me/transactions': ['currency', 'transactions'],
   'get /users/me/referrals': ['referralCode', 'referralLink', 'period', 'directCount', 'indirectCount', 'totalMembers', 'todayNewMembers', 'todayDirectMembers', 'todayIndirectMembers', 'periodVerifiedDepositsPaise', 'todayVerifiedDepositsPaise', 'periodVerifiedDepositCount', 'todayVerifiedDepositCount', 'totalVerifiedDepositCount', 'totalVerifiedDepositsPaise', 'totalEarningsPaise', 'todayEarningsPaise', 'periodEarningsPaise', 'directEarningsPaise', 'indirectEarningsPaise', 'earnedCommissionPaise', 'pendingCommissionPaise', 'accruedCommissionPaise', 'commissionPercentBps', 'commissionRates', 'commissionBasis', 'commissionRuleConfigured', 'fundedProgram', 'payoutRulesConfigured', 'rewardFundingMessage', 'milestones', 'commissionHistory', 'members'],
   'get /users/me/vip': ['programStatus', 'currentLevel', 'activeLevels', 'levels', 'volume', 'rewardPolicy'],
-  'get /wallet-methods': ['currency', 'upiDeposit', 'livePaymentsEnabled', 'sandboxPaymentsEnabled', 'availabilityMessage', 'methods', 'walletActivation'],
+  'get /wallet-methods': ['currency', 'financialOperations', 'upiDeposit', 'livePaymentsEnabled', 'sandboxPaymentsEnabled', 'availabilityMessage', 'methods', 'walletActivation'],
   'get /wallet-references': ['wallets'],
   'post /wallet-references': ['wallet', 'message'],
   'get /deposits': ['currency', 'deposits'],
@@ -444,7 +444,7 @@ const booleanResponseFields = new Set(['livePaymentsEnabled', 'sandboxPaymentsEn
 const arrayResponseFields = new Set(['methods', 'wallets', 'bankAccounts', 'transactions', 'deposits', 'orders', 'withdrawals', 'offers', 'tickets', 'messages', 'notifications', 'claims', 'rules', 'events', 'users', 'entries', 'referrals', 'milestones', 'commissions', 'payments', 'disputes', 'allowedSections', 'levels', 'recentTransactions', 'recentUsers', 'members', 'commissionHistory', 'auditLogs', 'admins', 'credits', 'recentLedgerEntries', 'daily', 'statusBreakdown', 'editableSettings', 'requests', 'accounts', 'walletCreditBlockers', 'walletFundingBlockers', 'stagingDirectWalletCreditBlockers']);
 const numericArrayResponseFields = new Set<string>();
 const dateResponseFields = new Set(['serverTime', 'checkedAt']);
-const objectResponseFields = new Set(['upiDeposit', 'walletActivation', 'user', 'bankAccount', 'wallet', 'deposit', 'order', 'withdrawalOffer', 'offer', 'reward', 'paymentDetails', 'claim', 'ticket', 'metrics', 'charts', 'pendingAdminActions', 'system', 'config', 'milestone', 'commissionPolicy', 'configuration', 'device', 'adjustment', 'credit', 'request', 'financialSafety']);
+const objectResponseFields = new Set(['financialOperations', 'upiDeposit', 'walletActivation', 'user', 'bankAccount', 'wallet', 'deposit', 'order', 'withdrawalOffer', 'offer', 'reward', 'paymentDetails', 'claim', 'ticket', 'metrics', 'charts', 'pendingAdminActions', 'system', 'config', 'milestone', 'commissionPolicy', 'configuration', 'device', 'adjustment', 'credit', 'request', 'financialSafety']);
 const nullableResponseFields = new Set(['upiId', 'displayName', 'receiverVpa', 'databaseResponseTimeMs', 'statusFilter', 'ledgerTransactionId']);
 const integerResponseFields = new Set(['expiresInSeconds', 'accessExpiresInSeconds', 'resendAfterSeconds', 'databaseResponseTimeMs', 'todayNewMembers', 'todayDirectMembers', 'todayIndirectMembers', 'totalMembers', 'directCount', 'indirectCount', 'recipientCount', 'users', 'deposits', 'withdrawals', 'disputedOrders', 'pendingClaims', 'activeLevels', 'pendingCredits', 'pendingFunding', 'approvedCredits', 'approvedFunding', 'creditLedgerDiscrepancies', 'fundingLedgerDiscrepancies']);
 const responseTypeOverrides: Record<string, Record<string, Record<string, unknown>>> = {
@@ -485,6 +485,20 @@ const p2pOfferSchema = objectSchema({ id: stringField, referenceId: stringField,
 const adminP2pClaimListItemSchema = objectSchema({ id: stringField, orderId: stringField, userId: stringField, transactionReference: nullableStringField, status: stringField, claimedAmountPaise: nullableIntegerField, claimedPaidAt: nullableDateField, evidenceMimeType: nullableStringField, evidenceReference: nullableStringField, reviewReason: nullableStringField, createdAt: dateField, evidenceAttached: booleanField, user: userMaskedSchema, order: objectSchema({ id: stringField, referenceId: stringField, amountPaise: integerField, status: stringField, createdAt: dateField, expiresAt: nullableDateField, paymentDetailsShownAt: nullableDateField, paymentHandoffStartedAt: nullableDateField, cancellationRequestedAt: nullableDateField, seller: objectSchema({ id: stringField, publicId: nullableStringField }), withdrawalOffer: objectSchema({ id: stringField, referenceId: stringField, payeeVpa: stringField, payeeName: nullableStringField }), timestamps: p2pOrderTimestampSchema, timeline: arrayOf(p2pTimelineEventSchema) }) }, ['id', 'orderId', 'userId', 'status', 'claimedAmountPaise', 'claimedPaidAt', 'createdAt', 'evidenceAttached', 'user', 'order']);
 const adminP2pClaimDetailSchema = objectSchema({ id: stringField, status: stringField, transactionReference: nullableStringField, claimedAmountPaise: nullableIntegerField, claimedPaidAt: nullableDateField, evidenceMimeType: nullableStringField, createdAt: dateField, reviewReason: nullableStringField, evidenceAttached: booleanField, user: objectSchema({ id: stringField, publicId: nullableStringField, displayName: nullableStringField, phoneMasked: stringField }), order: objectSchema({ id: stringField, referenceId: stringField, buyerUserId: stringField, sellerUserId: stringField, amountPaise: integerField, currency: stringField, status: stringField, createdAt: dateField, expiresAt: nullableDateField, paymentDetailsShownAt: nullableDateField, paymentHandoffStartedAt: nullableDateField, cancellationRequestedAt: nullableDateField, seller: objectSchema({ id: stringField, publicId: nullableStringField }), withdrawalOffer: objectSchema({ id: stringField, referenceId: stringField, payeeVpa: stringField, payeeName: nullableStringField }), timestamps: p2pOrderTimestampSchema, timeline: arrayOf(p2pTimelineEventSchema) }) }, ['id', 'status', 'claimedAmountPaise', 'claimedPaidAt', 'createdAt', 'evidenceAttached', 'user', 'order']);
 const miniAdminUserSchema = { ...objectSchema({ publicId: nullableStringField, displayName: nullableStringField }), nullable: true };
+const financialOperationsSchema = objectSchema({
+  enabled: booleanField,
+  gateEnabled: booleanField,
+  status: { type: 'string', enum: ['AVAILABLE', 'UNAVAILABLE'] },
+  reason: nullableStringField,
+  blockers: arrayOf(stringField),
+  capabilities: objectSchema({
+    addMoney: objectSchema({ available: booleanField, reason: nullableStringField }, ['available']),
+    withdraw: objectSchema({ available: booleanField, reason: nullableStringField, type: stringField }, ['available', 'type']),
+    quickDeposit: objectSchema({ available: booleanField, reason: nullableStringField }, ['available']),
+    p2pMatching: objectSchema({ available: booleanField, reason: nullableStringField }, ['available']),
+  }, ['addMoney', 'withdraw', 'quickDeposit', 'p2pMatching']),
+}, ['enabled', 'gateEnabled', 'status', 'blockers', 'capabilities']);
+
 const nestedResponseSchemas: Record<string, Record<string, Record<string, unknown>>> = {
   'get /admin/settings': {
     financialSafety: objectSchema({ financialOperationsEnabled: booleanField, walletAdjustmentsEnabled: booleanField, dedicatedAdminAdjustmentAccount: stringField, adjustmentFundBalancePaise: nullableStringField, adjustmentFundHasFunds: booleanField, singleAdminAdjustmentAccountConfigured: booleanField, independentApprovalImplemented: booleanField, independentApprovalAvailable: booleanField, independentCheckerAvailable: booleanField, activeSuperAdminCount: integerField, fundingWorkflowEnabled: booleanField, creditWorkflowEnabled: booleanField, walletCreditBlockers: arrayOf(stringField), walletCreditReadiness: stringField, stagingDirectWalletCreditsEnabled: booleanField, stagingDirectWalletCreditBlockers: arrayOf(stringField), walletProductionApproved: booleanField, makerCheckerMigration: stringField, walletLedgerIntegrity: stringField, creditRequestLedgerLinks: stringField, fundingRequestLedgerLinks: stringField, fundingProvenance: stringField, activeSuperAdminCountStatus: stringField, externalBankReconciliation: stringField, settlementCashAccount: objectSchema({ status: stringField, balancePaise: nullableStringField }), adminAdjustmentControlsReady: booleanField, superAdminWalletCreditsEnabled: booleanField, superAdminCreditPrerequisitesReady: booleanField, productionEnablementSupported: booleanField, explanation: stringField }),
@@ -522,10 +536,12 @@ const nestedResponseSchemas: Record<string, Record<string, Record<string, unknow
     daily: arrayOf(objectSchema({ date: { type: 'string', format: 'date' }, count: integerField, amountPaise: stringField }, ['date', 'count'])),
   },
   'get /config': {
+    financialOperations: financialOperationsSchema,
     upiDeposit: objectSchema({ receiverVpa: nullableStringField, minAmountPaise: integerField, maxAmountPaise: integerField, rewardPercentBps: integerField, rewardEnabled: booleanField, rewardMessage: stringField, paymentInitiation: stringField, verificationMode: stringField, automaticVerificationAvailable: booleanField, message: stringField }),
     methods: arrayOf(objectSchema({ name: stringField, method: stringField, buyEnabled: booleanField, sellEnabled: booleanField, walletIntegration: objectSchema({ providerFlow: { type: 'string', nullable: true }, status: stringField, linkingDocumented: booleanField, available: booleanField, message: stringField }), enabled: booleanField, providerApproved: booleanField, providerConfigured: booleanField, integrationOperational: booleanField, available: booleanField, status: stringField, availabilityMessage: stringField })),
   },
   'get /wallet-methods': {
+    financialOperations: financialOperationsSchema,
     upiDeposit: objectSchema({ receiverVpa: nullableStringField, minAmountPaise: integerField, maxAmountPaise: integerField, rewardPercentBps: integerField, rewardEnabled: booleanField, rewardMessage: stringField, paymentInitiation: stringField, verificationMode: stringField, automaticVerificationAvailable: booleanField, message: stringField }),
     methods: arrayOf(objectSchema({ name: stringField, method: stringField, buyEnabled: booleanField, sellEnabled: booleanField, walletIntegration: objectSchema({ providerFlow: { type: 'string', nullable: true }, status: stringField, linkingDocumented: booleanField, available: booleanField, message: stringField }), enabled: booleanField, providerApproved: booleanField, providerConfigured: booleanField, integrationOperational: booleanField, available: booleanField, status: stringField, availabilityMessage: stringField })),
     walletActivation: objectSchema({ activeCount: integerField, targetCount: nullableIntegerField, progressPercent: nullableIntegerField, booster: objectSchema({ configured: booleanField, eligible: booleanField, message: stringField }) }),

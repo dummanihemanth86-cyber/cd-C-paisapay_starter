@@ -14,7 +14,7 @@ const localDateTimeInput = (date) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-export default function DepositScreen({ amount, setAmount, create, go, balance, config, working, colors, note, upiProfile, refresh, onAssistantEvent }) {
+export default function DepositScreen({ amount, setAmount, create, go, balance, config, working, colors, note, upiProfile, refresh, onAssistantEvent, financialOperationsEnabled, financialOperationsReason }) {
   const entrance = useRef(new Animated.Value(0)).current;
   const [myOrders, setMyOrders] = useState([]);
   const [order, setOrder] = useState(null);
@@ -39,6 +39,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
   const matchSuccessOpacity = useRef(new Animated.Value(1)).current;
   const notificationOrderStatuses = useRef(new Map());
   const proofOrderId = useRef(null);
+  const financialActionsDisabled = financialOperationsEnabled !== true;
   useEffect(() => {
     Animated.timing(entrance, { toValue: 1, duration: 360, useNativeDriver: true }).start();
     return () => entrance.stopAnimation();
@@ -64,6 +65,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
     if (['CANCELLED', 'COMPLETED', 'EXPIRED'].includes(order?.status)) { setPayeeVpa(''); setPayeeName(''); }
   }, [order?.id, order?.status]);
   const loadMyOrders = useCallback(async ({ quiet = false } = {}) => {
+    if (financialActionsDisabled) return;
     try {
       const response = await apiGet('/api/v1/deposits/orders/my');
       if (response.serverTime) setServerClockOffsetMs(Date.parse(response.serverTime) - Date.now());
@@ -91,12 +93,17 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
       });
     }
     catch (e) { if (!quiet) note?.('Could not load deposit orders', e.message); }
-  }, []);
+  }, [financialActionsDisabled]);
   const needsQuickStatusRefresh = myOrders.some((item) => ['MATCHED', 'PAYMENT_PENDING', 'PAYMENT_PROCESSING', 'PAYMENT_EXPIRED_REVIEW', 'CANCELLED_PAYMENT_HOLD', 'DISPUTED'].includes(item.status) || item.claims?.some((claim) => claim.status === 'PENDING_REVIEW'));
   // Keep closed/cancel-requested/payment-review orders out of the active Deposit list.
   // They remain on the backend for Finance review and continue to hold seller funds if payment is uncertain.
   const visibleQuickDepositOrders = myOrders.filter((item) => ['MATCHED', 'PAYMENT_PENDING', 'PAYMENT_PROCESSING', 'COMPLETED'].includes(item.status));
-  useEffect(() => { void loadMyOrders(); const timer = setInterval(() => { void loadMyOrders({ quiet: true }); }, needsQuickStatusRefresh ? 2000 : 12000); return () => clearInterval(timer); }, [loadMyOrders, needsQuickStatusRefresh]);
+  useEffect(() => {
+    if (financialActionsDisabled) return undefined;
+    void loadMyOrders();
+    const timer = setInterval(() => { void loadMyOrders({ quiet: true }); }, needsQuickStatusRefresh ? 2000 : 12000);
+    return () => clearInterval(timer);
+  }, [financialActionsDisabled, loadMyOrders, needsQuickStatusRefresh]);
   useEffect(() => {
     const previous = notificationOrderStatuses.current;
     let terminalUpdate = false;
@@ -122,6 +129,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
   }, [myOrders, note, refresh, onAssistantEvent]);
 
   const match = async (offerId, selectedAmount = amount, excludeOfferId) => {
+    if (financialActionsDisabled) return note?.('Financial actions unavailable', 'The server has disabled deposits and P2P matching. No order was created.');
     const n = Number(selectedAmount);
     if (!Number.isSafeInteger(n) || n < 100 || n % 100 !== 0) return note?.('Check amount', 'Enter a whole amount divisible by ₹100.');
     setLoading(true);
@@ -131,23 +139,26 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
     const deadline = Date.now() + 7_000;
     const idempotencyKey = key('p2p-match');
     let lastConnectionError = null;
+    let retryDelayMs = 300;
     const ticker = setInterval(() => setMatchSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1000))), 200);
     try {
       while (Date.now() < deadline) {
         const remainingMs = deadline - Date.now();
         try {
-          const result = await apiPost('/api/v1/deposits/quick-match', { amountPaise: n * 100, ...(offerId ? { withdrawalOfferId: offerId } : {}), ...(excludeOfferId ? { excludeWithdrawalOfferId: excludeOfferId } : {}) }, idempotencyKey, { timeoutMs: Math.max(500, Math.min(1500, remainingMs)) });
+          const result = await apiPost('/api/v1/deposits/quick-match', { amountPaise: n * 100, ...(offerId ? { withdrawalOfferId: offerId } : {}), ...(excludeOfferId ? { excludeWithdrawalOfferId: excludeOfferId } : {}) }, idempotencyKey, { timeoutMs: Math.max(500, Math.min(1500, remainingMs)), transientRetries: 0 });
           if (result.serverTime) setServerClockOffsetMs(Date.parse(result.serverTime) - Date.now());
           setOrder({ ...result.order, withdrawalOffer: result.withdrawalOffer, reward: result.reward }); setMatchedNoticeOrderId(result.order?.id || null); setPayeeVpa(''); setPayeeName('');
           void loadMyOrders();
           return;
         } catch (e) {
           if (e.code === 'NO_MATCHING_WITHDRAWAL_OFFERS') lastConnectionError = null;
+          else if (e.code === 'FINANCIAL_OPERATIONS_DISABLED' || e.code === 'DEPOSIT_RECEIVER_NOT_CONFIGURED') { note?.('Financial actions unavailable', e.message); return; }
           else if (e.status && e.status < 500) { note?.('Could not match', e.message); return; }
           else lastConnectionError = e;
         }
-        const pause = Math.min(650, Math.max(0, deadline - Date.now()));
+        const pause = Math.min(retryDelayMs, Math.max(0, deadline - Date.now()));
         if (pause > 0) await new Promise((resolve) => setTimeout(resolve, pause));
+        retryDelayMs = Math.min(1200, retryDelayMs * 2);
       }
       if (lastConnectionError) {
         note?.('Could not check for a match', 'Check your connection and your order list before retrying. No payment was started.');
@@ -157,6 +168,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
     } finally { clearInterval(ticker); setMatching(false); setLoading(false); }
   };
   const confirm = async () => {
+    if (financialActionsDisabled) { note?.('Financial actions unavailable', 'The server has disabled payment actions. No payment handoff was started.'); return null; }
     setLoading(true);
     try { const result = await apiPost(`/api/v1/deposits/orders/${encodeURIComponent(order.id)}/confirm`, {}); if (result.serverTime) setServerClockOffsetMs(Date.parse(result.serverTime) - Date.now()); setOrder({ ...order, ...result.order }); setPayeeVpa(result.paymentDetails.payeeVpa); setPayeeName(result.paymentDetails.payeeName); void loadMyOrders(); return result; }
     catch (e) { note?.('Could not confirm order', e.message); return null; }
@@ -164,6 +176,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
   };
   const cancelOrder = async (orderId = order?.id) => {
     if (!orderId) return;
+    if (financialActionsDisabled) return note?.('Financial actions unavailable', 'The server has disabled order changes. No cancellation was submitted.');
     setLoading(true);
     try {
       const result = await apiPost(`/api/v1/deposits/orders/${encodeURIComponent(orderId)}/cancel`, {});
@@ -201,6 +214,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
     }
   };
   const submitReference = async () => {
+    if (financialActionsDisabled) return note?.('Financial actions unavailable', 'The server has disabled payment proof submission. No payment information was submitted.');
     if (ref.trim().length < 4) return note?.('Enter transaction reference', 'Enter the UTR / transaction reference from your payment app before submitting proof.');
     const match = claimedRupees.trim().match(/^(\d+)(?:\.(\d{1,2}))?$/);
     const claimedAmountPaise = match ? Number(match[1]) * 100 + Number((match[2] || '').padEnd(2, '0')) : 0;
@@ -246,7 +260,9 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
   const amountError = amountAboveMax ? 'Maximum deposit is ₹10,000.' : amountBelowMin ? `Minimum deposit is ${money(minDepositPaise)}.` : 'Enter an amount in ₹100 multiples, such as ₹100, ₹200, or ₹500.';
   const showDepositError = () => note?.('Invalid deposit amount', amountError);
   const createStandardDeposit = () => {
+    if (financialActionsDisabled) return note?.('Financial actions unavailable', 'The server has disabled deposits. No deposit was created.');
     if (!standardAmountValid) return showDepositError();
+    if (!config?.receiverVpa) return note?.('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. No deposit was created.');
     return create();
   };
   const errorColor = colors.red || '#EF4444';
@@ -273,17 +289,19 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
     <TextInput accessibilityLabel="UPI transaction reference" value={ref} onChangeText={setRef} placeholder="UTR / transaction reference (required)" placeholderTextColor={colors.muted} style={[styles.reference, { color: colors.ink, borderColor: colors.line, backgroundColor: colors.surface }]} />
     <TextInput accessibilityLabel="Claimed payment amount in rupees" value={claimedRupees} onChangeText={setClaimedRupees} keyboardType="decimal-pad" placeholder="Amount paid (₹)" placeholderTextColor={colors.muted} style={[styles.reference, { color: colors.ink, borderColor: colors.line, backgroundColor: colors.surface }]} />
     <TextInput accessibilityLabel="Payment time" value={claimedPaidAt} onChangeText={setClaimedPaidAt} placeholder="YYYY-MM-DD HH:mm (local time)" placeholderTextColor={colors.muted} style={[styles.reference, { color: colors.ink, borderColor: colors.line, backgroundColor: colors.surface }]} />
-    <TouchableOpacity disabled={loading} onPress={selectPaymentScreenshot} style={[styles.secondaryButton, { borderColor: colors.line }]}><Text style={{ color: colors.cyan, fontWeight: '900' }}>{proofImage ? 'Change payment screenshot' : 'Upload payment screenshot'}</Text></TouchableOpacity>
+    <TouchableOpacity disabled={loading || financialActionsDisabled} onPress={selectPaymentScreenshot} style={[styles.secondaryButton, { borderColor: colors.line, opacity: financialActionsDisabled ? 0.55 : 1 }]}><Text style={{ color: colors.cyan, fontWeight: '900' }}>{proofImage ? 'Change payment screenshot' : 'Upload payment screenshot'}</Text></TouchableOpacity>
     {proofImage && <Image source={{ uri: proofImage.uri }} resizeMode="contain" accessibilityLabel="Selected payment screenshot for review" style={styles.proofPreview} />}
-    <TouchableOpacity disabled={loading} onPress={submitReference} style={[styles.primary, { backgroundColor: loading ? colors.line : colors.blue }]}><Text style={styles.primaryText}>{loading ? 'Submitting…' : 'Submit proof for review'}</Text></TouchableOpacity>
+    <TouchableOpacity disabled={loading || financialActionsDisabled} onPress={submitReference} style={[styles.primary, { backgroundColor: loading || financialActionsDisabled ? colors.line : colors.blue }]}><Text style={styles.primaryText}>{loading ? 'Submitting…' : 'Submit proof for review'}</Text></TouchableOpacity>
   </View>;
   return <Animated.ScrollView ref={scrollRef} style={{ flex: 1, backgroundColor: colors.bg, opacity: entrance }} contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+    {financialActionsDisabled && <View accessibilityRole="alert" style={[styles.card, { backgroundColor: colors.warningSurface, borderColor: colors.gold }]}><Text style={[styles.cardTitle, { color: colors.warningText }]}>Financial actions are unavailable</Text><Text style={[styles.caption, { color: colors.warningText }]}>{financialOperationsReason || 'The server has disabled deposit creation, P2P matching, payment submission and order changes.'} Existing non-financial account features remain available. No payment or balance change was made.</Text></View>}
     <View style={[styles.heroImageWrap, { borderColor: colors.cyan }]}>
       <Image source={depositPromo} style={styles.heroImage} resizeMode="cover" accessibilityLabel="PaisaPay Add Money and commission promotional banner" />
     </View>
 
     <View style={[styles.card, styles.quick, { backgroundColor: colors.card, borderColor: colors.blue }]}>
-      <View style={styles.heading}><View style={[styles.quickIcon, { backgroundColor: colors.accentSurface }]}><Text style={{ color: colors.blue, fontSize: 19, fontWeight: '900' }}>↗</Text></View><View style={{ flex: 1 }}><Text style={[styles.cardTitle, { color: colors.ink }]}>Quick Deposit</Text><Text style={[styles.caption, { color: colors.muted }]}>Exact amount match · Up to 7 seconds</Text></View><View style={[styles.liveBadge, { backgroundColor: colors.successSurface }]}><View style={[styles.liveDot, { backgroundColor: colors.green }]} /><Text style={{ color: colors.green, fontSize: 8, fontWeight: '900' }}>LIVE</Text></View></View>
+      <View style={styles.heading}><View style={[styles.quickIcon, { backgroundColor: colors.accentSurface }]}><Text style={{ color: colors.blue, fontSize: 19, fontWeight: '900' }}>↗</Text></View><View style={{ flex: 1 }}><Text style={[styles.cardTitle, { color: colors.ink }]}>Quick Deposit</Text><Text style={[styles.caption, { color: colors.muted }]}>Exact amount match · Up to 7 seconds</Text></View><View accessibilityLabel={`Quick Deposit ${financialActionsDisabled ? 'unavailable' : 'available'}`} style={[styles.liveBadge, { backgroundColor: financialActionsDisabled ? colors.warningSurface : colors.successSurface }]}><View style={[styles.liveDot, { backgroundColor: financialActionsDisabled ? colors.warningText : colors.green }]} /><Text style={{ color: financialActionsDisabled ? colors.warningText : colors.green, fontSize: 8, fontWeight: '900' }}>{financialActionsDisabled ? 'UNAVAILABLE' : 'AVAILABLE'}</Text></View></View>
+      {financialActionsDisabled && <Text style={[styles.caption, { color: colors.warningText }]}>{financialOperationsReason || 'Quick Deposit matching is disabled by the server.'}</Text>}
       <View style={styles.amountHeading}><Text style={[styles.amountLabel, { color: colors.ink }]}>Amount to deposit</Text><Text style={[styles.amountRange, { color: colors.muted }]}>₹100–₹10,000</Text></View>
       <View style={[styles.amountBox, { backgroundColor: colors.bg, borderColor: amountInvalid ? errorColor : colors.line }]}><Text style={[styles.rupee, { color: colors.cyan }]}>₹</Text><TextInput accessibilityLabel="Quick deposit amount in rupees" value={amount} onChangeText={setAmount} keyboardType="number-pad" placeholder="100" placeholderTextColor={colors.muted} style={[styles.amountInput, { color: colors.ink }]} /></View>
       {amountInvalid && <Text accessibilityRole="alert" style={[styles.amountError, { color: errorColor }]}>{amountError}</Text>}
@@ -297,7 +315,7 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
           <Text style={[styles.caption, { color: colors.muted }]}>Reward is an estimate, not immediate or guaranteed. It is credited only after payment receipt is independently verified and the reward pool has sufficient funds.</Text>
         </> : <Text style={[styles.caption, { color: colors.muted }]}>Choose or enter an amount in ₹100 steps to see the payment and 6% reward estimate.</Text>}
       </View>
-      <TouchableOpacity accessibilityRole="button" disabled={loading || working} onPress={() => quickAmountValid ? match() : showDepositError()} style={[styles.primary, { backgroundColor: loading || working ? colors.line : colors.blue }]}><Text style={styles.primaryText}>{loading ? 'Finding a match…' : 'Continue'}</Text></TouchableOpacity>
+      <TouchableOpacity accessibilityRole="button" disabled={loading || working || financialActionsDisabled} onPress={() => quickAmountValid ? match() : showDepositError()} style={[styles.primary, { backgroundColor: loading || working || financialActionsDisabled ? colors.line : colors.blue }]}><Text style={styles.primaryText}>{financialActionsDisabled ? 'Temporarily unavailable' : loading ? 'Finding a match…' : 'Continue'}</Text></TouchableOpacity>
       {order && <View onLayout={(event) => { orderDetailsY.current = event.nativeEvent.layout.y; }} style={[styles.orderCard, { backgroundColor: colors.surface, borderColor: matchedNoticeOrderId === order.id ? colors.green : colors.line }]}>
         {matchedNoticeOrderId === order.id && <Animated.Text accessibilityRole="alert" style={[styles.matchSuccessText, { color: colors.green, opacity: matchSuccessOpacity }]}>✓ Your order is matched</Animated.Text>}
         <Text style={[styles.cardTitle, { color: colors.ink }]}>Matched order</Text>
@@ -329,10 +347,10 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
         </> : payeeVpa ? <>
           <View style={[styles.payee, { borderColor: colors.line }]}><Text style={[styles.caption, { color: colors.muted }]}>Seller-provided account name · unverified</Text><Text style={[styles.payeeText, { color: colors.ink }]}>{payeeName}</Text><Text style={[styles.caption, { color: colors.muted, marginTop: 8 }]}>UPI ID</Text><Text selectable style={[styles.payeeText, { color: colors.ink }]}>{payeeVpa}</Text></View>
           <Text style={[styles.warningCopy, { color: colors.warningText }]}>Payment verification is manual. A UPI app success screen or UTR does not prove receipt or credit your wallet. Do not share your UPI PIN or OTP.</Text>
-          {!order.paymentHandoffStartedAt && !order.timestamps?.paymentHandoffInitiatedAt ? <View style={styles.orderActions}><TouchableOpacity disabled={loading || order.status !== 'PAYMENT_PENDING'} onPress={payNow} style={[styles.primary, styles.orderActionButton, { backgroundColor: colors.blue, opacity: loading || order.status !== 'PAYMENT_PENDING' ? 0.55 : 1 }]}><Text style={styles.primaryText}>{loading ? 'Opening…' : `Pay Now · ${money(order.amountPaise)}`}</Text></TouchableOpacity>{order.status === 'PAYMENT_PENDING' && <TouchableOpacity disabled={loading} onPress={() => cancelOrder()} style={[styles.cancelOrderButton, styles.orderActionButton, { borderColor: colors.line, opacity: loading ? 0.65 : 1 }]}><Text style={{ color: colors.warningText, fontWeight: '900' }}>Cancel order</Text></TouchableOpacity>}</View> : <Text style={[styles.caption, { color: colors.cyan, marginTop: 8 }]}>Payment handoff was recorded. Do not pay again. If your payment is complete, submit its UTR and screenshot for Finance review.</Text>}
+          {!order.paymentHandoffStartedAt && !order.timestamps?.paymentHandoffInitiatedAt ? <View style={styles.orderActions}><TouchableOpacity disabled={loading || financialActionsDisabled || order.status !== 'PAYMENT_PENDING'} onPress={payNow} style={[styles.primary, styles.orderActionButton, { backgroundColor: colors.blue, opacity: loading || financialActionsDisabled || order.status !== 'PAYMENT_PENDING' ? 0.55 : 1 }]}><Text style={styles.primaryText}>{financialActionsDisabled ? 'Temporarily unavailable' : loading ? 'Opening…' : `Pay Now · ${money(order.amountPaise)}`}</Text></TouchableOpacity>{order.status === 'PAYMENT_PENDING' && <TouchableOpacity disabled={loading || financialActionsDisabled} onPress={() => cancelOrder()} style={[styles.cancelOrderButton, styles.orderActionButton, { borderColor: colors.line, opacity: loading || financialActionsDisabled ? 0.55 : 1 }]}><Text style={{ color: colors.warningText, fontWeight: '900' }}>Cancel order</Text></TouchableOpacity>}</View> : <Text style={[styles.caption, { color: colors.cyan, marginTop: 8 }]}>Payment handoff was recorded. Do not pay again. If your payment is complete, submit its UTR and screenshot for Finance review.</Text>}
           {(order.paymentHandoffStartedAt || order.timestamps?.paymentHandoffInitiatedAt) && <Text style={[styles.caption, { color: colors.cyan, marginTop: 8 }]}>PAYMENT PENDING · Returning from the UPI app is not payment confirmation.</Text>}
           {renderPaymentProofForm()}
-        </> : order.status === 'PAYMENT_PROCESSING' ? <><Text style={[styles.successCopy, { color: colors.warningText }]}>PAYMENT SUBMITTED · PENDING ADMIN REVIEW</Text><Text style={[styles.caption, { color: colors.muted }]}>Do not pay again. Contact support if you need help with this order.</Text><TouchableOpacity accessibilityRole="button" onPress={() => go('Support', { subject: `Payment status help · ${order.referenceId}`, message: `Order ID: ${order.id}\nOrder reference: ${order.referenceId}\nAmount: ${money(order.amountPaise)}\nStatus: ${order.status}\nPlease help me with this payment status.` })} style={[styles.secondaryButton, { borderColor: colors.line }]}><Text style={{ color: colors.cyan, fontWeight: '900' }}>Contact Support</Text></TouchableOpacity></> : <><Text style={[styles.warningCopy, { color: colors.warningText }]}>Pay Now opens the UPI handoff. You can cancel this match before the UPI app opens.</Text><View style={styles.orderActions}><TouchableOpacity disabled={loading || order.status !== 'MATCHED'} onPress={payNow} style={[styles.primary, styles.orderActionButton, { backgroundColor: colors.blue, opacity: loading || order.status !== 'MATCHED' ? 0.55 : 1 }]}><Text style={styles.primaryText}>{loading ? 'Opening…' : `Pay Now · ${money(order.amountPaise)}`}</Text></TouchableOpacity>{order.status === 'MATCHED' && <TouchableOpacity disabled={loading} onPress={() => cancelOrder()} style={[styles.cancelOrderButton, styles.orderActionButton, { borderColor: colors.line, opacity: loading ? 0.65 : 1 }]}><Text style={{ color: colors.warningText, fontWeight: '900' }}>Cancel order</Text></TouchableOpacity>}</View></>}
+        </> : order.status === 'PAYMENT_PROCESSING' ? <><Text style={[styles.successCopy, { color: colors.warningText }]}>PAYMENT SUBMITTED · PENDING ADMIN REVIEW</Text><Text style={[styles.caption, { color: colors.muted }]}>Do not pay again. Contact support if you need help with this order.</Text><TouchableOpacity accessibilityRole="button" onPress={() => go('Support', { subject: `Payment status help · ${order.referenceId}`, message: `Order ID: ${order.id}\nOrder reference: ${order.referenceId}\nAmount: ${money(order.amountPaise)}\nStatus: ${order.status}\nPlease help me with this payment status.` })} style={[styles.secondaryButton, { borderColor: colors.line }]}><Text style={{ color: colors.cyan, fontWeight: '900' }}>Contact Support</Text></TouchableOpacity></> : <><Text style={[styles.warningCopy, { color: colors.warningText }]}>Pay Now opens the UPI handoff. You can cancel this match before the UPI app opens.</Text><View style={styles.orderActions}><TouchableOpacity disabled={loading || financialActionsDisabled || order.status !== 'MATCHED'} onPress={payNow} style={[styles.primary, styles.orderActionButton, { backgroundColor: colors.blue, opacity: loading || financialActionsDisabled || order.status !== 'MATCHED' ? 0.55 : 1 }]}><Text style={styles.primaryText}>{financialActionsDisabled ? 'Temporarily unavailable' : loading ? 'Opening…' : `Pay Now · ${money(order.amountPaise)}`}</Text></TouchableOpacity>{order.status === 'MATCHED' && <TouchableOpacity disabled={loading || financialActionsDisabled} onPress={() => cancelOrder()} style={[styles.cancelOrderButton, styles.orderActionButton, { borderColor: colors.line, opacity: loading || financialActionsDisabled ? 0.55 : 1 }]}><Text style={{ color: colors.warningText, fontWeight: '900' }}>Cancel order</Text></TouchableOpacity>}</View></>}
         <Modal visible={receiptVisible && order.status === 'COMPLETED'} transparent animationType="slide" onRequestClose={() => setReceiptVisible(false)}><View style={styles.matchBackdrop}><View style={[styles.matchModal, { backgroundColor: colors.card, borderColor: colors.line }]}><Text style={[styles.cardTitle, { color: colors.ink }]}>PaisaPay payment receipt</Text><Text style={[styles.detail, { color: colors.muted }]}>Order ID · <Text style={{ color: colors.ink, fontWeight: '800' }}>{order.referenceId}</Text></Text><Text style={[styles.detail, { color: colors.muted }]}>Verified deposit · <Text style={{ color: colors.ink, fontWeight: '800' }}>{money(order.amountPaise)}</Text></Text>{Number(order.reward?.creditedPaise || 0) > 0 && <Text style={[styles.detail, { color: colors.muted }]}>Reward credited · <Text style={{ color: colors.green, fontWeight: '800' }}>{money(order.reward.creditedPaise)}</Text></Text>}<Text style={[styles.detail, { color: colors.muted }]}>Total wallet credit · <Text style={{ color: colors.ink, fontWeight: '900' }}>{money(Number(order.amountPaise) + Number(order.reward?.creditedPaise || 0))}</Text></Text><Text style={[styles.detail, { color: colors.muted }]}>Status · <Text style={{ color: colors.green, fontWeight: '900' }}>COMPLETED</Text></Text><TouchableOpacity onPress={() => setReceiptVisible(false)} style={[styles.primary, { backgroundColor: colors.blue }]}><Text style={styles.primaryText}>Done</Text></TouchableOpacity></View></View></Modal>
       </View>}
       <Text style={[styles.small, { color: colors.muted }]}>Wallet credit happens only after Finance independently confirms the seller received the exact INR payment in bank records.</Text>
@@ -346,10 +364,12 @@ export default function DepositScreen({ amount, setAmount, create, go, balance, 
       <Text style={[styles.cardTitle, { color: colors.ink }]}>Standard UPI deposit</Text><Text style={[styles.caption, { color: colors.muted, marginTop: 4 }]}>This remains pending until Finance verifies receipt. UPI app callbacks do not count as proof.</Text>
       <Text style={[styles.detail, { color: colors.muted, marginTop: 12 }]}>Available wallet balance · <Text style={{ color: colors.ink, fontWeight: '800' }}>{money(balance)}</Text></Text>
       <Text style={[styles.detail, { color: colors.muted }]}>Receiver · <Text selectable style={{ color: colors.ink, fontWeight: '800' }}>{config?.receiverVpa || 'Not configured'}</Text></Text>
-      <TouchableOpacity onPress={async () => { try { await Clipboard.setStringAsync(config?.receiverVpa || ''); note?.('Copied', 'PaisaPay receiver UPI ID copied.'); } catch { note?.('Copy unavailable', config?.receiverVpa || 'Receiver is not configured.'); } }} style={[styles.secondaryButton, { borderColor: colors.line }]}><Text style={{ color: colors.cyan, fontWeight: '900' }}>Copy receiver UPI ID</Text></TouchableOpacity>
+      <TouchableOpacity disabled={!config?.receiverVpa} onPress={async () => { if (!config?.receiverVpa) return note?.('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. Do not make a payment.'); try { await Clipboard.setStringAsync(config.receiverVpa); note?.('Copied', 'PaisaPay receiver UPI ID copied.'); } catch { note?.('Copy unavailable', config.receiverVpa); } }} style={[styles.secondaryButton, { borderColor: colors.line, opacity: config?.receiverVpa ? 1 : 0.55 }]}><Text style={{ color: colors.cyan, fontWeight: '900' }}>Copy receiver UPI ID</Text></TouchableOpacity>
       <View style={[styles.amountBox, { backgroundColor: colors.bg, borderColor: amountInvalid ? errorColor : colors.line }]}><Text style={[styles.rupee, { color: colors.cyan }]}>₹</Text><TextInput accessibilityLabel="Deposit amount in rupees" value={amount} onChangeText={setAmount} keyboardType="number-pad" placeholder="100" placeholderTextColor={colors.muted} style={[styles.amountInput, { color: colors.ink }]} /></View>
       {amountInvalid && <Text accessibilityRole="alert" style={[styles.amountError, { color: errorColor }]}>{amountError}</Text>}
-      <TouchableOpacity onPress={createStandardDeposit} disabled={working} style={[styles.primary, { backgroundColor: colors.blue }]}><Text style={styles.primaryText}>{working ? 'Creating…' : 'Create pending deposit'}</Text></TouchableOpacity>
+      {!config?.receiverVpa && <Text style={[styles.caption, { color: colors.red || '#EF4444', marginTop: 8 }]}>UPI deposits are unavailable until a recipient is configured. Do not send money.</Text>}
+      <TouchableOpacity onPress={createStandardDeposit} disabled={working || !config?.receiverVpa || financialActionsDisabled} style={[styles.primary, { backgroundColor: colors.blue, opacity: !config?.receiverVpa || financialActionsDisabled ? 0.55 : 1 }]}><Text style={styles.primaryText}>{financialActionsDisabled ? 'Temporarily unavailable' : working ? 'Creating…' : 'Create pending deposit'}</Text></TouchableOpacity>
+      {financialActionsDisabled && <Text style={[styles.caption, { color: colors.warningText, marginTop: 8 }]}>{financialOperationsReason || 'Standard deposits are disabled by the server.'}</Text>}
       <TouchableOpacity onPress={() => go('Deposit History')} style={[styles.secondaryButton, { borderColor: colors.line }]}><Text style={{ color: colors.ink, fontWeight: '800' }}>View deposit history</Text></TouchableOpacity>
     </View>}
     <Modal visible={matching} transparent animationType="fade" onRequestClose={() => {}}>

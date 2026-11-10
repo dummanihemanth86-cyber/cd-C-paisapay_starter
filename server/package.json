@@ -13,6 +13,8 @@
     "typecheck": "npm run db:generate && tsc --noEmit -p tsconfig.build.json",
     "test": "vitest run --maxWorkers=1 --no-file-parallelism",
     "test:staging-wallet-credit": "vitest run src/tests/stagingWalletCredit.e2e.test.ts --maxWorkers=1 --no-file-parallelism",
+    "admin:password-reset:staging": "tsx scripts/stagingAdminPasswordReset.ts",
+    "admin:bootstrap:staging:single": "tsx scripts/stagingSuperAdminBootstrap.ts",
     "db": "npm run db:deploy",
     "db:generate": "prisma generate --config prisma.config.ts",
     "db:migrate": "prisma migrate dev",

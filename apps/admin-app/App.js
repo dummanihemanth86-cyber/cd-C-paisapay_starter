@@ -5,6 +5,7 @@ import Constants from 'expo-constants';
 import { isRunningInExpoGo } from 'expo';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import AdminUpdateBanner from './AdminUpdateBanner';
+const { resolveAdminApiBaseUrl } = require('./apiEnvironment.cjs');
 const { createAdminSessionStorage } = require('./adminSessionStorage.cjs');
 import responseHelpers from './responseHelpers.cjs';
 const { adminRecordDetailPath } = require('../../shared/adminRecordNavigation.cjs');
@@ -15,16 +16,11 @@ const { requestAdminPasswordResetOtp: requestAdminResetFlow, submitAdminPassword
 const { canDecideWalletRequest, canRequestWalletCredit, canDirectWalletCredit } = require('./walletCreditCapabilities.cjs');
 
 
-const API = (process.env.EXPO_PUBLIC_API_URL || 'https://paisapay-api-staging.onrender.com').trim().replace(/\/$/, '');
-if (!__DEV__ && !API.startsWith('https://')) throw new Error('PaisaPay Admin production builds require an HTTPS API URL.');
-if (!__DEV__) {
-  try {
-    const apiOrigin = new URL(API);
-    if (apiOrigin.origin !== API) throw new Error('PaisaPay Admin production API URL must be an HTTPS origin without a path.');
-  } catch (error) {
-    throw new Error(error?.message || 'PaisaPay Admin production API URL is invalid.');
-  }
-}
+const API = resolveAdminApiBaseUrl({
+  apiUrl: process.env.EXPO_PUBLIC_API_URL,
+  deploymentEnv: process.env.EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV,
+  isDev: __DEV__,
+});
 const ACCESS_KEY = 'paisapay.admin.access';
 const REFRESH_KEY = 'paisapay.admin.refresh';
 const IS_EXPO_GO = isRunningInExpoGo();
@@ -38,7 +34,7 @@ const adminSessionStorage = createAdminSessionStorage({
   getWebStorage: () => typeof window === 'undefined' ? null : window.sessionStorage,
 });
 const ADMIN_BUILD_CODE = Number(process.env.EXPO_PUBLIC_ADMIN_BUILD_CODE || Constants.expoConfig?.android?.versionCode || 0);
-const IS_STAGING_BUILD = process.env.EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV === 'staging' || API === 'https://paisapay-api-staging.onrender.com';
+const IS_STAGING_BUILD = process.env.EXPO_PUBLIC_ADMIN_DEPLOYMENT_ENV === 'staging';
 const { asArray, asRecord, normalizeListPayload, normalizeP2pPayload, normalizeSupportTicket } = responseHelpers;
 const { paginationState, formatPaise } = responseHelpers;
 const { createAdminApiClient } = require('./sessionApiClient.cjs');

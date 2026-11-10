@@ -11,6 +11,8 @@ const integration = describe.skipIf(!prisma);
 
 integration('UPI profile and manual deposit reconciliation (PostgreSQL integration)', () => {
   const db = prisma!;
+  const previousDepositReceiver = env.depositReceiverUpiId;
+  const previousFinancialOperationsEnabled = env.financialOperationsEnabled;
   const customerPhone = `+919${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '7')}`;
   const adminPhone = `+918${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '6')}`;
   const referrerPhone = `+917${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '5')}`;
@@ -34,6 +36,8 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
 
   beforeAll(async () => {
     await db.$connect();
+    env.financialOperationsEnabled = true;
+    env.depositReceiverUpiId = 'test-only@okaxis';
     const [customer, admin, referrer, ancestor] = await Promise.all([
       db.user.create({ data: { phoneE164: customerPhone, displayName: 'UPI Test Customer' } }),
       db.user.create({ data: { phoneE164: adminPhone, displayName: 'Finance Test Reviewer', status: 'ACTIVE' } }),
@@ -73,6 +77,8 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
   });
 
   afterAll(async () => {
+    env.financialOperationsEnabled = previousFinancialOperationsEnabled;
+    env.depositReceiverUpiId = previousDepositReceiver;
     if (!customerId || !adminId) return;
     await db.$transaction(async (tx) => {
       if (originalProgram) await tx.referralProgramConfig.update({ where: { id: 1 }, data: originalProgram });
@@ -138,7 +144,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     const pendingDeposit = await db.deposit.findUniqueOrThrow({ where: { id: depositId } });
     expect(pendingDeposit.method).toBe('UPI');
     expect(pendingDeposit.status).toBe('PENDING_PAYMENT');
-    expect(receiverVpa).toBe('zitch@ptyes');
+    expect(receiverVpa).toBe('test-only@okaxis');
     expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(0);
 
     const savedUpi = await request(app).patch('/api/v1/users/me/upi').set(customerAuth).send({ displayName: 'Customer Name', upiId: 'customer@bank' }).expect(200);
@@ -162,12 +168,16 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     expect(claimResponse.body.deposit.status).toBe('PAYMENT_PROCESSING');
     expect((await request(app).get('/api/v1/admin/reconciliation/claims').set(customerAuth).expect(403)).body.error.code).toBe('ADMIN_REQUIRED');
 
-    const list = await request(app).get('/api/v1/admin/reconciliation/claims').set(adminAuth).expect(200);
+    const list = await request(app).get('/api/v1/admin/reconciliation/claims?page=1&pageSize=100').set(adminAuth).expect(200);
+    expect(list.body).toMatchObject({ page: 1, pageSize: 100 });
+    expect(list.body.total).toBeGreaterThanOrEqual(1);
     const listedClaim = list.body.claims.find((claim: { id: string }) => claim.id === claimResponse.body.claim.id);
     expect(listedClaim).toBeTruthy();
     expect(listedClaim.transactionReference).toBeNull();
     expect(listedClaim.evidenceMimeType).toBe('image/png');
     expect(listedClaim).not.toHaveProperty('evidenceImage');
+    const pastEnd = await request(app).get(`/api/v1/admin/reconciliation/claims?page=${Math.ceil(list.body.total / 100) + 1}&pageSize=100`).set(adminAuth).expect(200);
+    expect(pastEnd.body).toMatchObject({ claims: [], total: list.body.total, pageSize: 100 });
     const evidence = await request(app).get(`/api/v1/admin/reconciliation/claims/${claimResponse.body.claim.id}/evidence`).set(adminAuth).expect(200);
     expect(evidence.headers['content-type']).toMatch(/image\/png/);
     expect(evidence.headers['cache-control']).toContain('no-store');

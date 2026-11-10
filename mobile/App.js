@@ -42,6 +42,8 @@
   var _expoSecureStore = require("expo-secure-store");
   var SecureStore = _interopNamespace(_expoSecureStore);
   var _srcApi = require("./src/api");
+  var _financialApiFallback = require("./src/financialApiFallback.cjs");
+  var _walletBalanceRefresh = require("./src/walletBalanceRefresh.cjs");
   var _ultraHome = _interopDefault(require("./src/UltraHome"));
   var _vipLevelsScreen = _interopDefault(require("./src/VipLevelsScreen"));
   var _toastNotice = _interopDefault(require("./src/ToastNotice"));
@@ -53,7 +55,7 @@
   var _referralScreens = require("./src/ReferralScreens");
   var _profileScreen = _interopDefault(require("./src/ProfileScreen"));
   var _birdAssistant = _interopDefault(require("./src/bird/BirdAssistant"));
-  var _reactJsxDevRuntime = require("react/jsx-dev-runtime");
+  var _reactJsxRuntime = require("react/jsx-runtime");
   var PALETTES = {
     dark: {
       navy: '#07152E',
@@ -134,7 +136,7 @@
     availabilityMessage: 'Checking Cashfree sandbox configuration.'
   }];
   var DEFAULT_UPI_DEPOSIT = {
-    receiverVpa: 'zitch@ptyes',
+    receiverVpa: null,
     minAmountPaise: 1000,
     maxAmountPaise: 5000000,
     automaticVerificationAvailable: false,
@@ -340,6 +342,14 @@
       _useState36 = (0, _slicedToArray.default)(_useState35, 2),
       withdrawals = _useState36[0],
       setWithdrawals = _useState36[1];
+    var _financialOpsState = (0, _react.useState)(null),
+      _financialOpsPair = (0, _slicedToArray.default)(_financialOpsState, 2),
+      financialOperationsEnabled = _financialOpsPair[0],
+      setFinancialOperationsEnabled = _financialOpsPair[1];
+    var _financialReasonState = (0, _react.useState)('Availability could not be confirmed from the server. Financial actions remain disabled.'),
+      _financialReasonPair = (0, _slicedToArray.default)(_financialReasonState, 2),
+      financialOperationsReason = _financialReasonPair[0],
+      setFinancialOperationsReason = _financialReasonPair[1];
     var _useState37 = (0, _react.useState)([]),
       _useState38 = (0, _slicedToArray.default)(_useState37, 2),
       bankAccounts = _useState38[0],
@@ -446,8 +456,32 @@
       setToast = _useStateToastPair[1];
     var note = (title, msg) => {
       var safeTitle = String(title || 'PaisaPay');
-      setToast({ id: Date.now(), title: safeTitle, message: String(msg || '') });
+      var safeMessage = String(msg || '');
+      var canCheckServer = /PaisaPay (?:is temporarily unavailable|could not be reached|is responding slowly)|server.*respond|cannot reach/i.test(safeMessage);
+      setToast({ id: Date.now(), title: safeTitle, message: safeMessage, persistent: canCheckServer, canCheckServer });
     };
+    _react.useEffect(() => _srcApi.setApiNetworkObserver(event => {
+      if (event.state === 'retrying') {
+        setToast({ id: Date.now(), title: 'Reconnecting to PaisaPay', message: `Retry ${event.attempt} of ${event.maxRetries} · waiting briefly before trying again.`, persistent: true });
+      } else if (event.state === 'connected') {
+        setToast({ id: Date.now(), title: 'Connection restored', message: 'PaisaPay responded. Check the latest transaction status before repeating an action.' });
+      } else if (event.state === 'unavailable') {
+        setToast({ id: Date.now(), title: 'PaisaPay server unavailable', message: 'Check your phone’s internet connection, then check the server before retrying an action.', persistent: true, canCheckServer: true });
+      }
+    }), []);
+    var checkApiConnection = /*#__PURE__*/function () {
+      var _refHealth = (0, _asyncToGenerator.default)(function* () {
+        setToast({ id: Date.now(), title: 'Checking PaisaPay server', message: 'Checking the API and database connection…', persistent: true, checkingServer: true, canCheckServer: true });
+        try {
+          var health = yield (0, _srcApi.apiGet)('/ready', { auth: false, timeoutMs: 15000, totalTimeoutMs: 30000, transientRetries: 1 });
+          if (health?.ok !== true) throw new Error('The API is responding, but database readiness was not confirmed.');
+          setToast({ id: Date.now(), title: 'PaisaPay server ready', message: 'API and database are responding. Check your action’s status before submitting it again.' });
+        } catch (error) {
+          setToast({ id: Date.now(), title: 'PaisaPay server unavailable', message: error?.message || 'Could not reach the API. Check internet and try checking again.', persistent: true, canCheckServer: true });
+        }
+      });
+      return function checkApiConnection() { return _refHealth.apply(this, arguments); };
+    }();
     var refreshVip = () => (0, _srcApi.apiGet)('/api/v1/users/me/vip').then(data => {
       setVipStatus(data);
       return data;
@@ -458,13 +492,22 @@
     });
     var loadPrivateData = /*#__PURE__*/function () {
       var _ref2 = (0, _asyncToGenerator.default)(function* () {
-        var _yield$Promise$all = yield Promise.all([(0, _srcApi.apiGet)('/api/v1/users/me'), (0, _srcApi.apiGet)('/api/v1/users/me/balance'), (0, _srcApi.apiGet)('/api/v1/deposits'), (0, _srcApi.apiGet)('/api/v1/orders'), (0, _srcApi.apiGet)('/api/v1/withdrawals'), (0, _srcApi.apiGet)('/api/v1/users/me/transactions'), (0, _srcApi.apiGet)('/api/v1/support/tickets'), (0, _srcApi.apiGet)('/api/v1/notifications'), (0, _srcApi.apiGet)('/api/v1/users/me/referrals'), (0, _srcApi.apiGet)('/api/v1/wallet-methods'), (0, _srcApi.apiGet)('/api/v1/users/me/upi'), (0, _srcApi.apiGet)('/api/v1/users/me/bank-accounts')]),
+        setFinancialOperationsEnabled(false);
+        setFinancialOperationsReason('Availability could not be confirmed from the server. Financial actions remain disabled.');
+        var walletBalanceRequest = (0, _walletBalanceRefresh.refreshWalletBalance)(() => (0, _srcApi.apiGet)('/api/v1/users/me/balance'), balance => {
+          setBalance(balance.availablePaise);
+          setPendingBalance(balance.pendingPaise);
+          setReservedBalance(balance.reservedPaise);
+          setWithdrawalPendingBalance(balance.withdrawalPendingPaise);
+          setRewardProfitPaise(balance.rewardProfitPaise || 0);
+        });
+        var _yield$Promise$all = yield Promise.all([(0, _srcApi.apiGet)('/api/v1/users/me'), walletBalanceRequest, (0, _srcApi.apiGet)('/api/v1/deposits'), (0, _financialApiFallback.loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/orders'), { orders: [] }), (0, _financialApiFallback.loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/withdrawals'), { withdrawals: [], offers: [] }), (0, _srcApi.apiGet)('/api/v1/users/me/transactions'), (0, _srcApi.apiGet)('/api/v1/support/tickets'), (0, _srcApi.apiGet)('/api/v1/notifications'), (0, _srcApi.apiGet)('/api/v1/users/me/referrals'), (0, _srcApi.apiGet)('/api/v1/wallet-methods'), (0, _srcApi.apiGet)('/api/v1/users/me/upi'), (0, _srcApi.apiGet)('/api/v1/users/me/bank-accounts')]),
           _yield$Promise$all2 = (0, _slicedToArray.default)(_yield$Promise$all, 12),
           me = _yield$Promise$all2[0],
           b = _yield$Promise$all2[1],
           ds = _yield$Promise$all2[2],
-          os = _yield$Promise$all2[3],
-          wd = _yield$Promise$all2[4],
+          orderResult = _yield$Promise$all2[3],
+          withdrawalResult = _yield$Promise$all2[4],
           ts = _yield$Promise$all2[5],
           tk = _yield$Promise$all2[6],
           ns = _yield$Promise$all2[7],
@@ -486,6 +529,11 @@
         setUpiInput(upi.upiId || '');
         setUpiNameInput(upi.displayName || '');
         setUpiDepositConfig(methodConfig.upiDeposit || DEFAULT_UPI_DEPOSIT);
+        var os = orderResult.value;
+        var wd = withdrawalResult.value;
+        var financialAvailability = _financialApiFallback.financialAvailability(methodConfig, orderResult, withdrawalResult);
+        setFinancialOperationsEnabled(financialAvailability.enabled);
+        setFinancialOperationsReason(financialAvailability.reason);
         setOrders((os.orders || []).map(o => ({
           ...o,
           kind: o.kind === 'BUY' ? 'Buy' : 'Sell',
@@ -593,6 +641,8 @@
           setOrders([]);
           setDeposits([]);
           setWithdrawals([]);
+          setFinancialOperationsEnabled(null);
+          setFinancialOperationsReason('Availability could not be confirmed from the server. Financial actions remain disabled.');
           setBankAccounts([]);
           setTransactions([]);
           setTickets([]);
@@ -607,6 +657,8 @@
         try {
           yield loadPrivateData();
         } catch (e) {
+          setFinancialOperationsEnabled(false);
+          setFinancialOperationsReason('Availability could not be confirmed from the server. Financial actions remain disabled.');
           note('Could not refresh', e.message || 'Check the API connection.');
         }
       });
@@ -724,6 +776,7 @@
         var min = Number(upiDepositConfig.minAmountPaise ?? DEFAULT_UPI_DEPOSIT.minAmountPaise);
         var max = Number(upiDepositConfig.maxAmountPaise ?? DEFAULT_UPI_DEPOSIT.maxAmountPaise);
         if (!Number.isFinite(n) || !Number.isSafeInteger(paise) || paise < min || paise > max) return note('Check amount', `Enter an amount from ${money(min)} to ${money(max)}.`);
+        if (!upiDepositConfig.receiverVpa) return note('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. No deposit was created.');
         try {
           setWorking(true);
           var x = yield (0, _srcApi.apiPost)('/api/v1/deposits', {
@@ -731,7 +784,8 @@
             method: 'UPI'
           }, `upi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
           var deposit = x.deposit;
-          var receiver = x.deposit.receiverVpa || upiDepositConfig.receiverVpa || DEFAULT_UPI_DEPOSIT.receiverVpa;
+          var receiver = x.deposit.receiverVpa || upiDepositConfig.receiverVpa;
+          if (!receiver) return note('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. No payment was started.');
           var paymentUri = makeUpiIntent(receiver, paise, deposit.merchantReference);
           setSelectedOrder({
             ...deposit,
@@ -842,22 +896,14 @@
       };
     }();
     var content = () => {
-      if (!logged && !['Login', 'OTP', 'Profile setup', 'Register', 'Forgot Password', 'Splash'].includes(screen)) return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Login, {
+      if (!logged && !['Login', 'OTP', 'Profile setup', 'Register', 'Forgot Password', 'Splash'].includes(screen)) return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Login, {
         onContinue: () => go('Login')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 51,
-        columnNumber: 114
-      }, this);
+      }, void 0);
       switch (screen) {
         case 'Splash':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Splash, {}, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 53,
-            columnNumber: 29
-          }, this);
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Splash, {}, void 0);
         case 'Login':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Login, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Login, {
             phone: phone,
             setPhone: setPhone,
             password: password,
@@ -894,13 +940,9 @@
             }),
             onRegister: () => go('Register'),
             onForgot: () => go('Forgot Password')
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 54,
-            columnNumber: 29
-          }, this);
+          }, void 0);
         case 'Forgot Password':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(PasswordReset, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(PasswordReset, {
             phone: phone,
             setPhone: setPhone,
             working: working,
@@ -946,13 +988,9 @@
                 return _ref14.apply(this, arguments);
               };
             }())
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 55,
-            columnNumber: 38
-          }, this);
+          }, void 0);
         case 'Register':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Register, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Register, {
             phone: phone,
             setPhone: setPhone,
             fullName: registerName,
@@ -1020,13 +1058,9 @@
               }
             }),
             onBack: () => go('Login')
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 56,
-            columnNumber: 31
-          }, this);
+          }, void 0);
         case 'OTP':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Otp, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Otp, {
             phone: phone,
             deliveryState: otpDeliveryState,
             onCheckDelivery: /*#__PURE__*/(0, _asyncToGenerator.default)(function* () {
@@ -1054,7 +1088,8 @@
                   }, undefined, {
                     auth: false
                   });
-                  yield (0, _srcApi.saveSession)(result);
+                  yield (0, _srcApi.saveSession)(result, { remember });
+                  yield (0, _srcApi.setRememberedLoginPhone)(remember ? phone.replace(/\D/g, '') : '');
                   yield loadPrivateData();
                   setLogged(true);
                   setAssistantEvent({ type: 'login', id: Date.now() });
@@ -1072,13 +1107,9 @@
                 return _ref18.apply(this, arguments);
               };
             }())
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 57,
-            columnNumber: 26
-          }, this);
+          }, void 0);
         case 'Profile setup':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Profile, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Profile, {
             name: name,
             setName: setName,
             referralCode: referralInput,
@@ -1104,13 +1135,9 @@
                 setWorking(false);
               }
             })
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 58,
-            columnNumber: 36
-          }, this);
+          }, void 0);
         case 'Home':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Home, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Home, {
             balance: balance,
             pendingBalance: pendingBalance,
             reservedBalance: reservedBalance,
@@ -1122,18 +1149,16 @@
             orders: orders,
             transactions: transactions,
             notifications: notifications,
+            financialOperationsEnabled: financialOperationsEnabled,
+            financialOperationsReason: financialOperationsReason,
             name: name,
             userId: user && user.id,
             go: go,
             reserve: reserve,
             note: note
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 59,
-            columnNumber: 27
-          }, this);
+          }, void 0);
         case 'Deposit':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Deposit, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Deposit, {
             amount: amount,
             setAmount: setAmount,
             create: createDeposit,
@@ -1142,17 +1167,15 @@
             config: upiDepositConfig,
             working: working,
             note: note,
+            financialOperationsEnabled: financialOperationsEnabled,
+            financialOperationsReason: financialOperationsReason,
             upiProfile: upiProfile,
             refresh: refreshPrivateData,
             onAssistantEvent: type => setAssistantEvent({ type, id: Date.now() })
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 60,
-            columnNumber: 30
-          }, this);
+          }, void 0);
         case 'UPI':
         case 'UPI Wallets':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(UpiSetup, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(UpiSetup, {
             upiProfile: upiProfile,
             upiInput: upiInput,
             setUpiInput: setUpiInput,
@@ -1162,14 +1185,10 @@
             removeUpiId: removeUpiId,
             working: working,
             go: go
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 61,
-            columnNumber: 48
-          }, this);
+          }, void 0);
         case 'Buy Orders':
         case 'Sell Orders':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Orders, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Orders, {
             methods: methods,
             screen: screen,
             orders: orders,
@@ -1178,13 +1197,9 @@
               setSelectedOrder(o);
               go('Order Details');
             }
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 62,
-            columnNumber: 54
-          }, this);
+          }, void 0);
         case 'Create Sell Order':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(CreateSellOrder, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(CreateSellOrder, {
             methods: methods,
             amount: amount,
             setAmount: setAmount,
@@ -1209,77 +1224,49 @@
                 setWorking(false);
               }
             })
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 63,
-            columnNumber: 40
-          }, this);
+          }, void 0);
         case 'Order Details':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(OrderDetails, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(OrderDetails, {
             order: selectedOrder,
             go: go,
             note: note,
             reserve: reserve
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 64,
-            columnNumber: 36
-          }, this);
+          }, void 0);
         case 'Team':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_referralScreens.TeamScreen, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_referralScreens.TeamScreen, {
             referrals: referrals,
             go: go,
             colors: C,
             refresh: refreshReferrals,
             note: note
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 65,
-            columnNumber: 27
-          }, this);
+          }, void 0);
         case 'Members':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_referralScreens.MembersScreen, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_referralScreens.MembersScreen, {
             referrals: referrals,
             colors: C,
             refresh: refreshReferrals
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 66,
-            columnNumber: 30
-          }, this);
+          }, void 0);
         case 'Share & Earn':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_referralScreens.ShareEarnScreen, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_referralScreens.ShareEarnScreen, {
             referrals: referrals,
             code: referrals?.referralCode || user?.referralCode,
             colors: C,
             refresh: refreshReferrals,
             note: note
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 67,
-            columnNumber: 35
-          }, this);
+          }, void 0);
         case 'VIP Levels':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_vipLevelsScreen.default, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_vipLevelsScreen.default, {
             colors: C,
             vipData: vipStatus,
             refresh: refreshVip
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 68,
-            columnNumber: 33
-          }, this);
+          }, void 0);
         case 'Daily Tasks':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Tasks, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Tasks, {
             done: taskDone,
             onClaim: () => note('Rewards unavailable', 'No funded task reward rules are configured.')
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 69,
-            columnNumber: 34
-          }, this);
+          }, void 0);
         case 'Mine':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Mine, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Mine, {
             name: name,
             accountId: user?.publicId,
             balance: balance,
@@ -1315,13 +1302,9 @@
             note: note,
             themeMode: themeMode,
             onThemeChange: applyTheme
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 70,
-            columnNumber: 27
-          }, this);
+          }, void 0);
         case 'Bills':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Bills, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Bills, {
             deposits: deposits,
             withdrawals: withdrawals,
             activity: transactions.map(t => ({
@@ -1337,13 +1320,9 @@
             withdrawalPendingBalance: withdrawalPendingBalance,
             go: go,
             colors: C
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 71,
-            columnNumber: 28
-          }, this);
+          }, void 0);
         case 'Deposit History':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_depositHistory.default, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_depositHistory.default, {
             rows: deposits,
             empty: "No deposit requests yet",
             note: note,
@@ -1351,13 +1330,9 @@
             onCancel: cancelDeposit,
             upiReceiver: upiDepositConfig.receiverVpa,
             colors: C
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 72,
-            columnNumber: 38
-          }, this);
+          }, void 0);
         case 'Withdrawals':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Withdraw, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Withdraw, {
             amount: amount,
             setAmount: setAmount,
             create: createWithdrawal,
@@ -1367,140 +1342,84 @@
             go: go,
             cancelOffer: cancelWithdrawalOffer,
             working: working,
-            note: note
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 73,
-            columnNumber: 34
-          }, this);
+            note: note,
+            financialOperationsEnabled: financialOperationsEnabled,
+            financialOperationsReason: financialOperationsReason
+          }, void 0);
         case 'Bank Accounts':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(BankAccounts, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(BankAccounts, {
             accounts: bankAccounts,
             onAdd: saveBankAccount,
             onUpdate: updateBankAccount,
             onRemove: removeBankAccount,
             working: working
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 74,
-            columnNumber: 36
-          }, this);
+          }, void 0);
         case 'Support':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Support, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Support, {
             tickets: tickets,
             setTickets: setTickets,
             note: note,
             supportContext: supportContext
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 75,
-            columnNumber: 30
-          }, this);
+          }, void 0);
         case 'FAQs':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(FAQs, {}, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 76,
-            columnNumber: 27
-          }, this);
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(FAQs, {}, void 0);
         case 'Security':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Security, {
-            note: note
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 77,
-            columnNumber: 31
-          }, this);
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Security, {
+            note: note,
+            onResetPassword: () => { logout().catch(() => {}).finally(() => go('Forgot Password')); },
+            onLogout: logout
+          }, void 0);
         case 'Notifications':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(NotificationList, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(NotificationList, {
             rows: notifications
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 78,
-            columnNumber: 36
-          }, this);
+          }, void 0);
         case 'Version Center':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Version, {}, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 79,
-            columnNumber: 37
-          }, this);
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Version, {}, void 0);
         case 'Bird Settings':
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, { title: 'Bird assistant', body: 'Change the assistant language, joke sound, size or visibility in these settings.' }, void 0, false, { fileName: _jsxFileName, lineNumber: 80, columnNumber: 22 }, this);
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, { title: 'Bird assistant', body: 'Change the assistant language, joke sound, size or visibility in these settings.' }, void 0);
         default:
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
             title: screen,
             body: "This section is not configured in the current release."
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 80,
-            columnNumber: 22
-          }, this);
+          }, void 0);
       }
     };
     var tabs = ['Home', 'Deposit', 'UPI', 'Team', 'Mine'];
     var sub = logged && !tabs.includes(screen);
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_safeAreaContext.SafeAreaView, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_safeAreaContext.SafeAreaView, {
       style: styles.safe,
       edges: ['top', 'bottom'],
       onTouchStart: () => setAssistantActivity(value => value + 1),
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.StatusBar, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.StatusBar, {
         barStyle: themeMode === 'dark' ? 'light-content' : 'dark-content',
         backgroundColor: C.navy
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 84,
-        columnNumber: 44
-      }, this), logged && screen !== 'Login' && screen !== 'OTP' && screen !== 'Profile setup' && screen !== 'Home' ? screen === 'UPI' ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), logged && screen !== 'Login' && screen !== 'OTP' && screen !== 'Profile setup' && screen !== 'Home' ? screen === 'UPI' ? /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
         style: [styles.header, {
           backgroundColor: C.navy,
           justifyContent: 'center'
         }],
-        children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: [styles.brand, {
             flex: 0,
             textAlign: 'center'
           }],
           children: "UPI"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 84,
-          columnNumber: 304
-        }, this)
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 84,
-        columnNumber: 225
-      }, this) : /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        }, void 0)
+      }, void 0) : /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: styles.header,
-        children: [sub && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+        children: [sub && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
           onPress: () => go(tab),
-          children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.back,
             children: "\u2039"
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 84,
-            columnNumber: 453
-          }, this)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 84,
-          columnNumber: 413
-        }, this), /*#__PURE__*/_react.createElement(_reactNative.View, { style: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8 } }, _react.createElement(_reactNative.Image, { source: require('./assets/paisapay-neon-logo.png'), style: { width: 34, height: 34, borderRadius: 8 } }), _react.createElement(_reactNative.Text, { style: styles.brand }, 'PaisaPay')), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0)
+        }, void 0), /*#__PURE__*/_react.createElement(_reactNative.View, { style: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8 } }, _react.createElement(_reactNative.Image, { source: require('./assets/paisapay-customer-emblem.png'), style: { width: 34, height: 34, borderRadius: 8 } }), _react.createElement(_reactNative.Text, { style: styles.brand }, 'PaisaPay')), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.demoTag,
           children: "INR"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 84,
-          columnNumber: 552
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 84,
-        columnNumber: 379
-      }, this) : null, /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        }, void 0)]
+      }, void 0) : null, /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: styles.body,
-        children: [content(), working && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        children: [content(), working && /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
           style: {
             position: 'absolute',
             top: 0,
@@ -1511,73 +1430,38 @@
             alignItems: 'center',
             justifyContent: 'center'
           },
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.ActivityIndicator, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.ActivityIndicator, {
             size: "large",
             color: C.gold
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 84,
-            columnNumber: 789
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: {
               color: 'white',
               fontWeight: '700',
               marginTop: 12
             },
             children: "Connecting to PaisaPay\u2026"
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 84,
-            columnNumber: 837
-          }, this)]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 84,
-          columnNumber: 651
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 84,
-        columnNumber: 604
-      }, this), logged && tabs.includes(screen) ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+          }, void 0)]
+        }, void 0)]
+      }, void 0), logged && tabs.includes(screen) ? /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
         style: styles.nav,
-        children: tabs.map((t, i) => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+        children: tabs.map((t, i) => /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.TouchableOpacity, {
           style: [styles.navItem, tab === t && styles.navItemActive],
           onPress: () => nav(t),
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: [styles.navIcon, tab === t && styles.navActive],
             children: ['⌂', '↓', '▣', '♧', '◉'][i]
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 84,
-            columnNumber: 1128
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: [styles.navLabel, tab === t && styles.navActive],
             children: t === 'Mine' ? 'Profile' : t
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 84,
-            columnNumber: 1218
-          }, this)]
-        }, t, true, {
-          fileName: _jsxFileName,
-          lineNumber: 84,
-          columnNumber: 1058
-        }, this))
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 84,
-        columnNumber: 973
-      }, this) : null, toast && _react.createElement(_toastNotice.default, {
+          }, void 0)]
+        }, t))
+      }, void 0) : null, toast && _react.createElement(_toastNotice.default, {
         toast: toast,
         colors: C,
-        onDismiss: () => setToast(null)
+        onDismiss: () => setToast(null),
+        onCheckServer: checkApiConnection
       }), _react.createElement(_birdAssistant.default, { colors: C, logged, screen, working, activityKey: assistantActivity, assistantEvent, onAssistantEventHandled: id => setAssistantEvent(current => current?.id === id ? null : current), settingsOpen: screen === 'Bird Settings', onCloseSettings: () => go('Mine') })]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 84,
-      columnNumber: 10
-    }, this);
+    }, void 0);
   }
   function App() {
     return _react.createElement(_safeAreaContext.SafeAreaProvider, null, _react.createElement(AppContent));
@@ -1586,27 +1470,23 @@
     var children = _ref21.children,
       style = _ref21.style,
       contentStyle = _ref21.contentStyle;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.ScrollView, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.ScrollView, {
       style: [{
         flex: 1
       }, style],
       contentContainerStyle: [styles.page, contentStyle],
       children: children
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 87,
-      columnNumber: 53
-    }, this);
+    }, void 0);
   }
   function Splash() {
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
       style: {
         flex: 1,
         backgroundColor: C.navy,
         alignItems: 'center',
         justifyContent: 'center'
       },
-      children: [/*#__PURE__*/_react.createElement(_reactNative.Image, { source: require('./assets/paisapay-neon-logo.png'), resizeMode: 'contain', style: { width: 210, height: 210 } }), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      children: [/*#__PURE__*/_react.createElement(_reactNative.Image, { source: require('./assets/paisapay-customer-brand.png'), resizeMode: 'contain', style: { width: 210, height: 210 } }), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           fontSize: 32,
           fontWeight: '900',
@@ -1614,78 +1494,46 @@
           marginTop: 9
         },
         children: "PaisaPay"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 88,
-        columnNumber: 165
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           fontSize: 12,
           color: C.textSecondary,
           marginTop: 8
         },
         children: "INR-only account"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 88,
-        columnNumber: 251
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           fontSize: 11,
           color: C.muted,
           marginTop: 35
         },
         children: "Checking your secure session\u2026"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 88,
-        columnNumber: 336
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 88,
-      columnNumber: 26
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Title(_ref22) {
     var title = _ref22.title,
       sub = _ref22.sub;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
       style: {
         marginBottom: 16
       },
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.title,
         children: title
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 89,
-        columnNumber: 68
-      }, this), sub && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), sub && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.subtitle,
         children: sub
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 89,
-        columnNumber: 115
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 89,
-      columnNumber: 36
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Card(_ref23) {
     var children = _ref23.children,
       style = _ref23.style;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
       style: [styles.card, style],
       children: children
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 90,
-      columnNumber: 40
-    }, this);
+    }, void 0);
   }
   function Button(_ref24) {
     var title = _ref24.title,
@@ -1702,13 +1550,13 @@
       speed: 32,
       bounciness: 4
     }).start();
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Animated.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Animated.View, {
       style: {
         transform: [{
           scale
         }]
       },
-      children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+      children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
         activeOpacity: 0.88,
         onPressIn: () => animate(.98),
         onPressOut: () => animate(1),
@@ -1717,24 +1565,12 @@
         style: [styles.button, secondary && styles.buttonSecondary, customStyle, disabled && {
           opacity: .45
         }],
-        children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: [styles.buttonText, secondary && styles.buttonTextSecondary],
           children: title
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 91,
-          columnNumber: 520
-        }, this)
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 91,
-        columnNumber: 292
-      }, this)
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 91,
-      columnNumber: 247
-    }, this);
+        }, void 0)
+      }, void 0)
+    }, void 0);
   }
   function Chip(_ref25) {
     var label = _ref25.label,
@@ -1742,25 +1578,17 @@
       onPress = _ref25.onPress,
       _ref25$disabled = _ref25.disabled,
       disabled = _ref25$disabled === void 0 ? false : _ref25$disabled;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
       disabled: disabled,
       onPress: onPress,
       style: [styles.chip, active && styles.chipActive, disabled && {
         opacity: .45
       }],
-      children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: [styles.chipText, active && styles.chipTextActive],
         children: label
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 92,
-        columnNumber: 189
-      }, this)
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 92,
-      columnNumber: 61
-    }, this);
+      }, void 0)
+    }, void 0);
   }
   function Field(_ref26) {
     var label = _ref26.label,
@@ -1777,23 +1605,19 @@
       _useState76 = (0, _slicedToArray.default)(_useState75, 2),
       visible = _useState76[0],
       setVisible = _useState76[1];
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
       style: {
         marginBottom: 13
       },
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.fieldLabel,
         children: label
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 93,
-        columnNumber: 210
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: {
           position: 'relative',
           justifyContent: 'center'
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TextInput, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TextInput, {
           accessibilityLabel: label,
           value: value,
           onChangeText: onChangeText,
@@ -1806,11 +1630,7 @@
           placeholderTextColor: "#9AA5BA",
           autoCapitalize: autoCapitalize || (secureTextEntry ? 'none' : 'sentences'),
           autoCorrect: autoCorrect === undefined ? !secureTextEntry : autoCorrect
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 93,
-          columnNumber: 316
-        }, this), secureTextEntry ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+        }, void 0), secureTextEntry ? /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
           accessibilityRole: "button",
           accessibilityLabel: visible ? 'Hide password' : 'Show password',
           onPress: () => setVisible(value => !value),
@@ -1819,50 +1639,26 @@
             right: 18,
             padding: 8
           },
-          children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: {
               color: C.ink,
               fontWeight: '800'
             },
             children: visible ? 'Hide' : 'Show'
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 93,
-            columnNumber: 933
-          }, this)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 93,
-          columnNumber: 738
-        }, this) : null]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 93,
-        columnNumber: 256
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 93,
-      columnNumber: 178
-    }, this);
+          }, void 0)
+        }, void 0) : null]
+      }, void 0)]
+    }, void 0);
   }
   function Banner(_ref27) {
     var children = _ref27.children;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
       style: styles.banner,
-      children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      children: /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
         style: styles.bannerText,
         children: ["\u24D8  ", children]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 94,
-        columnNumber: 64
-      }, this)
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 94,
-      columnNumber: 36
-    }, this);
+      }, void 0)
+    }, void 0);
   }
   function AmbientGlow(_ref28) {
     var style = _ref28.style;
@@ -1880,7 +1676,7 @@
       loop.start();
       return () => loop.stop();
     }, [pulse]);
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Animated.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Animated.View, {
       pointerEvents: "none",
       style: [{
         position: 'absolute',
@@ -1893,11 +1689,7 @@
           scale: pulse
         }]
       }, style]
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 95,
-      columnNumber: 340
-    }, this);
+    }, void 0);
   }
   function Login(_ref29) {
     var phone = _ref29.phone,
@@ -1910,7 +1702,7 @@
       onRegister = _ref29.onRegister,
       onForgot = _ref29.onForgot,
       working = _ref29.working;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
       style: {
         backgroundColor: C.pale
       },
@@ -1920,16 +1712,12 @@
         paddingHorizontal: 28,
         paddingVertical: 30
       },
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(AmbientGlow, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(AmbientGlow, {
         style: {
           top: 20,
           right: -105
         }
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 97,
-        columnNumber: 141
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(AmbientGlow, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(AmbientGlow, {
         style: {
           bottom: 70,
           left: -145,
@@ -1937,16 +1725,12 @@
           height: 270,
           backgroundColor: '#22D3EE14'
         }
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 97,
-        columnNumber: 183
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: {
           alignItems: 'center',
           marginBottom: 38
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
           style: {
             width: 116,
             height: 116,
@@ -1956,22 +1740,14 @@
             justifyContent: 'center',
             marginBottom: 25
           },
-          children: /*#__PURE__*/_react.createElement(_reactNative.Image, { source: require('./assets/paisapay-neon-logo.png'), resizeMode: 'contain', style: { width: 106, height: 106 } })
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 98,
-          columnNumber: 57
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: /*#__PURE__*/_react.createElement(_reactNative.Image, { source: require('./assets/paisapay-customer-emblem.png'), resizeMode: 'contain', style: { width: 106, height: 106 } })
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: [styles.loginBrand, {
             color: C.ink,
             fontSize: 27
           }],
           children: "PaisaPay"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 98,
-          columnNumber: 265
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: {
             color: C.ink,
             fontSize: 20,
@@ -1979,36 +1755,20 @@
             marginTop: 28
           },
           children: "Welcome Back!"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 98,
-          columnNumber: 340
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 98,
-        columnNumber: 5
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Mobile number",
         value: phone,
         onChangeText: setPhone,
         placeholder: "10-digit mobile number",
         keyboardType: "phone-pad"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 99,
-        columnNumber: 5
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Password",
         value: password,
         onChangeText: setPassword,
         placeholder: "Enter your password",
         secureTextEntry: true
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 100,
-        columnNumber: 5
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.TouchableOpacity, {
         accessibilityRole: "checkbox",
         accessibilityState: {
           checked: remember
@@ -2022,7 +1782,7 @@
           paddingVertical: 12,
           marginBottom: 4
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
           style: {
             width: 22,
             height: 22,
@@ -2033,38 +1793,22 @@
             alignItems: 'center',
             justifyContent: 'center'
           },
-          children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: {
               color: 'white',
               fontSize: 15,
               fontWeight: '900'
             },
             children: remember ? '✓' : ''
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 101,
-            columnNumber: 418
-          }, this)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 101,
-          columnNumber: 243
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0)
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: {
             color: C.ink,
             fontWeight: '700'
           },
           children: "Remember me"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 101,
-          columnNumber: 508
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 101,
-        columnNumber: 5
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "LOGIN",
         disabled: working,
         style: {
@@ -2081,57 +1825,33 @@
           }
         },
         onPress: onLogin
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 102,
-        columnNumber: 5
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: {
           flexDirection: 'row',
           justifyContent: 'space-between',
           alignItems: 'center',
           marginTop: 25
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
           accessibilityRole: "button",
           onPress: onRegister,
-          children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: [styles.link, {
               color: C.ink
             }],
             children: "Register"
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 103,
-            columnNumber: 171
-          }, this)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 103,
-          columnNumber: 105
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+          }, void 0)
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
           accessibilityRole: "button",
           onPress: onForgot,
-          children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: [styles.link, {
               color: C.ink
             }],
             children: "Forgot Password?"
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 103,
-            columnNumber: 311
-          }, this)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 103,
-          columnNumber: 247
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 103,
-        columnNumber: 5
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0)
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           color: C.muted,
           fontSize: 11,
@@ -2139,16 +1859,8 @@
           marginTop: 18
         },
         children: "Remember me keeps your session and mobile number on this device. Your password is never saved."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 104,
-        columnNumber: 5
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 97,
-      columnNumber: 10
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function PasswordReset(_ref30) {
     var phone = _ref30.phone,
@@ -2218,7 +1930,7 @@
       if (password !== confirm) return _reactNative.Alert.alert('Passwords do not match', 'Enter the same password in both fields.');
       onReset(challengeId, code, password);
     };
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
       style: {
         backgroundColor: C.pale
       },
@@ -2228,29 +1940,21 @@
         paddingTop: 24,
         paddingBottom: 32
       },
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
         accessibilityRole: "button",
         onPress: onBack,
         style: {
           paddingVertical: 8,
           alignSelf: 'flex-start'
         },
-        children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: {
             fontSize: 30,
             color: C.ink
           },
           children: "\u2039"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 107,
-          columnNumber: 1417
-        }, this)
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 107,
-        columnNumber: 1304
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0)
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           textAlign: 'center',
           fontSize: 25,
@@ -2259,53 +1963,33 @@
           marginBottom: 20
         },
         children: "Forgot Password"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 107,
-        columnNumber: 1484
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "We send a one-time password reset code by SMS. Enter it here to change your PaisaPay password."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 107,
-        columnNumber: 1598
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: { color: C.muted, fontSize: 12, lineHeight: 18, marginBottom: 12 },
         children: "Reset uses the PaisaPay SMS OTP. Never share the code with anyone."
-      }, void 0, false, { fileName: _jsxFileName, lineNumber: 107, columnNumber: 1670 }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Mobile Number",
         value: phone,
         onChangeText: setPhone,
         placeholder: "Registered 10-digit mobile number",
         keyboardType: "phone-pad"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 107,
-        columnNumber: 1738
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: challengeId ? resendIn > 0 ? `Resend OTP in ${resendIn}s` : secondsLeft > 0 ? 'Resend OTP' : 'Code expired · Send new OTP' : 'Send reset OTP',
         secondary: true,
         disabled: working || Boolean(challengeId) && resendIn > 0,
         onPress: request
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 107,
-        columnNumber: 1866
-      }, this), statusMessage ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), statusMessage ? /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: { color: C.muted, fontSize: 11, lineHeight: 16, marginTop: 8 },
         children: statusMessage
-      }, void 0, false, { fileName: _jsxFileName, lineNumber: 107, columnNumber: 1980 }, this) : null, challengeId ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactJsxDevRuntime.Fragment, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0) : null, challengeId ? /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_react.Fragment, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "6-digit SMS OTP",
           value: code,
           onChangeText: value => setCode(value.replace(/\D/g, '').slice(0, 6)),
           placeholder: "Enter the SMS code",
           keyboardType: "number-pad"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 107,
-          columnNumber: 2103
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: {
             color: secondsLeft > 0 ? C.muted : '#B42318',
             fontSize: 13,
@@ -2313,53 +1997,29 @@
             marginBottom: 12
           },
           children: secondsLeft > 0 ? `The code expires in ${secondsLeft} seconds.` : 'This code expired. Request a new code.'
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 107,
-          columnNumber: 2274
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "New Password",
           value: password,
           onChangeText: setNewPassword,
           placeholder: "At least 8 characters",
           secureTextEntry: true
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 107,
-          columnNumber: 2476
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Confirm New Password",
           value: confirm,
           onChangeText: setConfirm,
           placeholder: "Enter password again",
           secureTextEntry: true
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 107,
-          columnNumber: 2604
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Reset Password",
           disabled: working || secondsLeft <= 0,
           onPress: submit
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 107,
-          columnNumber: 2734
-        }, this)]
-      }, void 0, true) : null, /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0)]
+      }, void 0) : null, /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Back to Login",
         secondary: true,
         onPress: onBack
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 107,
-        columnNumber: 2827
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 107,
-      columnNumber: 1185
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Register(_ref32) {
     var phone = _ref32.phone,
@@ -2397,7 +2057,7 @@
         return _ref33.apply(this, arguments);
       };
     }();
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
       style: {
         backgroundColor: C.pale
       },
@@ -2407,29 +2067,21 @@
         paddingTop: 20,
         paddingBottom: 32
       },
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.TouchableOpacity, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.TouchableOpacity, {
         accessibilityRole: "button",
         onPress: onBack,
         style: {
           paddingVertical: 8,
           alignSelf: 'flex-start'
         },
-        children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: {
             fontSize: 30,
             color: C.ink
           },
           children: "\u2039"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 108,
-          columnNumber: 723
-        }, this)
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 610
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0)
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           textAlign: 'center',
           fontSize: 25,
@@ -2438,95 +2090,55 @@
           marginBottom: 20
         },
         children: "Create Account"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 790
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Full Name",
         value: fullName,
         onChangeText: setFullName,
         placeholder: "Enter your full name"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 903
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Mobile Number",
         value: phone,
         onChangeText: setPhone,
         placeholder: "10-digit mobile number",
         keyboardType: "phone-pad"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 1008
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Password",
         value: password,
         onChangeText: setPassword,
         placeholder: "At least 8 characters",
         secureTextEntry: true
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 1138
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Confirm Password",
         value: confirmPassword,
         onChangeText: setConfirmPassword,
         placeholder: "Enter password again",
         secureTextEntry: true
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 1259
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Referral Code (optional)",
         value: referralCode,
         onChangeText: setReferralCode,
         placeholder: "Enter a friend's code",
         autoCapitalize: "none",
         autoCorrect: false
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 1335
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: challengeId ? cooldown ? `Resend OTP in ${cooldown}s` : 'Resend OTP' : 'Send OTP',
         disabled: working || cooldown > 0,
         secondary: true,
         onPress: request
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 108,
-        columnNumber: 1401
-      }, this), challengeId ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactJsxDevRuntime.Fragment, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), challengeId ? /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_react.Fragment, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "6-digit OTP",
           value: code,
           onChangeText: value => setCode(value.replace(/\D/g, '').slice(0, 6)),
           placeholder: "Enter the code",
           keyboardType: "number-pad"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 108,
-          columnNumber: 1568
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Verify OTP and Register",
           disabled: working,
           onPress: onVerify
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 108,
-          columnNumber: 1730
-        }, this)]
-      }, void 0, true) : null]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 108,
-      columnNumber: 491
-    }, this);
+        }, void 0)]
+      }, void 0) : null]
+    }, void 0);
   }
   function Otp(_ref34) {
     var phone = _ref34.phone,
@@ -2544,58 +2156,30 @@
       FAILED: 'The gateway reports SMS sending failed.',
       UNKNOWN: 'The gateway has not confirmed a delivery state.'
     }[deliveryState] || 'Check delivery state with the gateway.';
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Verify mobile",
         sub: `Verification code for +91 ${phone}`
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 109,
-        columnNumber: 482
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: detail
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 109,
-        columnNumber: 555
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Check SMS status",
         secondary: true,
         onPress: onCheckDelivery
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 109,
-        columnNumber: 580
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Verification code",
         value: otp,
         onChangeText: setOtp,
         placeholder: "6-digit code",
         keyboardType: "number-pad"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 109,
-        columnNumber: 650
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Verify and continue",
         onPress: () => otp.length === 6 ? onVerify(otp) : _reactNative.Alert.alert('Check code', 'Enter six digits.')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 109,
-        columnNumber: 771
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.small,
         children: "Never enter a payment app password or OTP."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 109,
-        columnNumber: 897
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 109,
-      columnNumber: 476
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Profile(_ref35) {
     var name = _ref35.name,
@@ -2603,45 +2187,25 @@
       referralCode = _ref35.referralCode,
       setReferralCode = _ref35.setReferralCode,
       onSave = _ref35.onSave;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Your profile",
         sub: "Finish setting up your PaisaPay account."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 110,
-        columnNumber: 83
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Name",
         value: name,
         onChangeText: setName,
         placeholder: "Your name"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 110,
-        columnNumber: 159
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Referral code (optional)",
         value: referralCode,
         onChangeText: setReferralCode,
         placeholder: "Enter a referral code"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 110,
-        columnNumber: 240
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Save profile",
         onPress: onSave
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 110,
-        columnNumber: 369
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 110,
-      columnNumber: 77
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Home(props) {
     return _react.createElement(_ultraHome.default, { ...props, colors: C });
@@ -2659,112 +2223,56 @@
       removeUpiId = _ref41.removeUpiId,
       working = _ref41.working,
       go = _ref41.go;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "UPI settings",
         sub: "Enter the account name shown in your UPI app and your UPI ID. Check both before saving."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 113,
-        columnNumber: 100
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "UPI account details"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 231
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Account name",
           value: upiNameInput,
           onChangeText: setUpiNameInput,
           placeholder: "Name shown in your UPI app",
           autoCapitalize: "words",
           autoCorrect: false
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 231
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "UPI ID",
           value: upiInput,
           onChangeText: setUpiInput,
           placeholder: "example@bank — check carefully",
           autoCapitalize: "none",
           autoCorrect: false
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 280
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
           style: styles.small,
           children: ["UPI details: ", upiProfile?.detailsStatus === 'USER_CONFIRMED' ? 'SAVED · READY FOR P2P OFFERS' : 'NOT SET']
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 413
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: working ? 'Saving…' : 'Save UPI details',
           disabled: working || !upiInput.trim() || !upiNameInput.trim(),
           onPress: saveUpiId
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 498
-        }, this), upiProfile?.upiId && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), upiProfile?.upiId && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Remove UPI ID",
           secondary: true,
           disabled: working,
           onPress: removeUpiId
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 624
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 113,
-        columnNumber: 225
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "Payment methods"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 720
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
           children: "PaisaPay UPI deposits open the Android UPI app chooser. MobiKwik wallet linking and Buy/Sell integration have been removed."
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 773
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Add money with UPI",
           onPress: () => go('Deposit')
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 113,
-          columnNumber: 933
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 113,
-        columnNumber: 714
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "Before saving, check that the account name and UPI ID exactly match the details shown in your UPI app. Saving these details does not verify ownership or confirm that they are correct. Never enter a UPI PIN, banking password, or payment OTP in PaisaPay."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 113,
-        columnNumber: 1004
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 113,
-      columnNumber: 94
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function UpiSetup(props) {
     return _react.createElement(_upiSetupScreen.default, { ...props, colors: C });
@@ -2777,141 +2285,65 @@
       onSelect = _ref42.onSelect;
     var type = screen.startsWith('Buy') ? 'Buy' : 'Sell';
     var rows = orders.filter(o => o.kind === type && (type !== 'Buy' || methods.some(m => m.name === o.method && m.available && m.buy)));
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: type + " orders",
         sub: "Payment methods appear only when the backend reports them available."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 231
-      }, this), type === 'Buy' && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), type === 'Buy' && /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "No active wallet payment integration"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 358
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
           children: "MobiKwik linking and payment integration have been removed. No other approved Buy provider is configured."
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 432
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 352
-      }, this), type === 'Sell' && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0)]
+      }, void 0), type === 'Sell' && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Create Sell order",
         onPress: () => go('Create Sell Order')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 598
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: styles.wrap,
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Chip, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Chip, {
           label: "Buy",
           active: type === 'Buy',
           onPress: () => go('Buy Orders')
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 698
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Chip, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Chip, {
           label: "Sell",
           active: type === 'Sell',
           onPress: () => go('Sell Orders')
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 770
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 672
-      }, this), rows.map(o => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
+        }, void 0)]
+      }, void 0), rows.map(o => /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
         style: {
           marginBottom: 12
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
           style: styles.space,
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.cardTitle,
             children: o.id
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 114,
-            columnNumber: 935
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Status, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Status, {
             status: o.status
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 114,
-            columnNumber: 979
-          }, this)]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 908
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0)]
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.orderAmount,
           children: money(o.amountPaise)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 1013
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
           style: styles.bodyText,
           children: [o.method, " \xB7 ", type === 'Sell' ? "Seller " + o.seller : 'Payment route unavailable']
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 1075
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
           style: styles.small,
           children: ["Expires in ", o.expires, " \xB7 Created just now"]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 1187
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: o.status === 'Available' ? 'View order' : o.status,
           disabled: o.status !== 'Available',
           onPress: () => onSelect(o)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 114,
-          columnNumber: 1262
-        }, this)]
-      }, o.id, true, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 865
-      }, this)), rows.length === 0 && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+        }, void 0)]
+      }, o.id)), rows.length === 0 && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: 'No ' + type.toLowerCase() + ' orders',
         body: type === 'Buy' ? 'No eligible verified Buy payment method is available.' : 'There are no eligible orders available from the server.'
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 1411
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "Payment completion and wallet credit require backend verification. A mobile-app response alone is not payment proof."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 114,
-        columnNumber: 1597
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 114,
-      columnNumber: 225
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function CreateSellOrder(_ref43) {
     var methods = _ref43.methods,
@@ -2922,277 +2354,137 @@
       create = _ref43.create;
     var rule = methods.find(m => m.name === method);
     var available = Boolean(rule?.available && rule.sell);
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Create Sell order",
         sub: "New orders require an approved, operational payment integration."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 115,
-        columnNumber: 187
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Amount (whole rupees)",
         value: amount,
         onChangeText: setAmount,
         placeholder: "\u20B910 \u2013 \u20B950,000",
         keyboardType: "number-pad"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 115,
-        columnNumber: 292
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.sectionTitle,
         children: "Payment method"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 115,
-        columnNumber: 424
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
         style: styles.wrap,
-        children: methods.filter(m => m.sell).map(m => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Chip, {
+        children: methods.filter(m => m.sell).map(m => /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Chip, {
           label: m.name,
           active: method === m.name,
           onPress: () => setMethod(m.name)
-        }, m.name, false, {
-          fileName: _jsxFileName,
-          lineNumber: 115,
-          columnNumber: 539
-        }, this))
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 115,
-        columnNumber: 479
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, m.name))
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Card, {
+        children: /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
           style: styles.bodyText,
           children: [available ? 'The selected method is approved and operational for Sell orders.' : rule?.availabilityMessage || 'No approved, operational Sell provider is configured. This order will not be published.', " A payment route must be able to verify settlement."]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 115,
-          columnNumber: 646
-        }, this)
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 115,
-        columnNumber: 640
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0)
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Create Sell order",
         disabled: !available,
         onPress: create
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 115,
-        columnNumber: 938
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 115,
-      columnNumber: 181
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function OrderDetails(_ref44) {
     var order = _ref44.order,
       go = _ref44.go,
       note = _ref44.note,
       reserve = _ref44.reserve;
-    if (!order) return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+    if (!order) return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Page, {
+      children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: "Order not found",
         body: "Return to the order list."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 116,
-        columnNumber: 71
-      }, this)
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 116,
-      columnNumber: 65
-    }, this);
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+      }, void 0)
+    }, void 0);
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Order details",
         sub: order.id
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 116,
-        columnNumber: 157
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
           style: styles.space,
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
             style: styles.cardTitle,
             children: [order.kind, " order"]
-          }, void 0, true, {
-            fileName: _jsxFileName,
-            lineNumber: 116,
-            columnNumber: 235
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Status, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Status, {
             status: order.status
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 116,
-            columnNumber: 291
-          }, this)]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 116,
-          columnNumber: 208
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0)]
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.orderAmount,
           children: money(order.amountPaise)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 116,
-          columnNumber: 329
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
           title: "Payment method",
           sub: order.method
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 116,
-          columnNumber: 395
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
           title: "Seller / destination",
           sub: order.seller
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 116,
-          columnNumber: 443
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
           title: "Expiry",
           sub: `In ${order.expires}`
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 116,
-          columnNumber: 497
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
           title: "Payment status",
           sub: "Not submitted"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 116,
-          columnNumber: 546
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 116,
-        columnNumber: 202
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "No payment is initiated or verified by this app. An order cannot be marked paid without authorized payment confirmation."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 116,
-        columnNumber: 602
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Reserve order",
         disabled: order.status !== 'Available',
         onPress: () => reserve(order)
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 116,
-        columnNumber: 739
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Back to orders",
         secondary: true,
         onPress: () => go(order.kind === 'Buy' ? 'Buy Orders' : 'Sell Orders')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 116,
-        columnNumber: 837
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 116,
-      columnNumber: 151
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Status(_ref45) {
     var status = _ref45.status;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
       style: [styles.status, {
         color: status === 'Available' ? C.green : C.gold
       }],
       children: status
-    }, void 0, false, {
-      fileName: _jsxFileName,
-      lineNumber: 117,
-      columnNumber: 34
-    }, this);
+    }, void 0);
   }
   function Team(_ref46) {
     var referrals = _ref46.referrals,
       go = _ref46.go;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "My team",
         sub: "Referral counts and eligible commission from your account."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 118,
-        columnNumber: 44
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
         style: styles.twoCol,
         children: [['Direct members', String(referrals?.directCount ?? 0)], ['Indirect members', String(referrals?.indirectCount ?? 0)], ['Eligible commission', money(referrals?.eligibleCommissionPaise ?? 0)]].map(_ref47 => {
           var _ref48 = (0, _slicedToArray.default)(_ref47, 2),
             label = _ref48[0],
             value = _ref48[1];
-          return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
+          return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
             style: {
               width: '48%'
             },
-            children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+            children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
               style: styles.muted,
               children: label
-            }, void 0, false, {
-              fileName: _jsxFileName,
-              lineNumber: 118,
-              columnNumber: 404
-            }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+            }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
               style: styles.metric,
               children: value
-            }, void 0, false, {
-              fileName: _jsxFileName,
-              lineNumber: 118,
-              columnNumber: 445
-            }, this)]
-          }, label, true, {
-            fileName: _jsxFileName,
-            lineNumber: 118,
-            columnNumber: 364
-          }, this);
+            }, void 0)]
+          }, label);
         })
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 118,
-        columnNumber: 133
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "View members",
         onPress: () => go('Members')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 118,
-        columnNumber: 503
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Share referral code",
         secondary: true,
         onPress: () => go('Share & Earn')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 118,
-        columnNumber: 561
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "Commission is shown only when a qualifying funded award exists in the server records."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 118,
-        columnNumber: 641
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 118,
-      columnNumber: 38
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Members(_ref49) {
     var members = _ref49.members;
@@ -3201,163 +2493,83 @@
       q = _useState92[0],
       setQ = _useState92[1];
     var filtered = members.filter(m => `${m.displayName || ''} ${m.permittedIdentifier || ''}`.toLowerCase().includes(q.toLowerCase()));
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Members",
         sub: "Only display name and masked phone are shown."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 119,
-        columnNumber: 196
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
         label: "Search permitted identifier",
         value: q,
         onChangeText: setQ,
         placeholder: "Name or masked phone"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 119,
-        columnNumber: 272
-      }, this), filtered.length ? filtered.map(m => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+      }, void 0), filtered.length ? filtered.map(m => /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
         title: m.displayName || 'PaisaPay member',
         sub: `${m.permittedIdentifier} · ${m.depth === 1 ? 'Direct' : 'Indirect'} · ${new Date(m.joinedAt).toLocaleDateString()}`,
         amount: ""
-      }, m.id, false, {
-        fileName: _jsxFileName,
-        lineNumber: 119,
-        columnNumber: 414
-      }, this)) : /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+      }, m.id)) : /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: "No members found",
         body: "No matching referral members were returned by the server."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 119,
-        columnNumber: 601
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 119,
-      columnNumber: 190
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function ShareEarn(_ref50) {
     var code = _ref50.code;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Share & Earn",
         sub: "Your referral status is managed by the server."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 120,
-        columnNumber: 41
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.muted,
           children: "YOUR REFERRAL CODE"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 120,
-          columnNumber: 129
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.refCode,
           children: code || 'Unavailable'
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 120,
-          columnNumber: 181
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
           children: "A public referral link is not configured yet."
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 120,
-          columnNumber: 238
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Share referral code",
           disabled: !code,
           onPress: () => _reactNative.Share.share({
             message: `Join PaisaPay with referral code ${code}`
           })
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 120,
-          columnNumber: 320
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 120,
-        columnNumber: 123
-      }, this), code && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
+        }, void 0)]
+      }, void 0), code && /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
         style: {
           alignItems: 'center'
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(QRCode.default, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(QRCode.default, {
           value: code,
           size: 160,
           color: C.navy,
           backgroundColor: "white"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 120,
-          columnNumber: 504
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: [styles.muted, {
             marginTop: 12
           }],
           children: "Referral code QR"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 120,
-          columnNumber: 576
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 120,
-        columnNumber: 468
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "Referral rewards and referral reporting are not implemented. No reward is being promised or credited."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 120,
-        columnNumber: 651
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 120,
-      columnNumber: 35
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Tasks() {
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Daily tasks",
         sub: "Tasks and rewards are not configured."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 122,
-        columnNumber: 31
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: "No tasks available",
         body: "A task appears here only after the backend validates its conditions and funding."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 122,
-        columnNumber: 103
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "No reward can be claimed now."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 122,
-        columnNumber: 226
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 122,
-      columnNumber: 25
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Mine(props) {
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_profileScreen.default, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_profileScreen.default, {
       name: props.name,
       accountId: props.accountId,
       balance: props.balance,
@@ -3371,7 +2583,7 @@
       themeMode: props.themeMode,
       onThemeChange: props.onThemeChange,
       colors: C
-    }, void 0, false, { fileName: _jsxFileName, lineNumber: 123, columnNumber: 12 }, this);
+    }, void 0);
   }
   function Bills(props) {
     return _react.createElement(_ultraActivity.default, { ...props, colors: C });
@@ -3417,7 +2629,8 @@
     }();
     var copyReceiver = /*#__PURE__*/function () {
       var _ref57 = (0, _asyncToGenerator.default)(function* () {
-        var receiver = upiReceiver || DEFAULT_UPI_DEPOSIT.receiverVpa;
+        var receiver = upiReceiver;
+        if (!receiver) return note('UPI recipient unavailable', 'PaisaPay has not configured a payment recipient. Do not make a payment.');
         try {
           yield Clipboard.setStringAsync(receiver);
           note('Copied', 'Receiver UPI ID copied.');
@@ -3429,107 +2642,59 @@
         return _ref57.apply(this, arguments);
       };
     }();
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Deposit history",
         sub: "Requests and user-submitted references are not proof of payment."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 129,
-        columnNumber: 16
-      }, this), rows.length ? rows.map(r => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
+      }, void 0), rows.length ? rows.map(r => /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
         style: {
           marginBottom: 9
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
           title: r.id,
           sub: `${r.method} · ${r.status}`,
           amount: money(r.amountPaise)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 129,
-          columnNumber: 186
-        }, this), r.method === 'UPI' && ['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(r.status) && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+        }, void 0), r.method === 'UPI' && ['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(r.status) && upiReceiver && /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
           style: {
             alignItems: 'center',
             paddingVertical: 12
           },
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.cardTitle,
             children: "Scan to pay PaisaPay"
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 414
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.View, {
             style: {
               padding: 12,
               backgroundColor: '#FFFFFF',
               marginVertical: 10
             },
-            children: /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(QRCode.default, {
-              value: makeUpiIntent(upiReceiver || DEFAULT_UPI_DEPOSIT.receiverVpa, r.amountPaise, r.merchantReference),
+            children: /*#__PURE__*/((0, _reactJsxRuntime.jsx))(QRCode.default, {
+              value: makeUpiIntent(upiReceiver, r.amountPaise, r.merchantReference),
               size: 176
-            }, void 0, false, {
-              fileName: _jsxFileName,
-              lineNumber: 129,
-              columnNumber: 543
-            }, this)
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 472
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+            }, void 0)
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
             style: styles.bodyText,
-            children: ["Receiver: ", upiReceiver || DEFAULT_UPI_DEPOSIT.receiverVpa]
-          }, void 0, true, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 672
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+            children: ["Receiver: ", upiReceiver]
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
             style: styles.small,
             children: ["Reference: ", r.merchantReference]
-          }, void 0, true, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 765
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
             title: "Copy receiver UPI ID",
             secondary: true,
             onPress: copyReceiver
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 831
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.small,
             children: "Status stays pending until Finance verifies merchant receipt."
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 902
-          }, this)]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 129,
-          columnNumber: 359
-        }, this), r.method === 'UPI' && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactJsxDevRuntime.Fragment, {
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0)]
+        }, void 0), r.method === 'UPI' && /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_react.Fragment, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
             style: styles.small,
             children: ["Manual review: ", r.manualPaymentClaim?.status || 'No reference submitted']
-          }, void 0, true, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 1026
-          }, this), r.manualPaymentClaim?.status === 'PENDING_REVIEW' ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0), r.manualPaymentClaim?.status === 'PENDING_REVIEW' ? /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.bodyText,
             children: "Finance is reviewing merchant records. This deposit is not yet verified."
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 129,
-            columnNumber: 1180
-          }, this) : ['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(r.status) && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactJsxDevRuntime.Fragment, {
-            children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+          }, void 0) : ['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(r.status) && /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_react.Fragment, {
+            children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
               label: "Transaction reference (unverified claim)",
               value: claimRefs[r.id] || '',
               onChangeText: value => setClaimRefs(current => ({
@@ -3539,39 +2704,19 @@
               placeholder: "Reference from payment statement",
               autoCapitalize: "none",
               autoCorrect: false
-            }, void 0, false, {
-              fileName: _jsxFileName,
-              lineNumber: 129,
-              columnNumber: 1363
-            }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+            }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
               title: checkingId === r.id ? 'Submitting…' : 'Submit reference for manual review',
               disabled: checkingId === r.id,
               secondary: true,
               onPress: () => submitManualClaim(r)
-            }, void 0, false, {
-              fileName: _jsxFileName,
-              lineNumber: 129,
-              columnNumber: 1610
-            }, this)]
-          }, void 0, true)]
-        }, void 0, true)]
-      }, r.id, true, {
-        fileName: _jsxFileName,
-        lineNumber: 129,
-        columnNumber: 144
-      }, this)) : /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+            }, void 0)]
+          }, void 0)]
+        }, void 0)]
+      }, r.id)) : /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: empty,
         body: "No payments have been made."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 129,
-        columnNumber: 1787
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 129,
-      columnNumber: 10
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function BankAccounts(_ref58) {
     var accounts = _ref58.accounts,
@@ -3615,63 +2760,35 @@
       _useState114 = (0, _slicedToArray.default)(_useState113, 2),
       editBank = _useState114[0],
       setEditBank = _useState114[1];
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Bank accounts",
         sub: "Account numbers are encrypted on the server and masked here."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 131,
-        columnNumber: 434
-      }, this), accounts.map(account => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), accounts.map(account => /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: account.accountHolderName
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 577
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
           style: styles.bodyText,
           children: [account.bankName || 'Bank', " \xB7 ", account.maskedAccountNumber]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 642
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.Text, {
           style: styles.bodyText,
           children: ["IFSC ", account.ifsc, " \xB7 ", account.verificationStatus]
-        }, void 0, true, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 737
-        }, this), editing === account.id ? /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactJsxDevRuntime.Fragment, {
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), editing === account.id ? /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_react.Fragment, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
             label: "Account holder name",
             value: editHolder,
             onChangeText: setEditHolder
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 131,
-            columnNumber: 848
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
             label: "Bank name",
             value: editBank,
             onChangeText: setEditBank
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 131,
-            columnNumber: 932
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
             label: "IFSC code",
             value: editIfsc,
             onChangeText: setEditIfsc,
             autoCapitalize: "characters"
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 131,
-            columnNumber: 1002
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
             title: "Save changes",
             disabled: working,
             onPress: /*#__PURE__*/(0, _asyncToGenerator.default)(function* () {
@@ -3682,12 +2799,8 @@
               });
               setEditing('');
             })
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 131,
-            columnNumber: 1100
-          }, this)]
-        }, void 0, true) : /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+          }, void 0)]
+        }, void 0) : /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Edit details",
           secondary: true,
           disabled: working,
@@ -3697,88 +2810,48 @@
             setEditBank(account.bankName || '');
             setEditIfsc(account.ifsc);
           }
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 1321
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Remove account",
           secondary: true,
           disabled: working,
           onPress: () => onRemove(account.id)
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 1522
-        }, this)]
-      }, account.id, true, {
-        fileName: _jsxFileName,
-        lineNumber: 131,
-        columnNumber: 554
-      }, this)), !accounts.length && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+        }, void 0)]
+      }, account.id)), !accounts.length && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: "No saved bank accounts",
         body: "Add an account to keep its masked details in PaisaPay. Saving details does not verify ownership."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 131,
-        columnNumber: 1646
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "Add bank account"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 1796
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Account holder name",
           value: holder,
           onChangeText: setHolder,
           placeholder: "Name on account"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 1850
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Bank account number",
           value: number,
           onChangeText: setNumber,
           placeholder: "8\u201320 digits",
           keyboardType: "number-pad"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 1956
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Confirm account number",
           value: confirm,
           onChangeText: setConfirm,
           placeholder: "Re-enter account number",
           keyboardType: "number-pad"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 2084
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "IFSC code",
           value: ifsc,
           onChangeText: setIfsc,
           placeholder: "ABCD0123456",
           autoCapitalize: "characters"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 2229
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Bank name (optional)",
           value: bank,
           onChangeText: setBank,
           placeholder: "Bank name"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 2345
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: working ? 'Saving…' : 'Save bank account',
           disabled: working,
           onPress: () => onAdd({
@@ -3790,27 +2863,11 @@
               bankName: bank.trim()
             } : {})
           })
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 131,
-          columnNumber: 2442
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 131,
-        columnNumber: 1790
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "Format validation does not confirm account ownership. Bank verification and payouts are unavailable until an authorized provider is configured."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 131,
-        columnNumber: 2703
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 131,
-      columnNumber: 428
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Withdraw(props) {
     return _react.createElement(_withdrawalScreen.default, { ...props, colors: C });
@@ -3853,385 +2910,187 @@
         return _ref62.apply(this, arguments);
       };
     }();
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Support",
         sub: "Create a support ticket for the support team."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 133,
-        columnNumber: 610
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "Create a support ticket"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 133,
-          columnNumber: 692
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Subject",
           value: subject,
           onChangeText: setSubject,
           placeholder: "How can we help?"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 133,
-          columnNumber: 753
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Field, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Field, {
           label: "Details",
           value: message,
           onChangeText: setMessage,
           placeholder: "Describe the issue"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 133,
-          columnNumber: 850
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
           title: "Submit ticket",
           onPress: submit
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 133,
-          columnNumber: 949
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 133,
-        columnNumber: 686
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "Contact PaisaPay on Telegram",
         secondary: true,
         onPress: () => _reactNative.Linking.openURL('https://t.me/Paisapayservice').catch(() => note('Could not open Telegram', 'Open https://t.me/Paisapayservice in your browser.'))
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 133,
-        columnNumber: 985
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
         title: "FAQs",
         secondary: true,
         onPress: () => note('FAQs', 'See Mine → FAQs for common questions.')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 133,
-        columnNumber: 1004
-      }, this), tickets.map(t => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+      }, void 0), tickets.map(t => /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
         title: t.subject,
         sub: `${t.id} · ${t.status}`,
         amount: t.status
-      }, t.id, false, {
-        fileName: _jsxFileName,
-        lineNumber: 133,
-        columnNumber: 1119
-      }, this)), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+      }, t.id)), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "Do not include bank credentials, payment-app passwords, OTPs, or sensitive financial information."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 133,
-        columnNumber: 1204
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 133,
-      columnNumber: 604
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function NotificationList(_ref63) {
     var rows = _ref63.rows;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Notifications",
         sub: "Updates delivered for your account."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 134,
-        columnNumber: 48
-      }, this), rows.length ? rows.map(n => /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Row, {
+      }, void 0), rows.length ? rows.map(n => /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Row, {
         title: n.title,
         sub: `${n.body} · ${new Date(n.createdAt).toLocaleString()}`,
         amount: n.readAt ? 'Read' : 'New'
-      }, n.id, false, {
-        fileName: _jsxFileName,
-        lineNumber: 134,
-        columnNumber: 145
-      }, this)) : /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Empty, {
+      }, n.id)) : /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Empty, {
         title: "No notifications",
         body: "There are no account notifications from the server yet."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 134,
-        columnNumber: 273
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 134,
-      columnNumber: 42
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function FAQs() {
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Frequently asked questions",
         sub: "PaisaPay account and payment information"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 135,
-        columnNumber: 30
-      }, this), [['Is this a real wallet?', 'This app displays the server ledger. Deposit and payout processing is disabled until an approved provider is connected.'], ['Can I make a deposit?', 'You may record a pending deposit request. No payment starts and no money is credited in this release.'], ['Are payment apps connected?', 'No. Saving a UPI reference does not connect the payment app or provide transaction access.'], ['How are orders verified?', 'Payment verification and settlement are disabled until a provider can confirm the transaction.'], ['How do I contact support?', 'Create a support ticket in the Support section.']].map(_ref64 => {
+      }, void 0), [['Is this a real wallet?', 'This app displays the server ledger. Deposit and payout processing is disabled until an approved provider is connected.'], ['Can I make a deposit?', 'You may record a pending deposit request. No payment starts and no money is credited in this release.'], ['Are payment apps connected?', 'No. Saving a UPI reference does not connect the payment app or provide transaction access.'], ['How are orders verified?', 'Payment verification and settlement are disabled until a provider can confirm the transaction.'], ['How do I contact support?', 'Create a support ticket in the Support section.']].map(_ref64 => {
         var _ref65 = (0, _slicedToArray.default)(_ref64, 2),
           q = _ref65[0],
           a = _ref65[1];
-        return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
+        return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
           style: {
             marginBottom: 9
           },
-          children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.cardTitle,
             children: q
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 135,
-            columnNumber: 785
-          }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
             style: styles.bodyText,
             children: a
-          }, void 0, false, {
-            fileName: _jsxFileName,
-            lineNumber: 135,
-            columnNumber: 826
-          }, this)]
-        }, q, true, {
-          fileName: _jsxFileName,
-          lineNumber: 135,
-          columnNumber: 746
-        }, this);
+          }, void 0)]
+        }, q);
       })]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 135,
-      columnNumber: 24
-    }, this);
+    }, void 0);
   }
   function Security(_ref66) {
     var note = _ref66.note;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    var onResetPassword = _ref66.onResetPassword;
+    var onLogout = _ref66.onLogout;
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Security",
-        sub: "Only the development console OTP adapter is available; production SMS is not configured."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 40
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        sub: "Verification codes are sent through the configured PaisaPay SMS service. Never share your code."
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "Account protection"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 136,
-          columnNumber: 166
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
-          children: "Session login uses server-managed OTP challenges. Password login, transaction PINs, device labels, and recovery flows are not implemented."
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 136,
-          columnNumber: 222
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+          children: "Sign in with your mobile number and password. If you need to change it, PaisaPay verifies your registered number with a one-time SMS code."
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.small,
           children: "No payment app credentials should ever be entered into PaisaPay."
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 136,
-          columnNumber: 397
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 160
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
-        title: "Change login password",
-        onPress: () => note('Unavailable', 'Password login is not configured.')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 502
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
-        title: "Reset password",
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
+        title: "Reset login password by SMS",
+        onPress: onResetPassword
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Button, {
+        title: "Sign out this device",
         secondary: true,
-        onPress: () => note('Unavailable', 'Password reset through an approved authentication provider is not configured.')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 611
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
-        title: "Transaction PIN",
-        secondary: true,
-        onPress: () => note('Unavailable', 'A separate transaction PIN is not implemented.')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 767
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Button, {
-        title: "Manage sessions",
-        secondary: true,
-        onPress: () => note('Unavailable', 'Session revocation is available through logout; a device/session management screen is not implemented.')
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 893
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
-        children: "Do not use this build for real-money payments."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 136,
-        columnNumber: 1075
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 136,
-      columnNumber: 34
-    }, this);
+        onPress: onLogout
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
+        children: "A separate transaction PIN and device session manager are not available. Do not use this build for real-money payments."
+      }, void 0)]
+    }, void 0);
   }
   function Version() {
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Page, {
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Title, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Page, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(Title, {
         title: "Version Center",
         sub: "Official release information"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 137,
-        columnNumber: 33
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: "PaisaPay Demo"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 137,
-          columnNumber: 105
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
           children: "Installed version \xB7 1.0.0"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 137,
-          columnNumber: 156
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
           children: "Latest version \xB7 Not available"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 137,
-          columnNumber: 218
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.bodyText,
-          children: "Release notes \xB7 Expo Go demo preview"
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 137,
-          columnNumber: 285
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 137,
-        columnNumber: 99
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Banner, {
+          children: "PaisaPay customer app"
+        }, void 0)]
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(Banner, {
         children: "No APK is published. A production APK needs signed releases, HTTPS hosting, and signature verification."
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 137,
-        columnNumber: 365
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 137,
-      columnNumber: 27
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Empty(_ref67) {
     var title = _ref67.title,
       body = _ref67.body;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(Card, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(Card, {
       style: {
         alignItems: 'center',
         paddingVertical: 30
       },
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: {
           fontSize: 32,
           color: C.blue
         },
         children: "\u25C8"
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 138,
-        columnNumber: 92
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.cardTitle,
         children: title
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 138,
-        columnNumber: 141
-      }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+      }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: [styles.bodyText, {
           textAlign: 'center'
         }],
         children: body
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 138,
-        columnNumber: 186
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 138,
-      columnNumber: 37
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   function Row(_ref68) {
     var title = _ref68.title,
       sub = _ref68.sub,
       amount = _ref68.amount;
-    return /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+    return /*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
       style: styles.row,
-      children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.View, {
+      children: [/*#__PURE__*/((0, _reactJsxRuntime.jsxs))(_reactNative.View, {
         style: {
           flex: 1
         },
-        children: [/*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        children: [/*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.cardTitle,
           children: title
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 139,
-          columnNumber: 89
-        }, this), /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0), /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
           style: styles.small,
           children: sub
-        }, void 0, false, {
-          fileName: _jsxFileName,
-          lineNumber: 139,
-          columnNumber: 134
-        }, this)]
-      }, void 0, true, {
-        fileName: _jsxFileName,
-        lineNumber: 139,
-        columnNumber: 66
-      }, this), !!amount && /*#__PURE__*/(0, _reactJsxDevRuntime.jsxDEV)(_reactNative.Text, {
+        }, void 0)]
+      }, void 0), !!amount && /*#__PURE__*/((0, _reactJsxRuntime.jsx))(_reactNative.Text, {
         style: styles.rowAmount,
         children: amount
-      }, void 0, false, {
-        fileName: _jsxFileName,
-        lineNumber: 139,
-        columnNumber: 191
-      }, this)]
-    }, void 0, true, {
-      fileName: _jsxFileName,
-      lineNumber: 139,
-      columnNumber: 41
-    }, this);
+      }, void 0)]
+    }, void 0);
   }
   var createStyles = () => _reactNative.StyleSheet.create({
     safe: {

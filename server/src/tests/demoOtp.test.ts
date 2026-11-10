@@ -13,8 +13,10 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
   const db = prisma!;
   const previousProvider = env.otpProvider;
   const previousBonusEnabled = env.welcomeBonusEnabled;
+  const previousFinancialOperationsEnabled = env.financialOperationsEnabled;
   const previousDemoPhone = env.demoLoginPhoneE164;
   const previousDemoPassword = env.demoLoginPassword;
+  const previousDepositReceiver = env.depositReceiverUpiId;
   const fundingKey = `TEST_WELCOME_BONUS_FUNDING:${randomUUID()}`;
   const testPhones: string[] = [];
 
@@ -22,6 +24,8 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
     if (!db) return;
     await db.$connect();
     env.otpProvider = 'demo';
+    env.financialOperationsEnabled = true;
+    env.depositReceiverUpiId = 'test-only@okaxis';
     env.welcomeBonusEnabled = true;
     await db.ledgerAccount.upsert({ where: { id: DEVELOPMENT_REWARD_FUND_ACCOUNT_ID }, create: { id: DEVELOPMENT_REWARD_FUND_ACCOUNT_ID, type: 'REWARD_FUND', currency: 'INR' }, update: {} });
     await db.ledgerAccount.upsert({ where: { id: DEVELOPMENT_SETTLEMENT_ACCOUNT_ID }, create: { id: DEVELOPMENT_SETTLEMENT_ACCOUNT_ID, type: 'SETTLEMENT_CASH', currency: 'INR' }, update: {} });
@@ -47,8 +51,10 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
     vi.unstubAllGlobals();
     env.otpProvider = previousProvider;
     env.welcomeBonusEnabled = previousBonusEnabled;
+    env.financialOperationsEnabled = previousFinancialOperationsEnabled;
     env.demoLoginPhoneE164 = previousDemoPhone;
     env.demoLoginPassword = previousDemoPassword;
+    env.depositReceiverUpiId = previousDepositReceiver;
     const users = await db.user.findMany({ where: { phoneE164: { in: testPhones } }, select: { id: true } });
     const userIds = users.map((user) => user.id);
     await db.$transaction(async (tx) => {
@@ -259,7 +265,7 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
     expect(response.body.deposit.status).toBe('PENDING_PAYMENT');
     expect(response.body.paymentStarted).toBe(false);
     expect(response.body.manualVerificationAvailable).toBe(true);
-    expect(response.body.deposit.receiverVpa).toBe('zitch@ptyes');
+    expect(response.body.deposit.receiverVpa).toBe(env.depositReceiverUpiId);
     expect(response.body.message).toMatch(/remains pending/i);
     expect(await db.ledgerTransaction.count({ where: { referenceId: response.body.deposit.id } })).toBe(0);
     expect(await db.deposit.count({ where: { userId: session.body.user.id } })).toBe(1);

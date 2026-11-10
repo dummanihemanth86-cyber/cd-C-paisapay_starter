@@ -2,6 +2,8 @@
 
 This procedure provisions exactly two SUPER_ADMIN accounts for the isolated Render staging service and database. It does not create user accounts, send OTPs, create ledger accounts, write ledger transactions, or enable any financial feature. It does not modify or call `scripts/ownerAdminBootstrap.ts`, the production Neon project, or the production API.
 
+For a first-time staging environment that intentionally needs exactly one Admin, use the separate [single SUPER_ADMIN bootstrap guide](STAGING_SINGLE_SUPER_ADMIN_BOOTSTRAP.md). Both bootstrap tools share the same first-time advisory lock and refuse to proceed once any Admin exists. The two-account procedure remains available for staging maker-checker testing; the single-account procedure does not relax production controls.
+
 ## Security design
 
 - The separate CLI accepts only the dedicated `PAISAPAY_STAGING_ADMIN_DATABASE_URL` variable. It never falls back to `DATABASE_URL`, `DIRECT_DATABASE_URL`, `DATABASE_URL_UNPOOLED`, or a `.env` file.
