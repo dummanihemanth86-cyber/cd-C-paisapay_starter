@@ -6,7 +6,7 @@
   "scripts": {
     "start": "expo start --go --lan --clear",
     "test:bird": "node --test src/bird/assistantEngine.test.cjs",
-    "test:integration": "node --test src/apiEnvironment.test.cjs src/apiRetry.test.cjs src/financialApiFallback.test.cjs src/sessionPersistence.test.cjs src/securityPasswordResetUi.test.cjs src/customerBranding.test.cjs src/walletBalanceRefresh.test.cjs",
+    "test:integration": "node --test src/apiEnvironment.test.cjs src/apiRetry.test.cjs src/appUpdate.test.cjs src/financialApiFallback.test.cjs src/sessionPersistence.test.cjs src/securityPasswordResetUi.test.cjs src/customerBranding.test.cjs src/walletBalanceRefresh.test.cjs src/homeFinancialUx.test.cjs src/p2pSellerConfirmationUi.test.cjs",
     "start:dev-client": "expo start --dev-client --tunnel --clear",
     "android": "expo run:android",
     "prebuild:android": "expo prebuild --platform android",

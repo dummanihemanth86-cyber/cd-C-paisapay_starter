@@ -382,6 +382,7 @@ model P2pDepositOrder {
   paymentHandoffStartedAt DateTime?          @map("payment_handoff_started_at") @db.Timestamptz(3)
   cancellationRequestedAt DateTime?          @map("cancellation_requested_at") @db.Timestamptz(3)
   claims            P2pPaymentClaim[]
+  sellerPaymentConfirmation P2pSellerPaymentConfirmation?
   createdAt         DateTime               @default(now()) @map("created_at")
   updatedAt         DateTime               @updatedAt @map("updated_at")
 
@@ -391,6 +392,16 @@ model P2pDepositOrder {
   @@index([withdrawalOfferId, createdAt])
   @@index([status, expiresAt])
   @@map("p2p_deposit_orders")
+}
+
+model P2pSellerPaymentConfirmation {
+  id                  String          @id @default(uuid()) @db.Uuid
+  orderId             String          @unique @map("order_id") @db.Uuid
+  order               P2pDepositOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  transactionReference String         @unique @map("transaction_reference") @db.VarChar(120)
+  confirmedAt         DateTime        @default(now()) @map("confirmed_at") @db.Timestamptz(3)
+
+  @@map("p2p_seller_payment_confirmations")
 }
 
 model P2pPaymentClaim {

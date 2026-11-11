@@ -45,6 +45,10 @@ projects:
                 value: disabled
               - key: FINANCIAL_OPERATIONS_ENABLED
                 value: 'false'
+              - key: MANUAL_UPI_OPERATIONS_ENABLED
+                value: 'false'
+              - key: MANUAL_UPI_PRODUCTION_APPROVED
+                value: 'false'
               - key: WALLET_ADJUSTMENTS_ENABLED
                 value: 'false'
               - key: ADMIN_WALLET_FUNDING_ENABLED

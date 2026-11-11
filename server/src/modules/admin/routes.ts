@@ -257,8 +257,9 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     role,
     allowedSections,
     // Read-only capability metadata for Admin UI explanations. Mutation
-    // authorization continues to run through financialOperationsGate.
+    // authorization continues to run in each server-side route gate.
     financialOperationsEnabled: env.financialOperationsEnabled,
+    manualUpiOperationsEnabled: env.manualUpiOperationsEnabled,
     walletAdjustmentAllowed,
     walletAdjustmentsEnabled: role === 'SUPER_ADMIN' ? env.walletAdjustmentsEnabled && walletProductionAuthorized : walletAdjustmentAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
     walletCreditsAllowed,

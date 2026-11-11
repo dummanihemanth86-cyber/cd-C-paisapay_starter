@@ -108,7 +108,7 @@ describe('PaisaPay API foundation', () => {
       'post /users/me/bank-accounts', 'patch /users/me/bank-accounts/{id}', 'post /wallet-references', 'post /deposits',
       'post /deposits/{id}/manual-verification', 'post /admin/reconciliation/claims/{claimId}/review', 'post /orders',
       'post /orders/{id}/reservations', 'post /withdrawals', 'post /deposits/quick-match',
-      'post /deposits/orders/{id}/confirm', 'post /deposits/orders/{id}/handoff-attempt', 'post /deposits/orders/{id}/payment-reference',
+      'post /deposits/orders/{id}/confirm', 'post /deposits/orders/{id}/handoff-attempt', 'post /deposits/orders/{id}/payment-reference', 'post /deposits/orders/{id}/seller-received',
       'post /orders/{id}/dispute', 'post /admin/p2p/offers/{id}/cancel', 'post /admin/p2p/claims/{id}/review',
       'post /support/tickets', 'post /admin/users/{id}/status',
       'post /admin/wallet/credits/requests', 'post /admin/wallet/credits/requests/{id}/decision',
@@ -116,7 +116,7 @@ describe('PaisaPay API foundation', () => {
       'patch /admin/referrals/config', 'patch /admin/referrals/milestones/{key}', 'post /admin/support/tickets/{id}/reply',
       'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}',
     ];
-    expect(new Set(documentedJsonHandlers).size).toBe(42);
+    expect(new Set(documentedJsonHandlers).size).toBe(43);
     for (const entry of documentedJsonHandlers) {
       const separator = entry.indexOf(' ');
       const method = entry.slice(0, separator);
@@ -150,7 +150,7 @@ describe('PaisaPay API foundation', () => {
             }
           }
         }
-        const isPublic = path === '/config' || path === '/api/v2/availability' || path.startsWith('/auth/') || path === '/admin/app-version' || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
+        const isPublic = path === '/config' || path === '/app-version' || path === '/api/v2/availability' || path.startsWith('/auth/') || path === '/admin/app-version' || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
         if (!isPublic) expect(operation.security, `${method.toUpperCase()} ${path} security`).toEqual([{ bearerAuth: [] }]);
       }
     }
@@ -297,6 +297,12 @@ describe('PaisaPay API foundation', () => {
     const legacy = await request(app).get('/api/v1/config').expect(200);
     expect(legacy.body).not.toHaveProperty('schemaVersion');
     expect(legacy.body).toHaveProperty('financialOperations.capabilities');
+  });
+
+  it('does not advertise an app update until a complete HTTPS release is configured', async () => {
+    const response = await request(app).get('/api/v1/app-version').expect(503);
+    expect(response.body.error.code).toBe('APP_RELEASE_NOT_CONFIGURED');
+    assertOpenApiResponse(openapi, 'GET', '/app-version', response);
   });
 
   it('returns helpful API information at root', async () => {

@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { PRODUCTION_API, STAGING_API, resolveApiBaseUrl } = require('./apiEnvironment.cjs');
 const easConfig = require('../eas.json');
 const packageConfig = require('../package.json');
@@ -57,4 +59,11 @@ test('release builds reject other hosts, paths, empty URLs and unknown environme
 test('development permits local HTTP while still requiring a valid origin', () => {
   assert.equal(resolveApiBaseUrl({ apiUrl: 'http://127.0.0.1:4000', isDev: true }), 'http://127.0.0.1:4000');
   assert.throws(() => resolveApiBaseUrl({ apiUrl: 'ftp://api.example', isDev: true }), /HTTP or HTTPS/);
+});
+
+test('debug APK configuration does not require release signing secrets', () => {
+  const gradle = fs.readFileSync(path.resolve(__dirname, '../android/app/build.gradle'), 'utf8');
+  assert.match(gradle, /if\s*\(releaseBuildRequested\s*&&\s*!releaseSigningConfigured\)/);
+  assert.match(gradle, /debug\s*\{\s*signingConfig signingConfigs\.debug\s*\}/s);
+  assert.match(gradle, /release\s*\{\s*if\s*\(releaseSigningConfigured\)\s*\{/s);
 });

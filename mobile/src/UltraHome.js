@@ -3,6 +3,7 @@ import { Animated, Image, Platform, ScrollView, StyleSheet, Text, TouchableOpaci
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { apiGet } from './api';
+const { shouldShowPromotionalBanner, vipProgressStatusLabel } = require('./homeFinancialUx.cjs');
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -135,7 +136,7 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
       </TouchableOpacity>
     </View>
 
-    <View style={[styles.promoBannerFrame, { backgroundColor: palette.surface, borderColor: palette.gold }]}>
+    {shouldShowPromotionalBanner(financialOperationsEnabled) && <View style={[styles.promoBannerFrame, { backgroundColor: palette.surface, borderColor: palette.gold }]}>
       <View style={styles.promoBannerViewport}>
         <Animated.Image
           accessibilityLabel={['PaisaPay 7 percent commission banner', 'PaisaPay daily earnings banner', 'PaisaPay rules banner'][bannerIndex]}
@@ -144,7 +145,7 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
           style={[styles.promoBanner, { transform: [{ translateX: bannerSlide }] }]}
         />
       </View>
-    </View>
+    </View>}
 
     {financialOperationsEnabled !== true && <View accessibilityRole="alert" style={[styles.financialDisabledBanner, { backgroundColor: palette.warningSurface, borderColor: palette.gold }]}>
       <Text style={[styles.financialDisabledTitle, { color: palette.warningText }]}>Financial actions are temporarily unavailable</Text>
@@ -186,11 +187,11 @@ export default function UltraHome({ balance, pendingBalance, reservedBalance, re
             <View style={[styles.vipGem, { backgroundColor: palette.warningSurface }]}><Text style={{ color: palette.gold, fontSize: 20 }}>✦</Text></View>
             <View><Text style={[styles.vipEyebrow, { color: palette.gold }]}>PAISAPAY REWARDS</Text><Text style={[styles.vipTitle, { color: palette.ink }]}>VIP levels</Text></View>
           </View>
-          <View style={[styles.vipPreviewPill, { backgroundColor: vipData?.programStatus === 'ACTIVE' ? palette.successSurface : palette.warningSurface }]}><Text style={{ color: vipData?.programStatus === 'ACTIVE' ? palette.green : palette.warningText, fontSize: 9, fontWeight: '900' }}>{vipData?.programStatus === 'ACTIVE' ? `VIP ${vipData.currentLevel || 0} ACTIVE` : 'CONNECTING'}</Text></View>
+          <View style={[styles.vipPreviewPill, { backgroundColor: vipData?.programStatus === 'ACTIVE' ? palette.successSurface : palette.warningSurface }]}><Text style={{ color: vipData?.programStatus === 'ACTIVE' ? palette.green : palette.warningText, fontSize: 9, fontWeight: '900' }}>{vipProgressStatusLabel(vipData)}</Text></View>
         </View>
         <View style={[styles.vipRewardStrip, { backgroundColor: palette.navy, borderColor: palette.gold }]}>
           <Text style={styles.vipRewardAmount}>{vipData ? `${vipData.activeLevels || 0}/5` : '—'}</Text>
-          <View style={{ flex: 1 }}><Text style={styles.vipRewardLabel}>LIVE VERIFIED PROGRESS</Text><Text style={styles.vipRewardSub}>VIP rewards are credited only when funded</Text></View>
+          <View style={{ flex: 1 }}><Text style={styles.vipRewardLabel}>SERVER-REPORTED PROGRESS</Text><Text style={styles.vipRewardSub}>VIP rewards are credited only when funded</Text></View>
           <Text style={styles.vipSparkle}>✧</Text>
         </View>
         <View style={styles.vipTargets}>

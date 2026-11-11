@@ -17,6 +17,9 @@
     "ios": "expo run:ios",
     "test": "node --test"
   },
+  "devDependencies": {
+    "@babel/parser": "7.29.12"
+  },
   "dependencies": {
     "expo": "~54.0.0",
     "expo-clipboard": "~8.0.8",

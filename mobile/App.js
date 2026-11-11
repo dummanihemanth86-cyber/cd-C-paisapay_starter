@@ -54,6 +54,7 @@
   var _upiSetupScreen = _interopDefault(require("./src/UpiSetupScreen"));
   var _referralScreens = require("./src/ReferralScreens");
   var _profileScreen = _interopDefault(require("./src/ProfileScreen"));
+  var _appUpdatePrompt = _interopDefault(require("./src/AppUpdatePrompt"));
   var _birdAssistant = _interopDefault(require("./src/bird/BirdAssistant"));
   var _reactJsxRuntime = require("react/jsx-runtime");
   var PALETTES = {
@@ -1465,7 +1466,7 @@
     }, void 0);
   }
   function App() {
-    return _react.createElement(_safeAreaContext.SafeAreaProvider, null, _react.createElement(AppContent));
+    return _react.createElement(_safeAreaContext.SafeAreaProvider, null, _react.createElement(_react.Fragment, null, _react.createElement(AppContent), _react.createElement(_appUpdatePrompt.default)));
   }
   function Page(_ref21) {
     var children = _ref21.children,

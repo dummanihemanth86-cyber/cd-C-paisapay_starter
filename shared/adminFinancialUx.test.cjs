@@ -6,8 +6,9 @@ test('payment review is Finance/Admin/Super Admin only and follows the server ga
   for (const role of ['FINANCE', 'ADMIN', 'SUPER_ADMIN']) {
     assert.equal(canViewFinancialAction('paymentVerification', role), true);
     assert.equal(financialActionState('paymentVerification', role, false).enabled, false);
-    assert.match(financialActionState('paymentVerification', role, false).reason, /safety gate is disabled/i);
-    assert.equal(financialActionState('paymentVerification', role, true).enabled, true);
+    assert.match(financialActionState('paymentVerification', role, false, null).reason, /has not confirmed manual UPI review availability/i);
+    assert.match(financialActionState('paymentVerification', role, false, false).reason, /safety gate is disabled/i);
+    assert.equal(financialActionState('paymentVerification', role, true, true).enabled, true);
     assert.equal(financialActionState('paymentVerification', role, undefined).enabled, false);
     assert.match(financialActionState('paymentVerification', role, undefined).reason, /has not confirmed/i);
   }

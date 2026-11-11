@@ -57,9 +57,10 @@ import { app } from '../app.js';
 describe('authenticated API response contracts (in-memory Prisma mock)', () => {
   const authorization = { Authorization: 'Bearer isolated-openapi-contract-token' };
   const previousFinancialOperationsEnabled = env.financialOperationsEnabled;
+  const previousManualUpiOperationsEnabled = env.manualUpiOperationsEnabled;
 
-  beforeAll(() => { env.financialOperationsEnabled = true; });
-  afterAll(() => { env.financialOperationsEnabled = previousFinancialOperationsEnabled; });
+  beforeAll(() => { env.financialOperationsEnabled = true; env.manualUpiOperationsEnabled = true; });
+  afterAll(() => { env.financialOperationsEnabled = previousFinancialOperationsEnabled; env.manualUpiOperationsEnabled = previousManualUpiOperationsEnabled; });
 
   it('validates successful authenticated responses across user and finance modules', async () => {
     const cases: Array<[string, string]> = [
@@ -312,7 +313,9 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
 
   it('returns the stable 503 gate response for financial operations before database mutations', async () => {
     const previous = env.financialOperationsEnabled;
+    const previousManualUpi = env.manualUpiOperationsEnabled;
     env.financialOperationsEnabled = false;
+    env.manualUpiOperationsEnabled = false;
     try {
       await request(app).post('/api/v1/deposits').send({ amountPaise: 10000, method: 'UPI' }).expect(401);
       await request(app).post('/api/v1/withdrawals').send({ amountPaise: 10000 }).expect(401);
@@ -327,8 +330,9 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
           .replaceAll(':key', 'TIER_5');
         const method = verb.toLowerCase() as typeof methods[number];
         const endpoint = request(app)[method](path).set(authorization);
-        const response = method === 'get' ? await endpoint.expect(503) : await endpoint.send({}).expect(503);
-        expect(response.body.error.code, `${verb} ${template}`).toBe('FINANCIAL_OPERATIONS_DISABLED');
+        const response = method === 'get' ? await endpoint : await endpoint.send({});
+        expect(response.status, `${verb} ${template}`).toBe(503);
+        expect(['FINANCIAL_OPERATIONS_DISABLED', 'MANUAL_UPI_OPERATIONS_DISABLED'], `${verb} ${template}`).toContain(response.body.error.code);
         expect(response.headers['content-type'], `${verb} ${template}`).toContain('application/json');
       }
 
@@ -344,6 +348,7 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
       expect(fakeDatabase.writes).toHaveLength(beforeWrites);
     } finally {
       env.financialOperationsEnabled = previous;
+      env.manualUpiOperationsEnabled = previousManualUpi;
     }
   });
 

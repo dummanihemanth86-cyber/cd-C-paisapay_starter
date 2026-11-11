@@ -4,7 +4,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { env } from '../config/env.js';
-import { assertFinancialOperationsEnabled, FINANCIAL_OPERATION_ROUTE_MANIFEST, FINANCIAL_OPERATIONS_DISABLED_CODE, financialOperationsGate } from '../middleware/financialOperations.js';
+import { assertFinancialOperationsEnabled, assertManualUpiOperationsEnabled, FINANCIAL_OPERATION_ROUTE_MANIFEST, FINANCIAL_OPERATIONS_DISABLED_CODE, MANUAL_UPI_OPERATIONS_DISABLED_CODE, financialOperationsGate, manualUpiOperationsGate } from '../middleware/financialOperations.js';
 import { openapi } from '../openapi.js';
 import { createWithdrawalOffer, releaseOfferFunds, reserveOfferFunds } from '../modules/p2p/service.js';
 import { grantVerifiedP2pOrderReward, grantVerifiedUpiDepositReward } from '../modules/payments/depositReward.js';
@@ -43,6 +43,7 @@ describe('financial operations safety gate policy', () => {
 
   it('defaults to disabled in the test environment and has a stable error code', () => {
     expect(env.financialOperationsEnabled).toBe(false);
+    expect(env.manualUpiOperationsEnabled).toBe(false);
     expect(env.stagingDirectWalletCreditsEnabled).toBe(false);
     expect(env.walletAdjustmentsEnabled).toBe(false);
     expect(FINANCIAL_OPERATIONS_DISABLED_CODE).toBe('FINANCIAL_OPERATIONS_DISABLED');
@@ -68,21 +69,47 @@ describe('financial operations safety gate policy', () => {
 
   it('blocks direct financial service calls before any database operation while disabled', async () => {
     const previous = env.financialOperationsEnabled;
+    const previousManual = env.manualUpiOperationsEnabled;
     env.financialOperationsEnabled = false;
+    env.manualUpiOperationsEnabled = false;
     let databaseCalls = 0;
     const tx = new Proxy({}, { get: () => { databaseCalls += 1; throw new Error('Database must not be touched while financial operations are disabled.'); } });
     try {
       const expected = { code: FINANCIAL_OPERATIONS_DISABLED_CODE, statusCode: 503 };
-      await expect(createWithdrawalOffer({ userId: 'user', amountPaise: 10_000, idempotencyKey: 'test-key-123' })).rejects.toMatchObject(expected);
-      await expect(releaseOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null, 'P2P_WITHDRAWAL_CANCELLED')).rejects.toMatchObject(expected);
-      await expect(reserveOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null)).rejects.toMatchObject(expected);
-      await expect(expireUnpaidUpiDeposits(tx as never)).rejects.toMatchObject(expected);
+      const manualExpected = { code: MANUAL_UPI_OPERATIONS_DISABLED_CODE, statusCode: 503 };
+      await expect(createWithdrawalOffer({ userId: 'user', amountPaise: 10_000, idempotencyKey: 'test-key-123' })).rejects.toMatchObject(manualExpected);
+      await expect(releaseOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null, 'P2P_WITHDRAWAL_CANCELLED')).rejects.toMatchObject(manualExpected);
+      await expect(reserveOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null)).rejects.toMatchObject(manualExpected);
+      await expect(expireUnpaidUpiDeposits(tx as never)).rejects.toMatchObject(manualExpected);
       await expect(grantVerifiedUpiDepositReward(tx as never, { depositId: 'deposit', userId: 'user', actorUserId: 'admin', amountPaise: 10_000n })).rejects.toMatchObject(expected);
       await expect(grantVerifiedP2pOrderReward(tx as never, { orderId: 'order', userId: 'user', actorUserId: 'admin', amountPaise: 10_000n })).rejects.toMatchObject(expected);
       await expect(recordVerifiedReferralCommission(tx as never, { sourceReference: 'test', sourceUserId: 'user', actorUserId: 'admin', amountPaise: 10_000n })).rejects.toMatchObject(expected);
       expect(databaseCalls).toBe(0);
     } finally {
       env.financialOperationsEnabled = previous;
+      env.manualUpiOperationsEnabled = previousManual;
+    }
+  });
+
+  it('uses a separate, explicit manual UPI gate without enabling the provider financial gate', async () => {
+    const previousFinancial = env.financialOperationsEnabled;
+    const previousManual = env.manualUpiOperationsEnabled;
+    const testApp = express();
+    testApp.post('/manual-upi', manualUpiOperationsGate, (_req, res) => res.status(204).end());
+    const gateErrorHandler: ErrorRequestHandler = (error, _req, res, _next) => res.status(error.statusCode).json({ error: { code: error.code, message: error.message } });
+    testApp.use(gateErrorHandler);
+    try {
+      env.financialOperationsEnabled = false;
+      env.manualUpiOperationsEnabled = false;
+      const disabled = await request(testApp).post('/manual-upi').expect(503);
+      expect(disabled.body.error.code).toBe(MANUAL_UPI_OPERATIONS_DISABLED_CODE);
+      env.manualUpiOperationsEnabled = true;
+      await request(testApp).post('/manual-upi').expect(204);
+      expect(env.financialOperationsEnabled).toBe(false);
+      expect(() => assertManualUpiOperationsEnabled()).not.toThrow();
+    } finally {
+      env.financialOperationsEnabled = previousFinancial;
+      env.manualUpiOperationsEnabled = previousManual;
     }
   });
 
@@ -104,6 +131,30 @@ describe('financial operations safety gate policy', () => {
       FINANCIAL_OPERATIONS_ENABLED: 'false',
     });
     expect(result.status).toBe(0);
+  });
+
+  it('allows the explicit staging manual UPI gate while the provider financial gate stays off', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+      MANUAL_UPI_OPERATIONS_ENABLED: 'true',
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('rejects production manual UPI enablement without an explicit production approval flag', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'production',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+      MANUAL_UPI_OPERATIONS_ENABLED: 'true',
+      MANUAL_UPI_PRODUCTION_APPROVED: 'false',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Production manual UPI operations require MANUAL_UPI_PRODUCTION_APPROVED=true');
   });
 
   it('allows the separate direct-credit flag only on the explicitly identified staging service', () => {

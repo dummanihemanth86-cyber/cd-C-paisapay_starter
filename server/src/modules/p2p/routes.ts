@@ -6,9 +6,10 @@ import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { uuidRef } from '../../lib/security.js';
 import { requireAdmin, requireAuth } from '../../middleware/auth.js';
-import { assertFinancialOperationsEnabled, financialOperationsGate } from '../../middleware/financialOperations.js';
+import { assertManualUpiOperationsEnabled, manualUpiOperationsGate } from '../../middleware/financialOperations.js';
 import { env } from '../../config/env.js';
 import { grantVerifiedP2pOrderReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../payments/depositReward.js';
+import { lockPaymentReference } from '../payments/paymentReferenceLock.js';
 import { grantVerifiedReferralCommission } from '../users/referralCommission.js';
 import { committedP2pAmount, createWithdrawalOffer, deriveP2pOfferStatus, ensureOpenP2pOffersReserved, expireP2pOffers, expireUnconfirmedP2pMatches, p2pPaymentHandoffUnresolved, P2P_ACTIVE_ORDER_STATUSES, P2P_COMMITTED_ORDER_STATUSES, P2P_HELD_ORDER_STATUSES, P2P_MATCH_CONFIRM_TTL_MS, releaseOfferFunds, reserveOfferFunds, validateP2pEvidence } from './service.js';
 
@@ -24,7 +25,7 @@ p2pRouter.use((req, res, next) => {
     || path === '/deposits/quick-match'
     || path.startsWith('/deposits/orders/')
     || /^\/orders\/[^/]+\/dispute$/.test(path);
-  return p2pFinancialPath ? financialOperationsGate(req, res, next) : next();
+  return p2pFinancialPath ? manualUpiOperationsGate(req, res, next) : next();
 });
 
 const p2pLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, skip: () => env.isTest, message: { error: { code: 'P2P_RATE_LIMITED', message: 'Too many P2P requests. Wait and retry.' } } });
@@ -36,7 +37,7 @@ const idempotencyHeader = (req: import('express').Request) => {
 };
 const rupeeAmount = z.number().int().min(10_000).max(100_000_000).refine((value) => value % 10_000 === 0, 'Amount must be in increments of ₹100.');
 const quickDepositAmount = rupeeAmount.max(1_000_000, 'Quick deposit cannot exceed ₹10,000.');
-const transactionReference = z.string().trim().min(4).max(120).regex(/^[A-Za-z0-9._/-]+$/);
+const transactionReference = z.string().trim().min(4).max(120).regex(/^[A-Za-z0-9._/-]+$/).transform((value) => value.toUpperCase());
 // Proof claims can outlive the payment window. Older app/server versions left
 // those orders in a held/expired state even though the claim is still pending.
 // A pending claim remains reviewable, but rejection still requires Finance to
@@ -81,12 +82,14 @@ p2pRouter.post('/withdrawals', p2pLimit, asyncRoute(async (req, res) => {
 p2pRouter.get('/withdrawals', asyncRoute(async (req, res, next) => {
   // Let the existing route return legacy payout requests and add the owner's P2P offers.
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
-  await db.$transaction((tx) => expireP2pOffers(tx));
-  await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  if (env.manualUpiOperationsEnabled) {
+    await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+    await db.$transaction((tx) => expireP2pOffers(tx));
+    await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  }
   const [withdrawals, offers] = await Promise.all([
     db.withdrawal.findMany({ where: { userId: req.auth!.userId }, orderBy: { createdAt: 'desc' }, take: 100 }),
-    db.p2pWithdrawalOffer.findMany({ where: { userId: req.auth!.userId }, include: { orders: { orderBy: { createdAt: 'asc' }, include: { buyer: { select: { publicId: true, phoneE164: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } } }, orderBy: { createdAt: 'desc' }, take: 100 }),
+    db.p2pWithdrawalOffer.findMany({ where: { userId: req.auth!.userId }, include: { orders: { orderBy: { createdAt: 'asc' }, include: { buyer: { select: { publicId: true, phoneE164: true } }, sellerPaymentConfirmation: { select: { confirmedAt: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } } }, orderBy: { createdAt: 'desc' }, take: 100 }),
   ]);
   const orderEvents = await p2pOrderEvents(db, offers.flatMap((offer) => offer.orders.map((order) => order.id)));
   res.json({ serverTime: new Date(), withdrawals: withdrawals.map((row) => ({ ...row, amountPaise: Number(row.amountPaise) })), offers: await Promise.all(offers.map(async (row) => {
@@ -99,16 +102,18 @@ p2pRouter.get('/withdrawals', asyncRoute(async (req, res, next) => {
     const sellerFundsReservedPaise = row.amountPaise > completedPaise + (released._sum.creditPaise ?? 0n) ? row.amountPaise - completedPaise - (released._sum.creditPaise ?? 0n) : 0n;
     const status = deriveP2pOfferStatus(row.status, row.amountPaise, row.orders);
     const canMatch = !['CANCELLED', 'EXPIRED', 'SETTLED'].includes(row.status);
-    return { ...row, payeeVpa: undefined, status: status === 'OPEN' ? 'PENDING_MATCH' : status, amountPaise: Number(row.amountPaise), completedAmountPaise: Number(completedPaise), activeReservedPaise: Number(activeReservedPaise), disputedHeldPaise: Number(disputedHeldPaise), sellerFundsReservedPaise: Number(sellerFundsReservedPaise), matchedAmountPaise: Number(committedPaise), remainingAmountPaise: Number(availablePaise), availableAmountPaise: Number(canMatch ? availablePaise : 0n), orders: row.orders.map((order) => ({ ...order, buyer: { publicId: order.buyer.publicId, phoneMasked: `${order.buyer.phoneE164.slice(0, 3)}••••${order.buyer.phoneE164.slice(-3)}` }, verificationStatus: order.claims[0]?.status ?? 'NOT_SUBMITTED', handoffStatus: order.paymentHandoffStartedAt ? 'UPI_HANDOFF_REPORTED' : order.paymentDetailsShownAt ? 'PAYMENT_DETAILS_SHOWN' : 'NOT_STARTED', timestamps: p2pOrderTimestamps(order, orderEvents.get(order.id) ?? []), claims: order.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined })), amountPaise: Number(order.amountPaise) })) };
+    return { ...row, payeeVpa: undefined, status: status === 'OPEN' ? 'PENDING_MATCH' : status, amountPaise: Number(row.amountPaise), completedAmountPaise: Number(completedPaise), activeReservedPaise: Number(activeReservedPaise), disputedHeldPaise: Number(disputedHeldPaise), sellerFundsReservedPaise: Number(sellerFundsReservedPaise), matchedAmountPaise: Number(committedPaise), remainingAmountPaise: Number(availablePaise), availableAmountPaise: Number(canMatch ? availablePaise : 0n), orders: row.orders.map((order) => ({ ...order, buyer: { publicId: order.buyer.publicId, phoneMasked: `${order.buyer.phoneE164.slice(0, 3)}••••${order.buyer.phoneE164.slice(-3)}` }, sellerPaymentConfirmation: order.sellerPaymentConfirmation ? { confirmedAt: order.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, verificationStatus: order.claims[0]?.status ?? 'NOT_SUBMITTED', handoffStatus: order.paymentHandoffStartedAt ? 'UPI_HANDOFF_REPORTED' : order.paymentDetailsShownAt ? 'PAYMENT_DETAILS_SHOWN' : 'NOT_STARTED', timestamps: p2pOrderTimestamps(order, orderEvents.get(order.id) ?? []), claims: order.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: undefined })), amountPaise: Number(order.amountPaise) })) };
   })) });
   void next;
 }));
 
 p2pRouter.get('/withdrawals/marketplace', p2pLimit, asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
-  await db.$transaction((tx) => expireP2pOffers(tx));
-  await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  if (env.manualUpiOperationsEnabled) {
+    await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+    await db.$transaction((tx) => expireP2pOffers(tx));
+    await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  }
   // Include stale MATCHED rows: their historical order may have been cancelled
   // or expired, restoring available capacity without refreshing the cached offer status.
   const rows = await db.p2pWithdrawalOffer.findMany({ where: { status: { in: ['OPEN', 'PARTIALLY_MATCHED', 'MATCHED'] }, payeeName: { not: null }, expiresAt: { gt: new Date() }, userId: { not: req.auth!.userId }, user: { is: { upiId: { not: null }, upiDisplayName: { not: null } } } }, orderBy: { createdAt: 'asc' }, take: 100, select: { id: true, referenceId: true, amountPaise: true, paymentMethod: true, status: true, createdAt: true, expiresAt: true, orders: { where: { status: { in: P2P_COMMITTED_ORDER_STATUSES } }, select: { amountPaise: true, status: true } } } });
@@ -146,7 +151,7 @@ p2pRouter.post('/deposits/quick-match', p2pLimit, asyncRoute(async (req, res) =>
   }).parse(req.body);
   const key = `P2P_MATCH:${req.auth!.userId}:${idempotencyHeader(req)}`;
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+  if (env.manualUpiOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
   await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
   const prior = await db.p2pDepositOrder.findUnique({ where: { idempotencyKey: key }, include: { withdrawalOffer: { select: { referenceId: true, paymentMethod: true } } } });
   if (prior) {
@@ -221,7 +226,7 @@ function p2pRewardPreview(amountPaise: bigint) {
 p2pRouter.post('/deposits/orders/:id/confirm', p2pLimit, asyncRoute(async (req, res) => {
   z.object({}).strict().parse(req.body ?? {});
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+  if (env.manualUpiOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
   const result = await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM p2p_deposit_orders WHERE id = ${req.params.id}::uuid FOR UPDATE`;
     const order = await tx.p2pDepositOrder.findFirst({ where: { id: req.params.id, buyerUserId: req.auth!.userId }, include: { withdrawalOffer: true } });
@@ -287,13 +292,17 @@ p2pRouter.post('/deposits/orders/:id/payment-reference', p2pLimit, asyncRoute(as
     if (!['PAYMENT_PENDING', 'PAYMENT_EXPIRED_REVIEW', 'CANCELLED_PAYMENT_HOLD', 'PAYMENT_PROCESSING', 'DISPUTED'].includes(order.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'Order is not awaiting payment review.');
     if (order.claims.length) throw new HttpError(409, 'P2P_CLAIM_ALREADY_PENDING', 'Payment proof is already awaiting Finance review.');
     if (input.transactionReference) {
+      await lockPaymentReference(tx, input.transactionReference);
       const [usedP2pClaim, usedDeposit, usedManualClaim] = await Promise.all([
-        tx.p2pPaymentClaim.findUnique({ where: { transactionReference: input.transactionReference }, select: { id: true } }),
-        tx.deposit.findFirst({ where: { providerReference: input.transactionReference }, select: { id: true } }),
-        tx.manualPaymentClaim.findUnique({ where: { transactionReference: input.transactionReference }, select: { id: true } }),
+        tx.p2pPaymentClaim.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+        tx.deposit.findFirst({ where: { providerReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+        tx.manualPaymentClaim.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
       ]);
-      const usedP2pOrder = await tx.p2pDepositOrder.findFirst({ where: { providerReference: input.transactionReference }, select: { id: true } });
-      if (usedP2pClaim || usedDeposit || usedManualClaim || usedP2pOrder) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
+      const [usedP2pOrder, usedSellerReceipt] = await Promise.all([
+        tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+        tx.p2pSellerPaymentConfirmation.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      ]);
+      if (usedP2pClaim || usedDeposit || usedManualClaim || usedP2pOrder || usedSellerReceipt) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
     }
     const image = Buffer.from(input.evidenceImageBase64, 'base64');
     const claim = await tx.p2pPaymentClaim.create({ data: {
@@ -313,6 +322,59 @@ p2pRouter.post('/deposits/orders/:id/payment-reference', p2pLimit, asyncRoute(as
     return { claim, order: updated };
   });
   res.status(202).json({ claim: { id: result.claim.id, status: result.claim.status, transactionReference: result.claim.transactionReference, claimedAmountPaise: Number(result.claim.claimedAmountPaise), claimedPaidAt: result.claim.claimedPaidAt, createdAt: result.claim.createdAt, evidenceAttached: true }, order: { id: result.order.id, referenceId: result.order.referenceId, status: result.order.status }, message: 'Payment submitted. Waiting for verification. The UTR and image are unverified claims; no wallet credit was made.' });
+}));
+
+/** Seller receipt confirmation is an acknowledgement only. Finance still has
+ * to independently verify recipient-side records before ledger settlement. */
+p2pRouter.post('/deposits/orders/:id/seller-received', p2pLimit, asyncRoute(async (req, res) => {
+  const input = z.object({ transactionReference }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM p2p_deposit_orders WHERE id = ${req.params.id}::uuid FOR UPDATE`;
+    const order = await tx.p2pDepositOrder.findFirst({
+      where: { id: req.params.id, sellerUserId: req.auth!.userId },
+      include: { claims: { where: { status: 'PENDING_REVIEW' }, take: 1 } },
+    });
+    if (!order) throw new HttpError(404, 'P2P_ORDER_NOT_FOUND', 'Matched order was not found for this seller.');
+    await lockPaymentReference(tx, input.transactionReference);
+    if (!['PAYMENT_PROCESSING', 'DISPUTED', 'PAYMENT_EXPIRED_REVIEW', 'CANCELLED_PAYMENT_HOLD'].includes(order.status)) {
+      throw new HttpError(409, 'P2P_SELLER_CONFIRMATION_NOT_AVAILABLE', 'Seller receipt can be confirmed only after the buyer submits a payment claim.');
+    }
+    const claim = order.claims[0];
+    if (!claim) throw new HttpError(409, 'P2P_CLAIM_REQUIRED', 'The buyer must submit a payment claim before seller receipt can be recorded.');
+    if (claim.claimedAmountPaise !== order.amountPaise) throw new HttpError(409, 'P2P_CLAIM_AMOUNT_MISMATCH', 'The buyer claim amount does not exactly match this order. Finance review is required.');
+    if (claim.transactionReference && claim.transactionReference.trim().toUpperCase() !== input.transactionReference) {
+      throw new HttpError(409, 'P2P_SELLER_REFERENCE_MISMATCH', 'Enter the exact UTR/reference shown in the buyer claim. Contact Finance if the buyer submitted a different reference.');
+    }
+    const existing = await tx.p2pSellerPaymentConfirmation.findUnique({ where: { orderId: order.id } });
+    if (existing) {
+      if (existing.transactionReference !== input.transactionReference) throw new HttpError(409, 'P2P_SELLER_CONFIRMATION_IMMUTABLE', 'A different seller receipt reference is already recorded. Finance must resolve it.');
+      return { confirmation: existing, replayed: true, order };
+    }
+    const [usedP2pConfirmation, usedP2pClaim, usedDeposit, usedManualClaim, usedP2pOrder] = await Promise.all([
+      tx.p2pSellerPaymentConfirmation.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pPaymentClaim.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' }, id: { not: claim.id } }, select: { id: true } }),
+      tx.deposit.findFirst({ where: { providerReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      tx.manualPaymentClaim.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+    ]);
+    if (usedP2pConfirmation || usedP2pClaim || usedDeposit || usedManualClaim || usedP2pOrder) {
+      throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment. Finance must review it.');
+    }
+    const confirmation = await tx.p2pSellerPaymentConfirmation.create({ data: { orderId: order.id, transactionReference: input.transactionReference } });
+    await tx.auditLog.create({ data: {
+      actorId: req.auth!.userId, action: 'P2P_SELLER_PAYMENT_RECEIVED_CONFIRMED', target: `P2P_DEPOSIT_ORDER:${order.id}`,
+      reason: 'Seller acknowledged receipt against the buyer claim. This is a user assertion only and does not verify payment or settle the ledger.',
+      metadata: { confirmationId: confirmation.id, amountPaise: order.amountPaise.toString(), currency: 'INR' },
+    } });
+    return { confirmation, replayed: false, order };
+  }, { isolationLevel: 'Serializable' });
+  res.status(result.replayed ? 200 : 202).json({
+    confirmation: { orderId: result.order.id, confirmedAt: result.confirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' },
+    paymentVerified: false,
+    ledgerSettled: false,
+    message: 'Seller receipt acknowledgement saved. Finance must independently verify the exact UPI receipt before any wallet ledger settlement.',
+  });
 }));
 
 p2pRouter.post('/deposits/orders/:id/cancel', p2pLimit, asyncRoute(async (req, res) => {
@@ -357,27 +419,27 @@ p2pRouter.post('/deposits/orders/:id/cancel', p2pLimit, asyncRoute(async (req, r
 
 p2pRouter.get('/deposits/orders/my', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
-  const rows = await db.p2pDepositOrder.findMany({ where: { OR: [{ buyerUserId: req.auth!.userId }, { sellerUserId: req.auth!.userId }] }, include: { withdrawalOffer: { select: { id: true, referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, reviewReason: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
+  if (env.manualUpiOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+  const rows = await db.p2pDepositOrder.findMany({ where: { OR: [{ buyerUserId: req.auth!.userId }, { sellerUserId: req.auth!.userId }] }, include: { sellerPaymentConfirmation: { select: { confirmedAt: true } }, withdrawalOffer: { select: { id: true, referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, reviewReason: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
   const orderEvents = await p2pOrderEvents(db, rows.map((row) => row.id));
   const rewards = await db.ledgerTransaction.findMany({ where: { idempotencyKey: { in: rows.map((row) => `P2P_ORDER_REWARD:${row.id}`) } }, select: { idempotencyKey: true, metadata: true } });
   const rewardByOrder = new Map(rewards.map((reward) => [reward.idempotencyKey.slice('P2P_ORDER_REWARD:'.length), reward.metadata]));
   res.json({ serverTime: new Date(), orders: rows.map((row) => {
     const metadata = rewardByOrder.get(row.id) as Record<string, unknown> | undefined;
     const preview = row.buyerUserId === req.auth!.userId ? p2pRewardPreview(row.amountPaise) : undefined;
-    return { ...row, viewerRole: row.buyerUserId === req.auth!.userId ? 'BUYER' : 'SELLER', amountPaise: Number(row.amountPaise), withdrawalOffer: row.withdrawalOffer, timestamps: p2pOrderTimestamps(row, orderEvents.get(row.id) ?? []), reward: preview ? { ...preview, creditedPaise: Number(metadata?.amountPaise ?? 0) } : undefined, claims: row.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: row.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) };
+    return { ...row, viewerRole: row.buyerUserId === req.auth!.userId ? 'BUYER' : 'SELLER', sellerPaymentConfirmation: row.sellerPaymentConfirmation ? { confirmedAt: row.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(row.amountPaise), withdrawalOffer: row.withdrawalOffer, timestamps: p2pOrderTimestamps(row, orderEvents.get(row.id) ?? []), reward: preview ? { ...preview, creditedPaise: Number(metadata?.amountPaise ?? 0) } : undefined, claims: row.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: row.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) };
   }) });
 }));
 
 p2pRouter.get('/deposits/orders/:id', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
-  const order = await db.p2pDepositOrder.findUnique({ where: { id: req.params.id }, include: { withdrawalOffer: { select: { referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } });
+  if (env.manualUpiOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+  const order = await db.p2pDepositOrder.findUnique({ where: { id: req.params.id }, include: { sellerPaymentConfirmation: { select: { confirmedAt: true } }, withdrawalOffer: { select: { referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } });
   if (!order || (order.buyerUserId !== req.auth!.userId && order.sellerUserId !== req.auth!.userId)) throw new HttpError(404, 'P2P_ORDER_NOT_FOUND', 'Matched deposit order was not found.');
   const reward = order.buyerUserId === req.auth!.userId ? await db.ledgerTransaction.findUnique({ where: { idempotencyKey: `P2P_ORDER_REWARD:${order.id}` }, select: { metadata: true } }) : null;
   const orderEvents = await p2pOrderEvents(db, [order.id]);
   const rewardMetadata = reward?.metadata as Record<string, unknown> | undefined;
-  res.json({ serverTime: new Date(), order: { ...order, amountPaise: Number(order.amountPaise), timestamps: p2pOrderTimestamps(order, orderEvents.get(order.id) ?? []), reward: order.buyerUserId === req.auth!.userId ? { ...p2pRewardPreview(order.amountPaise), creditedPaise: Number(rewardMetadata?.amountPaise ?? 0) } : undefined, claims: order.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: order.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) } });
+  res.json({ serverTime: new Date(), order: { ...order, sellerPaymentConfirmation: order.sellerPaymentConfirmation ? { confirmedAt: order.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(order.amountPaise), timestamps: p2pOrderTimestamps(order, orderEvents.get(order.id) ?? []), reward: order.buyerUserId === req.auth!.userId ? { ...p2pRewardPreview(order.amountPaise), creditedPaise: Number(rewardMetadata?.amountPaise ?? 0) } : undefined, claims: order.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: order.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) } });
 }));
 
 p2pRouter.post('/orders/:id/dispute', p2pLimit, asyncRoute(async (req, res) => {
@@ -421,7 +483,7 @@ p2pRouter.get('/admin/p2p/offers', requireAdmin, asyncRoute(async (req, res) => 
 
 p2pRouter.post('/admin/p2p/offers/:id/cancel', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'OPERATIONS', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'P2P_REVIEW_REQUIRED', 'Operations or Finance access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const input = z.object({ reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
   const db = databaseRequired();
   const offer = await db.$transaction(async (tx) => {
@@ -466,12 +528,12 @@ p2pRouter.get('/admin/p2p/orders', requireAdmin, asyncRoute(async (req, res) => 
 
 p2pRouter.get('/admin/p2p/claims', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const db = databaseRequired(); const input = adminListInput.parse(req.query);
   const [total, claims] = await Promise.all([db.p2pPaymentClaim.count({ where: { status: 'PENDING_REVIEW' } }), db.p2pPaymentClaim.findMany({ where: { status: 'PENDING_REVIEW' }, select: {
     id: true, orderId: true, userId: true, transactionReference: true, status: true, claimedAmountPaise: true, claimedPaidAt: true,
     evidenceMimeType: true, evidenceReference: true, reviewReason: true, createdAt: true,
-    order: { select: { id: true, referenceId: true, amountPaise: true, status: true, createdAt: true, expiresAt: true, paymentDetailsShownAt: true, paymentHandoffStartedAt: true, cancellationRequestedAt: true, seller: { select: { id: true, publicId: true } }, withdrawalOffer: { select: { id: true, referenceId: true, payeeVpa: true, payeeName: true } } } },
+    order: { select: { id: true, referenceId: true, amountPaise: true, status: true, createdAt: true, expiresAt: true, paymentDetailsShownAt: true, paymentHandoffStartedAt: true, cancellationRequestedAt: true, sellerPaymentConfirmation: { select: { confirmedAt: true } }, seller: { select: { id: true, publicId: true } }, withdrawalOffer: { select: { id: true, referenceId: true, payeeVpa: true, payeeName: true } } } },
     user: { select: { id: true, publicId: true, phoneE164: true, displayName: true } },
   }, orderBy: { createdAt: 'asc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize })]);
   const events = claims.length ? await db.auditLog.findMany({ where: { target: { in: claims.map((claim) => `P2P_DEPOSIT_ORDER:${claim.orderId}`) } }, orderBy: { createdAt: 'asc' }, select: { target: true, action: true, createdAt: true, reason: true } }) : [];
@@ -486,12 +548,12 @@ p2pRouter.get('/admin/p2p/claims', requireAdmin, asyncRoute(async (req, res) => 
 
 p2pRouter.get('/admin/p2p/claims/:claimId', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const db = databaseRequired();
   const claim = await db.p2pPaymentClaim.findUnique({ where: { id: req.params.claimId }, select: {
     id: true, status: true, transactionReference: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true, createdAt: true, reviewReason: true,
     user: { select: { id: true, publicId: true, displayName: true, phoneE164: true } },
-    order: { select: { id: true, referenceId: true, buyerUserId: true, sellerUserId: true, amountPaise: true, currency: true, status: true, createdAt: true, expiresAt: true, paymentDetailsShownAt: true, paymentHandoffStartedAt: true, cancellationRequestedAt: true, seller: { select: { id: true, publicId: true } }, withdrawalOffer: { select: { id: true, referenceId: true, payeeVpa: true, payeeName: true } } } },
+    order: { select: { id: true, referenceId: true, buyerUserId: true, sellerUserId: true, amountPaise: true, currency: true, status: true, createdAt: true, expiresAt: true, paymentDetailsShownAt: true, paymentHandoffStartedAt: true, cancellationRequestedAt: true, sellerPaymentConfirmation: { select: { confirmedAt: true } }, seller: { select: { id: true, publicId: true } }, withdrawalOffer: { select: { id: true, referenceId: true, payeeVpa: true, payeeName: true } } } },
   } });
   if (!claim) throw new HttpError(404, 'P2P_CLAIM_NOT_FOUND', 'Payment verification claim was not found.');
   const events = await p2pOrderEvents(db, [claim.order.id]);
@@ -501,13 +563,13 @@ p2pRouter.get('/admin/p2p/claims/:claimId', requireAdmin, asyncRoute(async (req,
     claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise),
     evidenceAttached: Boolean(claim.evidenceMimeType),
     user: { id: claim.user.id, publicId: claim.user.publicId, displayName: claim.user.displayName, phoneMasked: `${claim.user.phoneE164.slice(0, 3)}••••${claim.user.phoneE164.slice(-3)}` },
-    order: { ...claim.order, amountPaise: Number(claim.order.amountPaise), timestamps: p2pOrderTimestamps(claim.order, timeline), timeline },
+    order: { ...claim.order, sellerPaymentConfirmation: claim.order.sellerPaymentConfirmation ? { confirmedAt: claim.order.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(claim.order.amountPaise), timestamps: p2pOrderTimestamps(claim.order, timeline), timeline },
   } });
 }));
 
 p2pRouter.get('/admin/p2p/claims/:claimId/evidence', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const claim = await databaseRequired().p2pPaymentClaim.findUnique({ where: { id: req.params.claimId }, select: { evidenceImage: true, evidenceMimeType: true } });
   if (!claim?.evidenceImage || !claim.evidenceMimeType) throw new HttpError(404, 'P2P_PAYMENT_EVIDENCE_NOT_FOUND', 'No payment image is attached to this claim.');
   res.set({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline; filename="p2p-payment-evidence"' });
@@ -516,7 +578,7 @@ p2pRouter.get('/admin/p2p/claims/:claimId/evidence', requireAdmin, asyncRoute(as
 
 p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const input = z.object({ decision: z.enum(['APPROVE', 'REJECT']), reason: z.string().trim().min(8).max(500), evidenceReference: z.string().trim().min(3).max(160), verifiedTransactionReference: transactionReference.optional(), verifiedAmountPaise: z.number().int().positive().optional(), verifiedCurrency: z.string().length(3).optional(), verifiedPayeeVpa: z.string().trim().min(3).max(100).optional(), receiverConfirmed: z.boolean().optional(), paymentNotReceivedConfirmed: z.boolean().optional() }).strict().superRefine((value, ctx) => {
     if (value.decision === 'APPROVE') for (const key of ['verifiedTransactionReference', 'verifiedAmountPaise', 'verifiedCurrency', 'verifiedPayeeVpa', 'receiverConfirmed'] as const) if (value[key] === undefined) ctx.addIssue({ code: 'custom', path: [key], message: 'Required for approval.' });
     if (value.decision === 'REJECT' && value.paymentNotReceivedConfirmed !== true) ctx.addIssue({ code: 'custom', path: ['paymentNotReceivedConfirmed'], message: 'Finance must confirm from recipient-side records that no payment was received and no late payment is pending before releasing the reservation.' });
@@ -530,6 +592,9 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     if (claim.status !== 'PENDING_REVIEW') throw new HttpError(409, 'P2P_CLAIM_ALREADY_REVIEWED', 'This payment claim has already been reviewed.');
     if (input.decision === 'REJECT') {
       if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting independent payment review.');
+      if (await tx.p2pSellerPaymentConfirmation.findUnique({ where: { orderId: claim.orderId }, select: { id: true } })) {
+        throw new HttpError(409, 'SELLER_CONFIRMED_RECEIPT', 'The seller has acknowledged receipt. Do not reject or release these funds; resolve the discrepancy through Finance review.');
+      }
       await tx.$queryRaw`SELECT id FROM p2p_withdrawal_offers WHERE id = ${claim.order.withdrawalOfferId}::uuid FOR UPDATE`;
       const updated = await tx.p2pPaymentClaim.update({ where: { id: claim.id }, data: { status: 'REJECTED', reviewedByUserId: req.auth!.userId, reviewedAt: new Date(), reviewReason: input.reason, evidenceReference: input.evidenceReference } });
       const rejectedOrder = await tx.p2pDepositOrder.update({ where: { id: claim.orderId }, data: { status: 'REJECTED' } });
@@ -554,16 +619,22 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
       ] });
       return { claim: updated, orderStatus: rejectedOrder.status, offerStatus, rematchableAmountPaise: remainingPaise, credited: false };
     }
+    await lockPaymentReference(tx, input.verifiedTransactionReference);
     const evidenceError = validateP2pEvidence({ claimedReference: claim.transactionReference, verifiedReference: input.verifiedTransactionReference!, expectedAmountPaise: claim.order.amountPaise, verifiedAmountPaise: BigInt(input.verifiedAmountPaise!), currency: input.verifiedCurrency!, receiverConfirmed: input.receiverConfirmed! });
     if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires independently verified exact transaction reference, INR amount, and recipient receipt.');
     if (input.verifiedPayeeVpa !== claim.order.withdrawalOffer.payeeVpa) throw new HttpError(409, 'PAYEE_MISMATCH', 'Verified recipient UPI ID does not match the payee on this matched offer.');
+    const sellerConfirmation = await tx.p2pSellerPaymentConfirmation.findUnique({ where: { orderId: claim.orderId } });
+    if (!sellerConfirmation) throw new HttpError(409, 'SELLER_RECEIPT_CONFIRMATION_REQUIRED', 'The seller must acknowledge receipt against the buyer claim before Finance can settle this P2P order.');
+    if (sellerConfirmation.transactionReference.trim().toUpperCase() !== input.verifiedTransactionReference) throw new HttpError(409, 'SELLER_RECEIPT_REFERENCE_MISMATCH', 'The seller receipt reference does not match the independently verified transaction reference. Resolve the discrepancy before settlement.');
     if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status) || !['MATCHED', 'PARTIALLY_MATCHED', 'CANCELLED'].includes(claim.order.withdrawalOffer.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting independent payment review.');
-    const [usedDeposit, usedP2pOrder, usedManualClaim] = await Promise.all([
-      tx.deposit.findFirst({ where: { providerReference: input.verifiedTransactionReference! }, select: { id: true } }),
-      tx.p2pDepositOrder.findFirst({ where: { providerReference: input.verifiedTransactionReference!, id: { not: claim.orderId } }, select: { id: true } }),
-      tx.manualPaymentClaim.findUnique({ where: { transactionReference: input.verifiedTransactionReference! }, select: { id: true } }),
+    const [usedDeposit, usedP2pOrder, usedManualClaim, usedP2pClaim, usedOtherSellerReceipt] = await Promise.all([
+      tx.deposit.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' }, id: { not: claim.orderId } }, select: { id: true } }),
+      tx.manualPaymentClaim.findFirst({ where: { transactionReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pPaymentClaim.findFirst({ where: { transactionReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' }, id: { not: claim.id } }, select: { id: true } }),
+      tx.p2pSellerPaymentConfirmation.findFirst({ where: { transactionReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' }, orderId: { not: claim.orderId } }, select: { id: true } }),
     ]);
-    if (usedDeposit || usedP2pOrder || usedManualClaim) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
+    if (usedDeposit || usedP2pOrder || usedManualClaim || usedP2pClaim || usedOtherSellerReceipt) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
     const sellerReserved = await getLedgerAccount(tx, claim.order.sellerUserId, 'RESERVED');
     const buyerAvailable = await getLedgerAccount(tx, claim.order.buyerUserId, 'AVAILABLE');
     await tx.$queryRaw`SELECT id FROM ledger_accounts WHERE id IN (${sellerReserved.id}::uuid, ${buyerAvailable.id}::uuid) ORDER BY id FOR UPDATE`;

@@ -20,6 +20,17 @@ const schema = z.object({
   UPI_DEPOSIT_REWARD_PERCENT_BPS: z.coerce.number().int().min(0).max(10_000).default(1_700),
   UPI_DEPOSIT_REWARD_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   UPI_DEPOSIT_REWARD_FUNDING_SOURCE: z.string().trim().default(''),
+  USER_APP_RELEASE_VERSION: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/).optional()),
+  USER_APP_RELEASE_BUILD_CODE: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.coerce.number().int().positive().optional()),
+  USER_APP_RELEASE_MIN_SUPPORTED_BUILD_CODE: z.coerce.number().int().nonnegative().default(0),
+  USER_APP_RELEASE_APK_URL: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Must use HTTPS.').optional()),
+  USER_APP_RELEASE_SHA256: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().regex(/^[a-fA-F0-9]{64}$/).optional()),
+  USER_APP_RELEASE_NOTES: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().max(500).optional()),
   DATABASE_URL: z.string().optional(),
   DIRECT_DATABASE_URL: z.string().optional(),
   DATABASE_URL_UNPOOLED: z.string().optional(),
@@ -37,6 +48,8 @@ const schema = z.object({
   RENFLAIR_API_KEY: z.string().trim().min(1).optional(),
   PAYMENT_PROVIDER: z.enum(['disabled', 'sandbox', 'cashfree-sandbox']).default('disabled'),
   FINANCIAL_OPERATIONS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  MANUAL_UPI_OPERATIONS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  MANUAL_UPI_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   WALLET_ADJUSTMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_FUNDING_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
@@ -73,6 +86,9 @@ const isExplicitRenderStaging = values.NODE_ENV === 'production'
   && process.env.RENDER_SERVICE_NAME === 'paisapay-api-staging';
 if (values.ADMIN_STAGING_DIRECT_CREDITS_ENABLED && !isExplicitRenderStaging) {
   throw new Error('ADMIN_STAGING_DIRECT_CREDITS_ENABLED may be enabled only on the explicitly identified paisapay-api-staging Render service with PAISAPAY_DEPLOYMENT_ENV=staging.');
+}
+if (values.MANUAL_UPI_PRODUCTION_APPROVED && !values.MANUAL_UPI_OPERATIONS_ENABLED) {
+  throw new Error('MANUAL_UPI_PRODUCTION_APPROVED requires MANUAL_UPI_OPERATIONS_ENABLED=true.');
 }
 if (Math.min(values.MAX_DEPOSIT_PAISE, 1_000_000) < values.MIN_DEPOSIT_PAISE) throw new Error('MIN_DEPOSIT_PAISE must not exceed the ₹10,000 deposit cap or MAX_DEPOSIT_PAISE.');
 if (Boolean(values.SMS_GATEWAY_URL) !== Boolean(values.SMS_GATEWAY_API_KEY)) {
@@ -155,6 +171,9 @@ if (values.NODE_ENV === 'production') {
   if (values.FINANCIAL_OPERATIONS_ENABLED && !isExplicitRenderStaging) {
     throw new Error('FINANCIAL_OPERATIONS_ENABLED may be enabled in production mode only for the explicitly identified paisapay-api-staging Render service with PAISAPAY_DEPLOYMENT_ENV=staging.');
   }
+  if (values.MANUAL_UPI_OPERATIONS_ENABLED && !isExplicitRenderStaging && !values.MANUAL_UPI_PRODUCTION_APPROVED) {
+    throw new Error('Production manual UPI operations require MANUAL_UPI_PRODUCTION_APPROVED=true after recipient, reconciliation, and Finance review controls are verified.');
+  }
   const anyAdminWalletGate = values.WALLET_ADJUSTMENTS_ENABLED || values.ADMIN_WALLET_FUNDING_ENABLED || values.ADMIN_WALLET_CREDITS_ENABLED;
   const allAdminWalletGates = values.WALLET_ADJUSTMENTS_ENABLED && values.ADMIN_WALLET_FUNDING_ENABLED && values.ADMIN_WALLET_CREDITS_ENABLED;
   if ((anyAdminWalletGate && (!allAdminWalletGates || !values.ADMIN_WALLET_PRODUCTION_APPROVED || !values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED)) || ((values.ADMIN_WALLET_PRODUCTION_APPROVED || values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED) && !allAdminWalletGates)) {
@@ -190,6 +209,12 @@ export const env = {
   upiDepositRewardPercentBps: values.UPI_DEPOSIT_REWARD_PERCENT_BPS,
   upiDepositRewardEnabled: values.UPI_DEPOSIT_REWARD_ENABLED,
   upiDepositRewardFundingSource: values.UPI_DEPOSIT_REWARD_FUNDING_SOURCE,
+  userAppReleaseVersion: values.USER_APP_RELEASE_VERSION,
+  userAppReleaseBuildCode: values.USER_APP_RELEASE_BUILD_CODE,
+  userAppReleaseMinSupportedBuildCode: values.USER_APP_RELEASE_MIN_SUPPORTED_BUILD_CODE,
+  userAppReleaseApkUrl: values.USER_APP_RELEASE_APK_URL,
+  userAppReleaseSha256: values.USER_APP_RELEASE_SHA256,
+  userAppReleaseNotes: values.USER_APP_RELEASE_NOTES,
   databaseUrl: values.DATABASE_URL,
   sessionHashSecret: values.SESSION_HASH_SECRET ?? (values.NODE_ENV === 'test' ? 'test-session-hash-secret-at-least-32-chars' : randomBytes(32).toString('hex')),
   bankAccountEncryptionKey: values.BANK_ACCOUNT_ENCRYPTION_KEY,
@@ -207,6 +232,8 @@ export const env = {
   renflairConfigured: Boolean(values.RENFLAIR_API_KEY),
   paymentProvider: values.PAYMENT_PROVIDER,
   financialOperationsEnabled: values.FINANCIAL_OPERATIONS_ENABLED,
+  manualUpiOperationsEnabled: values.MANUAL_UPI_OPERATIONS_ENABLED,
+  manualUpiProductionApproved: values.MANUAL_UPI_PRODUCTION_APPROVED,
   walletAdjustmentsEnabled: values.WALLET_ADJUSTMENTS_ENABLED,
   adminWalletFundingEnabled: values.ADMIN_WALLET_FUNDING_ENABLED,
   adminWalletCreditsEnabled: values.ADMIN_WALLET_CREDITS_ENABLED,

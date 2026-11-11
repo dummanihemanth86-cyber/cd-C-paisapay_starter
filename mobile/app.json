@@ -3,7 +3,7 @@
     "name": "PaisaPay",
     "slug": "paisapay",
     "scheme": "paisapay",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "splash": {
@@ -14,6 +14,7 @@
     },
     "android": {
       "package": "com.paisapay.app",
+      "versionCode": 2,
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.SYSTEM_ALERT_WINDOW",

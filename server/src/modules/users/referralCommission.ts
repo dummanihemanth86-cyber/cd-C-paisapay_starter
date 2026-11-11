@@ -1,5 +1,5 @@
 import type { Prisma } from '../../generated/prisma/client.js';
-import { assertFinancialOperationsEnabled } from '../../middleware/financialOperations.js';
+import { assertFinancialOrManualUpiOperationsEnabled } from '../../middleware/financialOperations.js';
 
 // Rates are in basis points. 40 bps = 0.4%; 10 bps = 0.1%.
 export const REFERRAL_COMMISSION_PERCENT_BPS = 40;
@@ -31,7 +31,7 @@ export async function recordVerifiedReferralCommission(
   tx: Prisma.TransactionClient,
   input: { sourceReference: string; sourceUserId: string; actorUserId: string; amountPaise: bigint },
 ): Promise<{ amountPaise: bigint; status: 'PENDING' | 'NONE' }> {
-  assertFinancialOperationsEnabled();
+  assertFinancialOrManualUpiOperationsEnabled();
   if (input.amountPaise <= 0n) return { amountPaise: 0n, status: 'NONE' };
   const source = await tx.user.findUnique({ where: { id: input.sourceUserId }, select: { referredById: true } });
   if (!source?.referredById || source.referredById === input.sourceUserId) return { amountPaise: 0n, status: 'NONE' };
@@ -79,7 +79,7 @@ export async function updateReferralMilestones(
   tx: Prisma.TransactionClient,
   input: { referrerId: string; actorUserId: string },
 ): Promise<void> {
-  assertFinancialOperationsEnabled();
+  assertFinancialOrManualUpiOperationsEnabled();
   const [rules, directMembers] = await Promise.all([
     tx.referralMilestoneRule.findMany({ where: { enabled: true }, orderBy: { requiredReferrals: 'asc' } }),
     tx.user.findMany({ where: { referredById: input.referrerId }, select: { id: true } }),

@@ -23,6 +23,7 @@ import { openapi } from './openapi.js';
 import { adminAuthRouter, adminRouter } from './modules/admin/routes.js';
 import { financialOperationsGate } from './middleware/financialOperations.js';
 import { isAllowedApiOrigin } from './config/adminWebOrigin.js';
+import { getConfiguredUserAppRelease } from './modules/appRelease/release.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -59,6 +60,21 @@ app.get('/api/v2/availability', asyncRoute(async (_req, res) => {
   const availability = await getPaymentMethodAvailability();
   res.json({ apiVersion: '2.0.0', schemaVersion: 2, ...availability });
 }));
+app.get('/api/v1/app-version', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  const release = getConfiguredUserAppRelease({
+    version: env.userAppReleaseVersion,
+    buildCode: env.userAppReleaseBuildCode,
+    minSupportedBuildCode: env.userAppReleaseMinSupportedBuildCode,
+    apkUrl: env.userAppReleaseApkUrl,
+    sha256: env.userAppReleaseSha256,
+    releaseNotes: env.userAppReleaseNotes,
+  });
+  if (!release) {
+    return res.status(503).json({ error: { code: 'APP_RELEASE_NOT_CONFIGURED', message: 'The latest User App release is not configured.' } });
+  }
+  return res.json(release);
+});
 // Compatibility alias for the earlier demo client. Remove after all installations use /api/v1.
 app.get('/v1/config', asyncRoute(async (_req, res) => {
   res.json({ ...await getPaymentMethodAvailability(), demoOnly: true });
@@ -85,7 +101,7 @@ app.use('/api/v1', (req, res, next) => {
   const path = req.path;
   const known = [
     ['/auth/request-otp', 'POST'], ['/auth/verify-otp', 'POST'], ['/auth/register/request-otp', 'POST'], ['/auth/register/verify-otp', 'POST'], ['/auth/forgot-password/request-otp', 'POST'], ['/auth/password/login', 'POST'], ['/auth/password/reset', 'POST'], ['/auth/refresh', 'POST'], ['/auth/logout', 'POST'],
-    ['/config', 'GET'], ['/wallet-methods', 'GET'], ['/wallet-references', 'GET'], ['/wallet-references', 'POST'], ['/users/me/vip', 'GET'], ['/admin/app-version', 'GET'],
+    ['/config', 'GET'], ['/app-version', 'GET'], ['/wallet-methods', 'GET'], ['/wallet-references', 'GET'], ['/wallet-references', 'POST'], ['/users/me/vip', 'GET'], ['/admin/app-version', 'GET'],
     ['/deposits', 'GET'], ['/deposits', 'POST'], ['/users/me', 'GET'], ['/users/me', 'PATCH'], ['/users/me/upi', 'GET'], ['/users/me/upi', 'PATCH'], ['/users/me/upi', 'DELETE'], ['/users/me/referrals', 'GET'],
     ['/users/me/bank-accounts', 'GET'], ['/users/me/bank-accounts', 'POST'],
     ['/users/me/balance', 'GET'], ['/users/me/transactions', 'GET'], ['/orders', 'GET'], ['/orders', 'POST'],
@@ -109,6 +125,7 @@ app.use('/api/v1', (req, res, next) => {
     (path === '/deposits/quick-match' && req.method === 'POST') ||
     (/^\/deposits\/orders\/[^/]+$/.test(path) && req.method === 'GET') ||
     (/^\/deposits\/orders\/[^/]+\/(confirm|handoff-attempt|payment-reference|cancel)$/.test(path) && req.method === 'POST') ||
+    (/^\/deposits\/orders\/[^/]+\/seller-received$/.test(path) && req.method === 'POST') ||
     (/^\/orders\/[^/]+\/dispute$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/p2p\/claims\/[^/]+\/review$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/p2p\/claims\/[^/]+$/.test(path) && req.method === 'GET') ||

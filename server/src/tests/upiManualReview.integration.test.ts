@@ -13,6 +13,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
   const db = prisma!;
   const previousDepositReceiver = env.depositReceiverUpiId;
   const previousFinancialOperationsEnabled = env.financialOperationsEnabled;
+  const previousManualUpiOperationsEnabled = env.manualUpiOperationsEnabled;
   const customerPhone = `+919${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '7')}`;
   const adminPhone = `+918${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '6')}`;
   const referrerPhone = `+917${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '5')}`;
@@ -37,6 +38,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
   beforeAll(async () => {
     await db.$connect();
     env.financialOperationsEnabled = true;
+    env.manualUpiOperationsEnabled = true;
     env.depositReceiverUpiId = 'test-only@okaxis';
     const [customer, admin, referrer, ancestor] = await Promise.all([
       db.user.create({ data: { phoneE164: customerPhone, displayName: 'UPI Test Customer' } }),
@@ -78,6 +80,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
 
   afterAll(async () => {
     env.financialOperationsEnabled = previousFinancialOperationsEnabled;
+    env.manualUpiOperationsEnabled = previousManualUpiOperationsEnabled;
     env.depositReceiverUpiId = previousDepositReceiver;
     if (!customerId || !adminId) return;
     await db.$transaction(async (tx) => {

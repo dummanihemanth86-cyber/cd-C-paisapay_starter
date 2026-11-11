@@ -10,8 +10,8 @@ const ACTIONS = {
   paymentVerification: {
     roles: FINANCE_ROLES,
     implemented: true,
-    gate: true,
-    reason: 'Payment verification is unavailable while the server financial-operations safety gate is disabled. No approved live payment-verification integration is configured; submitted UTRs and screenshots are claims, not independent verification.',
+    manualGate: true,
+    reason: 'Manual UPI payment review is unavailable while the server manual UPI safety gate is disabled. Submitted UTRs and screenshots are claims, not independent verification.',
   },
   withdrawalVerification: {
     roles: P2P_READ_ROLES,
@@ -34,13 +34,22 @@ function canViewFinancialAction(action, role) {
   return Boolean(ACTIONS[action]?.roles.has(String(role || '').toUpperCase()));
 }
 
-function financialActionState(action, role, financialOperationsEnabled) {
+function financialActionState(action, role, financialOperationsEnabled, manualUpiOperationsEnabled) {
   const definition = ACTIONS[action];
   const visible = canViewFinancialAction(action, role);
-  const enabled = Boolean(visible && definition?.implemented && (!definition.gate || financialOperationsEnabled === true));
+  const gateAllows = definition?.manualGate
+    ? manualUpiOperationsEnabled === true
+    : !definition?.gate || financialOperationsEnabled === true;
+  const enabled = Boolean(visible && definition?.implemented && gateAllows);
   let reason = '';
   if (visible && !enabled) {
-    if (definition?.gate && financialOperationsEnabled == null) {
+    if (definition?.manualGate && manualUpiOperationsEnabled == null) {
+      reason = 'The server has not confirmed manual UPI review availability. This action stays disabled until its status is available.';
+    } else if (definition?.manualGate && manualUpiOperationsEnabled === true) {
+      reason = '';
+    } else if (definition?.manualGate) {
+      reason = definition?.reason || 'This action is unavailable.';
+    } else if (definition?.gate && financialOperationsEnabled == null) {
       reason = 'The server has not confirmed financial-operation availability. This action stays disabled until its status is available.';
     } else if (definition?.gate && financialOperationsEnabled === true) {
       reason = '';
