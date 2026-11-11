@@ -145,7 +145,7 @@ describe('PaisaPay API foundation', () => {
             }
           }
         }
-        const isPublic = path === '/config' || path.startsWith('/auth/') || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
+        const isPublic = path === '/config' || path === '/api/v2/availability' || path.startsWith('/auth/') || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
         if (!isPublic) expect(operation.security, `${method.toUpperCase()} ${path} security`).toEqual([{ bearerAuth: [] }]);
       }
     }
@@ -254,6 +254,34 @@ describe('PaisaPay API foundation', () => {
     expect(response.body.methods.find((item: { name: string }) => item.name === 'PhonePe').buyEnabled).toBe(false);
     expect(response.body.methods.every((item: { available: boolean }) => item.available === false)).toBe(true);
     expect(response.body.availabilityMessage).toMatch(/unavailable/);
+  });
+
+  it('serves a versioned availability contract and keeps P2P blockers separate from provider setup', async () => {
+    const response = await request(app).get('/api/v2/availability').expect(200);
+    expect(response.headers['cache-control']).toContain('no-store');
+    expect(response.body).toMatchObject({
+      apiVersion: '2.0.0',
+      schemaVersion: 2,
+      financialOperations: {
+        enabled: false,
+        gateEnabled: false,
+        status: 'UNAVAILABLE',
+        capabilities: {
+          addMoney: { available: false },
+          withdraw: { available: false },
+          quickDeposit: { available: false },
+          p2pMatching: { available: false },
+        },
+      },
+      livePaymentsEnabled: false,
+    });
+    expect(response.body.financialOperations.capabilities.p2pMatching.reason).toMatch(/disabled|readiness/i);
+    expect(response.body.financialOperations.capabilities.p2pMatching.reason).not.toMatch(/recipient|provider/i);
+    assertOpenApiResponse(openapi, 'GET', '/api/v2/availability', response);
+
+    const legacy = await request(app).get('/api/v1/config').expect(200);
+    expect(legacy.body).not.toHaveProperty('apiVersion');
+    expect(legacy.body).not.toHaveProperty('financialOperations');
   });
 
   it('returns helpful API information at root', async () => {

@@ -83,7 +83,7 @@ export function summarizeWalletActivation(statuses: string[]) {
   };
 }
 
-export async function getPaymentMethodAvailability() {
+export async function getPaymentMethodAvailability(options: { includeFinancialOperations?: boolean } = {}) {
   let configurations: StoredMethodConfiguration[] = [];
   let databaseAvailable = Boolean(prisma);
 
@@ -116,9 +116,53 @@ export async function getPaymentMethodAvailability() {
       }),
     };
   });
+  const livePaymentProviderAvailable = methods.some((method) => method.available && method.method !== 'CASHFREE');
+  const financialBlockers = [
+    ...(!env.financialOperationsEnabled ? ['Financial operations are disabled by the server safety gate.'] : []),
+    ...(!livePaymentProviderAvailable ? ['No approved, operational live payment provider is available.'] : []),
+    ...(!receiverVpa ? ['No authorized UPI recipient is configured.'] : []),
+  ];
+  const financialActionsAvailable = financialBlockers.length === 0;
+  const financialReason = financialActionsAvailable ? null : financialBlockers.join(' ');
+  const p2pAvailable = databaseAvailable && env.financialOperationsEnabled;
+  const p2pReason = !databaseAvailable
+    ? 'Database-backed P2P readiness could not be confirmed.'
+    : !env.financialOperationsEnabled
+      ? 'Manual UPI/P2P operations are disabled by the server safety gate.'
+      : null;
+
+  const operationsAvailable = financialActionsAvailable || p2pAvailable;
+  const financialOperations = {
+    enabled: operationsAvailable,
+    gateEnabled: env.financialOperationsEnabled,
+    status: operationsAvailable ? 'AVAILABLE' as const : 'UNAVAILABLE' as const,
+    reason: operationsAvailable ? null : financialReason,
+    blockers: financialBlockers,
+    capabilities: {
+      addMoney: {
+        available: financialActionsAvailable,
+        reason: financialReason,
+      },
+      withdraw: {
+        available: p2pAvailable,
+        reason: p2pReason,
+        type: 'P2P_OFFER_NOT_BANK_PAYOUT',
+      },
+      quickDeposit: {
+        available: p2pAvailable,
+        reason: p2pReason,
+      },
+      p2pMatching: {
+        available: p2pAvailable,
+        reason: p2pReason,
+      },
+    },
+  };
 
   return {
     currency: 'INR',
+    // Opt-in so existing /api/v1/config clients keep their legacy response shape.
+    ...(options.includeFinancialOperations ? { financialOperations } : {}),
     upiDeposit: {
       receiverVpa,
       minAmountPaise: env.minDepositPaise,

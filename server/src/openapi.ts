@@ -9,6 +9,50 @@ const openapiBase = {
     schemas: { Error: { type: 'object', properties: { error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } }, required: ['code', 'message'] } } } },
   },
   paths: {
+    '/api/v2/availability': {
+      get: {
+        servers: [{ url: '/' }],
+        security: [],
+        summary: 'Versioned public financial availability; does not enable financial operations',
+        responses: {
+          '200': {
+            description: 'Server-computed capabilities. Financial mutation routes remain guarded by server controls.',
+            content: { 'application/json': { schema: {
+              type: 'object',
+              required: ['apiVersion', 'schemaVersion', 'currency', 'financialOperations', 'upiDeposit', 'livePaymentsEnabled', 'sandboxPaymentsEnabled', 'methods'],
+              properties: {
+                apiVersion: { type: 'string', enum: ['2.0.0'] },
+                schemaVersion: { type: 'integer', enum: [2] },
+                currency: { type: 'string', enum: ['INR'] },
+                financialOperations: {
+                  type: 'object',
+                  required: ['enabled', 'gateEnabled', 'status', 'blockers', 'capabilities'],
+                  properties: {
+                    enabled: { type: 'boolean' },
+                    gateEnabled: { type: 'boolean' },
+                    status: { type: 'string', enum: ['AVAILABLE', 'UNAVAILABLE'] },
+                    reason: { type: 'string', nullable: true },
+                    blockers: { type: 'array', items: { type: 'string' } },
+                    capabilities: {
+                      type: 'object',
+                      required: ['addMoney', 'withdraw', 'quickDeposit', 'p2pMatching'],
+                      properties: Object.fromEntries(['addMoney', 'withdraw', 'quickDeposit', 'p2pMatching'].map((name) => [name, {
+                        type: 'object', required: ['available', 'reason'], properties: { available: { type: 'boolean' }, reason: { type: 'string', nullable: true } },
+                      }])),
+                    },
+                  },
+                },
+                upiDeposit: { type: 'object' },
+                livePaymentsEnabled: { type: 'boolean' },
+                sandboxPaymentsEnabled: { type: 'boolean' },
+                methods: { type: 'array', items: { type: 'object' } },
+              },
+            } } },
+          },
+          '503': { description: 'Availability could not be loaded; clients must keep all financial actions disabled' },
+        },
+      },
+    },
     '/config': { get: { summary: 'Public INR/payment-method configuration', responses: { '200': { description: 'Configuration' } } } },
     '/auth/request-otp': { post: {
       summary: 'Request an OTP delivered through the configured server-side SMS provider',
