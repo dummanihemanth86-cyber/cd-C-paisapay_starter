@@ -2,7 +2,20 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { FINANCIAL_OPERATIONS_DISABLED_CODE, financialOperationsEnabled, financialAvailability, loadFinancialResource } = require('./financialApiFallback.cjs');
+const { FINANCIAL_OPERATIONS_DISABLED_CODE, financialOperationsEnabled, financialAvailability, loadFinancialResource, loadVersionedAvailability } = require('./financialApiFallback.cjs');
+
+test('accepts only the explicit v2 availability contract', async () => {
+  const response = {
+    apiVersion: '2.0.0', schemaVersion: 2,
+    financialOperations: {
+      enabled: false,
+      capabilities: { addMoney: { available: false }, withdraw: { available: false }, quickDeposit: { available: false }, p2pMatching: { available: false } },
+    },
+  };
+  assert.equal(await loadVersionedAvailability(async () => response), response);
+  assert.equal(await loadVersionedAvailability(async () => ({ ...response, schemaVersion: 1 })), null);
+  assert.equal(await loadVersionedAvailability(async () => { throw Object.assign(new Error('not found'), { status: 404 }); }), null);
+});
 
 test('uses a safe empty result when a financial read is blocked by the server gate', async () => {
   const result = await loadFinancialResource(async () => {
@@ -78,6 +91,8 @@ test('financial actions fail closed if server capabilities are missing, contradi
 test('mobile fallback code matches the server gate and is applied only to gated order reads', () => {
   const serverGate = fs.readFileSync(path.resolve(__dirname, '../../server/src/middleware/financialOperations.ts'), 'utf8');
   const appSource = fs.readFileSync(path.resolve(__dirname, '../App.js'), 'utf8');
+  assert.match(appSource, /_slicedToArray\.default\)\(_yield\$Promise\$all, 13\)/);
+  assert.match(appSource, /financialAvailability\(versionedAvailability \|\| methodConfig/);
 
   assert.match(serverGate, new RegExp(`FINANCIAL_OPERATIONS_DISABLED_CODE\\s*=\\s*'${FINANCIAL_OPERATIONS_DISABLED_CODE}'`));
   assert.ok(appSource.includes("loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/orders')"));

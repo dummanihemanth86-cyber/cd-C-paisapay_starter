@@ -52,6 +52,13 @@ app.get('/ready', async (_req, res) => {
 app.get('/api/v1/config', asyncRoute(async (_req, res) => {
   res.json(await getPaymentMethodAvailability());
 }));
+// Versioned public contract for clients that need machine-readable capability
+// fields. Keep /api/v1/config unchanged for existing app versions.
+app.get('/api/v2/availability', asyncRoute(async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  const availability = await getPaymentMethodAvailability();
+  res.json({ apiVersion: '2.0.0', schemaVersion: 2, ...availability });
+}));
 // Compatibility alias for the earlier demo client. Remove after all installations use /api/v1.
 app.get('/v1/config', asyncRoute(async (_req, res) => {
   res.json({ ...await getPaymentMethodAvailability(), demoOnly: true });

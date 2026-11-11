@@ -501,8 +501,8 @@
           setWithdrawalPendingBalance(balance.withdrawalPendingPaise);
           setRewardProfitPaise(balance.rewardProfitPaise || 0);
         });
-        var _yield$Promise$all = yield Promise.all([(0, _srcApi.apiGet)('/api/v1/users/me'), walletBalanceRequest, (0, _srcApi.apiGet)('/api/v1/deposits'), (0, _financialApiFallback.loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/orders'), { orders: [] }), (0, _financialApiFallback.loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/withdrawals'), { withdrawals: [], offers: [] }), (0, _srcApi.apiGet)('/api/v1/users/me/transactions'), (0, _srcApi.apiGet)('/api/v1/support/tickets'), (0, _srcApi.apiGet)('/api/v1/notifications'), (0, _srcApi.apiGet)('/api/v1/users/me/referrals'), (0, _srcApi.apiGet)('/api/v1/wallet-methods'), (0, _srcApi.apiGet)('/api/v1/users/me/upi'), (0, _srcApi.apiGet)('/api/v1/users/me/bank-accounts')]),
-          _yield$Promise$all2 = (0, _slicedToArray.default)(_yield$Promise$all, 12),
+        var _yield$Promise$all = yield Promise.all([(0, _srcApi.apiGet)('/api/v1/users/me'), walletBalanceRequest, (0, _srcApi.apiGet)('/api/v1/deposits'), (0, _financialApiFallback.loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/orders'), { orders: [] }), (0, _financialApiFallback.loadFinancialResource)(() => (0, _srcApi.apiGet)('/api/v1/withdrawals'), { withdrawals: [], offers: [] }), (0, _srcApi.apiGet)('/api/v1/users/me/transactions'), (0, _srcApi.apiGet)('/api/v1/support/tickets'), (0, _srcApi.apiGet)('/api/v1/notifications'), (0, _srcApi.apiGet)('/api/v1/users/me/referrals'), (0, _srcApi.apiGet)('/api/v1/wallet-methods'), (0, _srcApi.apiGet)('/api/v1/users/me/upi'), (0, _srcApi.apiGet)('/api/v1/users/me/bank-accounts'), (0, _financialApiFallback.loadVersionedAvailability)(() => (0, _srcApi.apiGet)('/api/v2/availability', { auth: false, timeoutMs: 5000, totalTimeoutMs: 6000, transientRetries: 0 }))]),
+          _yield$Promise$all2 = (0, _slicedToArray.default)(_yield$Promise$all, 13),
           me = _yield$Promise$all2[0],
           b = _yield$Promise$all2[1],
           ds = _yield$Promise$all2[2],
@@ -514,7 +514,8 @@
           rs = _yield$Promise$all2[8],
           methodConfig = _yield$Promise$all2[9],
           upi = _yield$Promise$all2[10],
-          ba = _yield$Promise$all2[11];
+          ba = _yield$Promise$all2[11],
+          versionedAvailability = _yield$Promise$all2[12];
         setUser(me.user);
         setName(me.user.displayName || '');
         setBalance(b.availablePaise);
@@ -531,7 +532,7 @@
         setUpiDepositConfig(methodConfig.upiDeposit || DEFAULT_UPI_DEPOSIT);
         var os = orderResult.value;
         var wd = withdrawalResult.value;
-        var financialAvailability = _financialApiFallback.financialAvailability(methodConfig, orderResult, withdrawalResult);
+        var financialAvailability = _financialApiFallback.financialAvailability(versionedAvailability || methodConfig, orderResult, withdrawalResult);
         setFinancialOperationsEnabled(financialAvailability.enabled);
         setFinancialOperationsReason(financialAvailability.reason);
         setOrders((os.orders || []).map(o => ({

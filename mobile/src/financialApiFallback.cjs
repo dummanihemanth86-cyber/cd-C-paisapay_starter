@@ -18,6 +18,22 @@ function financialOperationsEnabled(ordersResult, withdrawalsResult) {
   );
 }
 
+async function loadVersionedAvailability(request) {
+  try {
+    const response = await request();
+    if (response?.apiVersion === '2.0.0' && response?.schemaVersion === 2
+      && response?.financialOperations && typeof response.financialOperations.enabled === 'boolean'
+      && response.financialOperations.capabilities
+      && ['addMoney', 'withdraw', 'quickDeposit', 'p2pMatching'].every((name) => typeof response.financialOperations.capabilities[name]?.available === 'boolean')) {
+      return response;
+    }
+  } catch {
+    // Older API deployments do not expose v2; the caller can safely fall back
+    // to v1, whose capability checks remain fail-closed.
+  }
+  return null;
+}
+
 function financialAvailability(config, ordersResult, withdrawalsResult) {
   const source = config?.financialOperations;
   const capabilities = source?.capabilities;
@@ -39,4 +55,4 @@ function financialAvailability(config, ordersResult, withdrawalsResult) {
   };
 }
 
-module.exports = { FINANCIAL_OPERATIONS_DISABLED_CODE, financialOperationsEnabled, financialAvailability, loadFinancialResource };
+module.exports = { FINANCIAL_OPERATIONS_DISABLED_CODE, financialOperationsEnabled, financialAvailability, loadFinancialResource, loadVersionedAvailability };
