@@ -272,7 +272,9 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
 
   it('keeps non-financial read routes available while the gate is disabled', async () => {
     const previous = env.financialOperationsEnabled;
+    const previousManualUpi = env.manualUpiOperationsEnabled;
     env.financialOperationsEnabled = false;
+    env.manualUpiOperationsEnabled = false;
     try {
       const config = await request(app).get('/api/v1/config').expect(200);
       assertOpenApiResponse(openapi, 'GET', '/config', config);
@@ -282,8 +284,22 @@ describe('authenticated API response contracts (in-memory Prisma mock)', () => {
       assertOpenApiResponse(openapi, 'GET', '/notifications', notifications);
       const support = await request(app).get('/api/v1/support/tickets').set(authorization).expect(200);
       assertOpenApiResponse(openapi, 'GET', '/support/tickets', support);
+
+      const beforeWrites = fakeDatabase.writes.length;
+      const withdrawals = await request(app).get('/api/v1/withdrawals').set(authorization).expect(200);
+      expect(withdrawals.body.offers).toEqual([]);
+      const marketplace = await request(app).get('/api/v1/withdrawals/marketplace').set(authorization).expect(200);
+      expect(marketplace.body.offers).toEqual([]);
+      const myOrders = await request(app).get('/api/v1/deposits/orders/my').set(authorization).expect(200);
+      expect(myOrders.body.orders).toEqual([]);
+      const legacyOrders = await request(app).get('/api/v1/orders').set(authorization).expect(200);
+      expect(legacyOrders.body.orders).toEqual([]);
+      await request(app).get('/api/v1/deposits/orders/00000000-0000-4000-8000-000000000abc').set(authorization).expect(404);
+      await request(app).get('/api/v1/orders/00000000-0000-4000-8000-000000000abc').set(authorization).expect(404);
+      expect(fakeDatabase.writes).toHaveLength(beforeWrites);
     } finally {
       env.financialOperationsEnabled = previous;
+      env.manualUpiOperationsEnabled = previousManualUpi;
     }
   });
 

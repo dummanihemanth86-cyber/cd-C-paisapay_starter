@@ -192,11 +192,15 @@ describe('financial operations safety gate policy', () => {
 
     const p2pSource = readFileSync(new URL('../modules/p2p/routes.ts', import.meta.url), 'utf8');
     const p2pPattern = /\bp2pRouter\.(get|post|put|patch|delete)\((?:'([^']*)'|"([^"]*)")/g;
-    const explicitlyReadOnlyAdminRoutes = new Set(['GET /admin/p2p/offers', 'GET /admin/p2p/orders']);
+    const explicitlyReadOnlyRoutes = new Set([
+      'GET /admin/p2p/offers', 'GET /admin/p2p/orders',
+      'GET /withdrawals', 'GET /withdrawals/marketplace',
+      'GET /deposits/orders/my', 'GET /deposits/orders/:id',
+    ]);
     for (const match of p2pSource.matchAll(p2pPattern)) {
       const method = match[1].toUpperCase();
       const path = match[2] ?? match[3];
-      if (explicitlyReadOnlyAdminRoutes.has(`${method} ${path}`)) continue;
+      if (explicitlyReadOnlyRoutes.has(`${method} ${path}`)) continue;
       expect(FINANCIAL_OPERATION_ROUTE_MANIFEST).toContainEqual([method, `/api/v1${path}`]);
     }
 
@@ -211,6 +215,9 @@ describe('financial operations safety gate policy', () => {
   it('does not gate the ordinary profile, notification, support, or public configuration routes', () => {
     const nonFinancial = [
       ['get', '/config'], ['get', '/users/me'], ['get', '/notifications'], ['get', '/support/tickets'],
+      ['get', '/withdrawals'], ['get', '/withdrawals/marketplace'],
+      ['get', '/deposits/orders/my'], ['get', '/deposits/orders/:id'],
+      ['get', '/orders'], ['get', '/orders/:id'],
     ] as const;
     for (const [method, path] of nonFinancial) {
       expect(FINANCIAL_OPERATION_ROUTE_MANIFEST.some(([gatedMethod, gatedPath]) => gatedMethod.toLowerCase() === method && gatedPath.endsWith(path))).toBe(false);

@@ -15,10 +15,11 @@ import { committedP2pAmount, createWithdrawalOffer, deriveP2pOfferStatus, ensure
 
 export const p2pRouter = Router();
 p2pRouter.use(requireAuth);
-// Public P2P reads currently perform expiry/reservation maintenance. Admin
-// routes keep their existing auth and role checks; gated Finance operations
-// assert the feature state after those checks.
+// User-owned reads are available while payments are disabled. Maintenance
+// writes are skipped while the feature gate is off, and every state-changing
+// action remains behind the global financial-operations gate.
 p2pRouter.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
   const path = req.path;
   const p2pFinancialPath = path === '/withdrawals'
     || path.startsWith('/withdrawals/')
@@ -82,9 +83,11 @@ p2pRouter.post('/withdrawals', p2pLimit, asyncRoute(async (req, res) => {
 p2pRouter.get('/withdrawals', asyncRoute(async (req, res, next) => {
   // Let the existing route return legacy payout requests and add the owner's P2P offers.
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
-  await db.$transaction((tx) => expireP2pOffers(tx));
-  await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  if (env.financialOperationsEnabled) {
+    await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+    await db.$transaction((tx) => expireP2pOffers(tx));
+    await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  }
   const [withdrawals, offers] = await Promise.all([
     db.withdrawal.findMany({ where: { userId: req.auth!.userId }, orderBy: { createdAt: 'desc' }, take: 100 }),
     db.p2pWithdrawalOffer.findMany({ where: { userId: req.auth!.userId }, include: { orders: { orderBy: { createdAt: 'asc' }, include: { buyer: { select: { publicId: true, phoneE164: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } } }, orderBy: { createdAt: 'desc' }, take: 100 }),
@@ -107,9 +110,11 @@ p2pRouter.get('/withdrawals', asyncRoute(async (req, res, next) => {
 
 p2pRouter.get('/withdrawals/marketplace', p2pLimit, asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
-  await db.$transaction((tx) => expireP2pOffers(tx));
-  await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  if (env.financialOperationsEnabled) {
+    await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+    await db.$transaction((tx) => expireP2pOffers(tx));
+    await db.$transaction((tx) => ensureOpenP2pOffersReserved(tx));
+  }
   // Include stale MATCHED rows: their historical order may have been cancelled
   // or expired, restoring available capacity without refreshing the cached offer status.
   const rows = await db.p2pWithdrawalOffer.findMany({ where: { status: { in: ['OPEN', 'PARTIALLY_MATCHED', 'MATCHED'] }, payeeName: { not: null }, expiresAt: { gt: new Date() }, userId: { not: req.auth!.userId }, user: { is: { upiId: { not: null }, upiDisplayName: { not: null } } } }, orderBy: { createdAt: 'asc' }, take: 100, select: { id: true, referenceId: true, amountPaise: true, paymentMethod: true, status: true, createdAt: true, expiresAt: true, orders: { where: { status: { in: P2P_COMMITTED_ORDER_STATUSES } }, select: { amountPaise: true, status: true } } } });
@@ -360,7 +365,7 @@ p2pRouter.post('/deposits/orders/:id/cancel', p2pLimit, asyncRoute(async (req, r
 
 p2pRouter.get('/deposits/orders/my', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+  if (env.financialOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
   const rows = await db.p2pDepositOrder.findMany({ where: { OR: [{ buyerUserId: req.auth!.userId }, { sellerUserId: req.auth!.userId }] }, include: { withdrawalOffer: { select: { id: true, referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, reviewReason: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
   const orderEvents = await p2pOrderEvents(db, rows.map((row) => row.id));
   const rewards = await db.ledgerTransaction.findMany({ where: { idempotencyKey: { in: rows.map((row) => `P2P_ORDER_REWARD:${row.id}`) } }, select: { idempotencyKey: true, metadata: true } });
@@ -374,7 +379,7 @@ p2pRouter.get('/deposits/orders/my', asyncRoute(async (req, res) => {
 
 p2pRouter.get('/deposits/orders/:id', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
+  if (env.financialOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
   const order = await db.p2pDepositOrder.findUnique({ where: { id: req.params.id }, include: { withdrawalOffer: { select: { referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } });
   if (!order || (order.buyerUserId !== req.auth!.userId && order.sellerUserId !== req.auth!.userId)) throw new HttpError(404, 'P2P_ORDER_NOT_FOUND', 'Matched deposit order was not found.');
   const reward = order.buyerUserId === req.auth!.userId ? await db.ledgerTransaction.findUnique({ where: { idempotencyKey: `P2P_ORDER_REWARD:${order.id}` }, select: { metadata: true } }) : null;

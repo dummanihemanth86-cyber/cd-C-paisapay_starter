@@ -6,8 +6,6 @@ export const FINANCIAL_OPERATIONS_DISABLED_CODE = 'FINANCIAL_OPERATIONS_DISABLED
 
 /** Stable policy surface used by regression tests and API documentation. */
 export const FINANCIAL_OPERATION_ROUTE_MANIFEST = [
-  ['GET', '/api/v1/withdrawals'],
-  ['GET', '/api/v1/withdrawals/marketplace'],
   ['POST', '/api/v1/withdrawals'],
   ['POST', '/api/v1/withdrawals/offers/:id/cancel'],
   ['POST', '/api/v1/deposits/quick-match'],
@@ -16,8 +14,6 @@ export const FINANCIAL_OPERATION_ROUTE_MANIFEST = [
   ['POST', '/api/v1/deposits/orders/:id/payment-reference'],
   ['POST', '/api/v1/deposits/orders/:id/cancel'],
   ['POST', '/api/v1/orders/:id/dispute'],
-  ['GET', '/api/v1/deposits/orders/my'],
-  ['GET', '/api/v1/deposits/orders/:id'],
   ['POST', '/api/v1/admin/p2p/offers/:id/cancel'],
   ['POST', '/api/v1/admin/p2p/claims/:id/review'],
   ['GET', '/api/v1/admin/p2p/claims'],
@@ -33,8 +29,6 @@ export const FINANCIAL_OPERATION_ROUTE_MANIFEST = [
   ['POST', '/api/v1/orders'],
   ['POST', '/api/v1/orders/:id/reservations'],
   ['POST', '/api/v1/orders/:id/cancel'],
-  ['GET', '/api/v1/orders'],
-  ['GET', '/api/v1/orders/:id'],
   ['POST', '/api/v1/orders/:id/payment-submission'],
   ['PATCH', '/api/v1/admin/referrals/config'],
   ['PATCH', '/api/v1/admin/referrals/milestones/:key'],

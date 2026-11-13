@@ -7,7 +7,13 @@ import { financialOperationsGate } from '../../middleware/financialOperations.js
 import { getPaymentMethodAvailability } from '../payments/availability.js';
 
 export const ordersRouter = Router();
-ordersRouter.use(requireAuth, financialOperationsGate);
+ordersRouter.use(requireAuth);
+ordersRouter.use((req, res, next) => {
+  // Read-only order browsing is useful even while financial actions are off.
+  // All writes remain gated, and GET handlers must not perform maintenance writes.
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  return financialOperationsGate(req, res, next);
+});
 const methods = {
   Paytm: { enum: 'PAYTM' as const, buy: true, sell: true },
   PhonePe: { enum: 'PHONEPE' as const, buy: false, sell: true },
@@ -19,7 +25,6 @@ const amountSchema = z.number().int().min(1000).max(100_000_000);
 ordersRouter.get('/', asyncRoute(async (req, res) => {
   const db = databaseRequired();
   const now = new Date();
-  await db.order.updateMany({ where: { status: 'AVAILABLE', expiresAt: { lte: now } }, data: { status: 'EXPIRED' } });
   const kind = req.query.kind === 'BUY' ? 'BUY' : req.query.kind === 'SELL' ? 'SELL' : undefined;
   const availability = await getPaymentMethodAvailability();
   const enabled = availability.methods.filter((method) => method.available && (kind === 'BUY' ? method.buyEnabled : method.sellEnabled));
