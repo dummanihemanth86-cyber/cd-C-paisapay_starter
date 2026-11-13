@@ -269,6 +269,12 @@ const openapiBase = {
     '/admin/transactions': { get: { summary: 'Search transaction records for Finance/Admin reviewers', responses: { '200': { description: 'Transaction records' }, '403': { description: 'Finance/Admin role required' } } } },
     '/admin/wallets/ledger': { get: { summary: 'Inspect wallet ledger entries for Finance/Admin reviewers', responses: { '200': { description: 'Ledger rows with integer paise amounts' }, '403': { description: 'Finance/Admin role required' } } } },
     '/admin/wallet-adjustments': { post: { summary: 'Apply an idempotent, audited single-admin wallet adjustment from the separately funded adjustment account; disabled by default and also protected by the financial-operations gate', parameters: [{ in: 'header', name: 'Idempotency-Key', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Matching prior adjustment returned without duplicate ledger entries' }, '201': { description: 'Adjustment and audit record atomically committed' }, '400': { description: 'Invalid amount, reason, target ID, or idempotency key' }, '403': { description: 'Only the explicitly configured ADMIN account is permitted' }, '404': { description: 'User not found' }, '409': { description: 'Insufficient funded source/available balance or idempotency conflict' }, '503': { description: 'Adjustment feature, financial-operations gate, or adjustment funding account is unavailable' } } } },
+    '/admin/wallet/phonepe-credits/readiness': { get: { summary: 'Read fail-closed configuration, migration, ledger-account, and reconciliation readiness for manual Super Admin PhonePe credits', responses: { '200': { description: 'Readiness status and exact blockers' }, '403': { description: 'Authorized Super Admin account required' } } } },
+    '/admin/wallet/phonepe-credits/requests': {
+      get: { summary: 'List paginated Admin PhonePe payment requests and masked customer details', parameters: [{ in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } }, { in: 'query', name: 'pageSize', schema: { type: 'integer', minimum: 1, maximum: 100, default: 25 } }, { in: 'query', name: 'status', schema: { type: 'string', enum: ['PENDING_PAYMENT', 'COMPLETED', 'REJECTED', 'EXPIRED'] } }], responses: { '200': { description: 'Paginated Admin PhonePe credit payment requests' }, '403': { description: 'Authorized Super Admin account required' } } },
+      post: { summary: 'Create a pending payment request; this does not credit a wallet or enable other financial operations', parameters: [{ in: 'header', name: 'Idempotency-Key', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Matching request replayed without a duplicate' }, '201': { description: 'Pending request created; no wallet balance changed' }, '403': { description: 'Authorized Super Admin account required' }, '409': { description: 'Selected account changed or idempotency key conflict' }, '503': { description: 'Dedicated Admin PhonePe readiness is blocked; no wallet balance changed' } } },
+    },
+    '/admin/wallet/phonepe-credits/requests/{id}/decision': { post: { summary: 'Reject a request or manually confirm the exact receiver-side payment and atomically credit the user ledger', parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Request already decided or idempotent replay returned' }, '403': { description: 'Authorized Super Admin account required' }, '409': { description: 'Receipt mismatch, reused reference, or already decided request' }, '503': { description: 'Dedicated Admin PhonePe readiness is blocked; no wallet balance changed' } } } },
     '/admin/referrals': { get: { summary: 'List referral relationships with pagination and commission policy', responses: { '200': { description: 'Referral records and policy' }, '403': { description: 'Operations role required' } } } },
     '/admin/referrals/config': {
       get: { summary: 'Read referral commission rates and milestone settings', responses: { '200': { description: 'Referral policy and milestone rules' }, '403': { description: 'Operations role required' } } },
@@ -336,6 +342,8 @@ const requestBodies: Record<string, unknown> = {
   'post /support/tickets': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['subject', 'message'], additionalProperties: false, properties: { subject: { type: 'string', minLength: 1, maxLength: 100 }, message: { type: 'string', minLength: 1, maxLength: 2000 } } }, example: { subject: 'Deposit status question', message: 'Please help me understand the current order status.' } } } },
   'post /admin/support/tickets/{id}/reply': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['message', 'reason'], additionalProperties: false, properties: { message: { type: 'string', minLength: 2, maxLength: 2000 }, reason: { type: 'string', minLength: 8, maxLength: 500 } } }, example: { message: 'We are reviewing your support request.', reason: 'Responding to the user’s documented support request.' } } } },
   'post /admin/wallet-adjustments': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['targetPublicId', 'direction', 'amountPaise', 'reason'], additionalProperties: false, properties: { targetPublicId: { type: 'string', minLength: 1, maxLength: 10, pattern: '^[A-Za-z0-9_-]+$' }, direction: { type: 'string', enum: ['CREDIT', 'DEBIT'] }, amountPaise: { type: 'integer', minimum: 1, maximum: 1000000, description: 'INR amount in integer paise; maximum ₹10,000.00 per adjustment.' }, reason: { type: 'string', minLength: 8, maxLength: 500 } } }, example: { targetPublicId: '123456789', direction: 'CREDIT', amountPaise: 10000, reason: 'Approved manual wallet correction.' } } } },
+  'post /admin/wallet/phonepe-credits/requests': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['targetUserId', 'verifiedPublicId', 'verifiedPhoneMasked', 'verifiedWalletBalancePaise', 'amountPaise', 'reason'], additionalProperties: false, properties: { targetUserId: { type: 'string', format: 'uuid' }, verifiedPublicId: { type: 'string', minLength: 1, maxLength: 50 }, verifiedPhoneMasked: { type: 'string', minLength: 4, maxLength: 32 }, verifiedWalletBalancePaise: { type: 'integer', minimum: 0 }, amountPaise: { type: 'integer', minimum: 10000, maximum: 1000000, multipleOf: 100 }, reason: { type: 'string', minLength: 8, maxLength: 500 } } }, example: { targetUserId: '00000000-0000-4000-8000-000000000001', verifiedPublicId: '123456789', verifiedPhoneMasked: '******1234', verifiedWalletBalancePaise: 0, amountPaise: 10000, reason: 'Create a payment request after checking the intended user.' } } } },
+  'post /admin/wallet/phonepe-credits/requests/{id}/decision': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['decision', 'reason'], additionalProperties: false, properties: { decision: { type: 'string', enum: ['APPROVE', 'REJECT'] }, reason: { type: 'string', minLength: 8, maxLength: 500 }, paymentReference: { type: 'string', minLength: 8, maxLength: 120, pattern: '^[A-Za-z0-9._/-]+$' }, verifiedAmountPaise: { type: 'integer', minimum: 0 }, verifiedPayeeVpa: { type: 'string', maxLength: 100 }, receiverConfirmed: { type: 'boolean' } } }, example: { decision: 'REJECT', reason: 'Receiver account has no matching payment.' } } } },
   'post /admin/push-devices': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['expoPushToken', 'platform'], additionalProperties: false, properties: { expoPushToken: { type: 'string', minLength: 20, maxLength: 255, pattern: '^(Expo|Exponent)PushToken\\[[A-Za-z0-9_-]+\\]$' }, platform: { type: 'string', enum: ['android', 'ios'] } } }, example: { expoPushToken: 'ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]', platform: 'android' } } } },
   'delete /admin/push-devices': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['expoPushToken'], additionalProperties: false, properties: { expoPushToken: { type: 'string', minLength: 20, maxLength: 255, pattern: '^(Expo|Exponent)PushToken\\[[A-Za-z0-9_-]+\\]$' } } }, example: { expoPushToken: 'ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]' } } } },
   'patch /admin/support/tickets/{id}/status': { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status', 'reason'], additionalProperties: false, properties: { status: { type: 'string', enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'] }, reason: { type: 'string', minLength: 8, maxLength: 500 } } }, example: { status: 'IN_PROGRESS', reason: 'Support team has started investigating.' } } } },
@@ -419,8 +427,12 @@ const responseFields: Record<string, string[]> = {
   'get /admin/support/tickets/{id}': ['ticket'],
   'post /admin/support/tickets/{id}/reply': ['message', 'status'],
   'post /admin/wallet-adjustments': ['adjustment', 'message'],
+  'get /admin/wallet/phonepe-credits/readiness': ['enabled', 'receiverVpa', 'migration', 'ledgerIntegrity', 'ledgerAccounts', 'completedRequestReconciliation', 'blockers'],
+  'get /admin/wallet/phonepe-credits/requests': ['requests', 'total', 'page', 'pageSize'],
+  'post /admin/wallet/phonepe-credits/requests': ['request', 'replayed', 'message'],
+  'post /admin/wallet/phonepe-credits/requests/{id}/decision': ['request', 'credit', 'fundingLedgerTransactionId', 'replayed', 'message'],
   'patch /admin/support/tickets/{id}/status': ['ticket'],
-  'get /admin/me': ['userId', 'role', 'allowedSections', 'financialOperationsEnabled', 'walletAdjustmentAllowed', 'walletAdjustmentsEnabled', 'walletCreditsAllowed', 'adminWalletFundingEnabled', 'adminWalletCreditsEnabled', 'adminWalletProductionApproved', 'adminWalletExternalReconciliationVerified', 'walletCreditsEnabled', 'walletCreditRequestsEnabled', 'walletFundingRequestsEnabled', 'walletCreditBlockers', 'walletFundingBlockers'],
+  'get /admin/me': ['userId', 'role', 'allowedSections', 'financialOperationsEnabled', 'walletAdjustmentAllowed', 'walletAdjustmentsEnabled', 'walletCreditsAllowed', 'adminWalletFundingEnabled', 'adminWalletCreditsEnabled', 'adminWalletProductionApproved', 'adminWalletExternalReconciliationVerified', 'walletCreditsEnabled', 'walletCreditRequestsEnabled', 'walletFundingRequestsEnabled', 'walletCreditBlockers', 'walletFundingBlockers', 'phonePeCreditsAllowed', 'phonePeCreditsEnabled'],
   'get /admin/wallet/credits/requests': ['requests', 'total', 'page', 'pageSize'],
   'post /admin/wallet/credits/requests': ['request', 'replayed', 'message'],
   'post /admin/wallet/credits/requests/{id}/decision': ['request', 'credit', 'message'],
@@ -465,7 +477,10 @@ const objectResponseFields = new Set(['upiDeposit', 'walletActivation', 'user', 
 const nullableResponseFields = new Set(['upiId', 'displayName', 'receiverVpa', 'databaseResponseTimeMs', 'statusFilter', 'ledgerTransactionId']);
 const integerResponseFields = new Set(['expiresInSeconds', 'accessExpiresInSeconds', 'resendAfterSeconds', 'databaseResponseTimeMs', 'todayNewMembers', 'todayDirectMembers', 'todayIndirectMembers', 'totalMembers', 'directCount', 'indirectCount', 'recipientCount', 'users', 'deposits', 'withdrawals', 'disputedOrders', 'pendingClaims', 'activeLevels', 'pendingCredits', 'pendingFunding', 'approvedCredits', 'approvedFunding', 'creditLedgerDiscrepancies', 'fundingLedgerDiscrepancies']);
 const responseTypeOverrides: Record<string, Record<string, Record<string, unknown>>> = {
-  'get /admin/me': { walletCreditBlockers: { type: 'array', items: { type: 'string' } }, walletFundingBlockers: { type: 'array', items: { type: 'string' } } },
+  'get /admin/me': { walletCreditBlockers: { type: 'array', items: { type: 'string' } }, walletFundingBlockers: { type: 'array', items: { type: 'string' } }, phonePeCreditsAllowed: { type: 'boolean' }, phonePeCreditsEnabled: { type: 'boolean' } },
+  'get /admin/wallet/phonepe-credits/readiness': { enabled: { type: 'boolean' }, migration: { type: 'string' }, ledgerIntegrity: { type: 'string' }, ledgerAccounts: { type: 'string' }, completedRequestReconciliation: { type: 'string' }, blockers: { type: 'array', items: { type: 'string' } } },
+  'post /admin/wallet/phonepe-credits/requests': { replayed: { type: 'boolean' } },
+  'post /admin/wallet/phonepe-credits/requests/{id}/decision': { replayed: { type: 'boolean' } },
   'get /admin/wallet/reconciliation': { walletCreditBlockers: { type: 'array', items: { type: 'string' } } },
   'get /admin/overview': Object.fromEntries(['users', 'deposits', 'withdrawals', 'disputedOrders'].map((name) => [name, { type: 'integer' }])),
   'get /admin/p2p/overview': { offers: { type: 'object', additionalProperties: { type: 'integer' } }, orders: { type: 'object', additionalProperties: { type: 'integer' } }, pendingClaims: { type: 'integer' } },
@@ -526,6 +541,40 @@ const nestedResponseSchemas: Record<string, Record<string, Record<string, unknow
   },
   'get /admin/wallet/reconciliation': {
     accounts: arrayOf(objectSchema({ accountId: nullableStringField, type: nullableStringField, balancePaise: stringField, debitsPaise: stringField, creditsPaise: stringField })),
+  },
+  'get /admin/wallet/phonepe-credits/readiness': {
+    blockers: arrayOf(stringField),
+  },
+  'get /admin/wallet/phonepe-credits/requests': {
+    requests: arrayOf(objectSchema({
+      id: stringField, targetUserId: stringField, makerUserId: stringField, amountPaise: integerField,
+      payeeVpa: stringField, reason: stringField, status: stringField,
+      paymentReferenceMasked: nullableStringField, decisionReason: nullableStringField,
+      fundingLedgerTransactionId: nullableStringField, ledgerTransactionId: nullableStringField,
+      createdAt: dateField, expiresAt: dateField, decidedAt: nullableDateField,
+      targetUser: objectSchema({ id: stringField, publicId: nullableStringField, displayName: nullableStringField, status: stringField, phoneMasked: stringField }),
+      makerUser: objectSchema({ publicId: nullableStringField, displayName: nullableStringField }),
+    }, ['id', 'targetUserId', 'makerUserId', 'amountPaise', 'payeeVpa', 'reason', 'status', 'createdAt', 'expiresAt'])),
+  },
+  'post /admin/wallet/phonepe-credits/requests': {
+    request: objectSchema({
+      id: stringField, targetUserId: stringField, makerUserId: stringField, amountPaise: integerField,
+      payeeVpa: stringField, reason: stringField, status: stringField,
+      paymentReferenceMasked: nullableStringField, decisionReason: nullableStringField,
+      fundingLedgerTransactionId: nullableStringField, ledgerTransactionId: nullableStringField,
+      createdAt: dateField, expiresAt: dateField, decidedAt: nullableDateField,
+    }, ['id', 'targetUserId', 'makerUserId', 'amountPaise', 'payeeVpa', 'reason', 'status', 'createdAt', 'expiresAt']),
+  },
+  'post /admin/wallet/phonepe-credits/requests/{id}/decision': {
+    request: objectSchema({
+      id: stringField, targetUserId: stringField, makerUserId: stringField, amountPaise: integerField,
+      payeeVpa: stringField, reason: stringField, status: stringField,
+      paymentReferenceMasked: nullableStringField, decisionReason: nullableStringField,
+      fundingLedgerTransactionId: nullableStringField, ledgerTransactionId: nullableStringField,
+      createdAt: dateField, expiresAt: dateField, decidedAt: nullableDateField,
+      targetUser: objectSchema({ id: stringField, publicId: nullableStringField, displayName: nullableStringField, status: stringField, phoneMasked: stringField }),
+    }, ['id', 'targetUserId', 'makerUserId', 'amountPaise', 'payeeVpa', 'reason', 'status', 'createdAt', 'expiresAt']),
+    credit: { ...objectSchema({ id: stringField, balancePaise: integerField, createdAt: dateField }, ['id', 'balancePaise', 'createdAt']), nullable: true },
   },
   'get /admin/reports': {
     from: { type: 'string', format: 'date' },

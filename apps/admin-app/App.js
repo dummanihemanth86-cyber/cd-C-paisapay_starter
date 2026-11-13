@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import Constants from 'expo-constants';
 import { isRunningInExpoGo } from 'expo';
@@ -9,6 +9,7 @@ const { adminRecordDetailPath } = require('../../shared/adminRecordNavigation.cj
 const { financialActionState } = require('../../shared/adminFinancialUx.cjs');
 const { parseRupeesToPaise, walletAdjustmentUiState, newIdempotencyKey } = require('../../shared/walletAdjustmentUi.cjs');
 const { adminPhoneInputDigits, normalizeAdminPhone, canSubmitAdminPasswordReset } = require('./adminPasswordResetUi.cjs');
+const { phonePeCreditIntentUrl, validatePhonePeApproval } = require('./phonePeCreditsUi.cjs');
 
 
 const API = (process.env.EXPO_PUBLIC_API_URL || 'https://paisapay-api.onrender.com').trim().replace(/\/$/, '');
@@ -41,7 +42,7 @@ const NAV = [
   ['transactions', 'Transactions', '/api/v1/admin/transactions'],
   ['ledger', 'Wallet Ledger', '/api/v1/admin/wallets/ledger'],
   ['walletAdjustments', 'Wallet Adjustment', null],
-  ['walletCredits', 'Super Admin Credits', null],
+  ['phonePeCredits', 'Admin Credits', null],
   ['providers', 'Payment Providers', '/api/v1/admin/providers'],
   ['commissions', 'Commissions', '/api/v1/admin/commissions'],
   ['referrals', 'Referral & Team', '/api/v1/admin/referrals'],
@@ -63,6 +64,94 @@ function PaginationBar({ page, pageCount, total, hasPrevious, hasNext, busy, onP
 }
 function FinancialActionNotice({ title, reason }) {
   return <View style={styles.financialNotice} accessibilityRole="summary"><Text style={styles.financialNoticeTitle}>{title}</Text><Text style={styles.financialNoticeText}>{reason}</Text></View>;
+}
+function AdminPhonePeCreditsSection({ request, token }) {
+  const [readiness, setReadiness] = useState(null); const [records, setRecords] = useState([]); const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(''); const [info, setInfo] = useState(''); const [query, setQuery] = useState(''); const [users, setUsers] = useState([]); const [selectedUser, setSelectedUser] = useState(null);
+  const [amount, setAmount] = useState(''); const [reason, setReason] = useState('PhonePe receipt manually verified by Super Admin'); const [busy, setBusy] = useState(false);
+  const [activeRequest, setActiveRequest] = useState(null); const [paymentReference, setPaymentReference] = useState(''); const [verifiedAmount, setVerifiedAmount] = useState(''); const [verifiedVpa, setVerifiedVpa] = useState(''); const [receiverConfirmed, setReceiverConfirmed] = useState(false); const [decisionReason, setDecisionReason] = useState('PhonePe receipt manually verified by Super Admin');
+  const refresh = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const status = await request('/api/v1/admin/wallet/phonepe-credits/readiness', { token });
+      setReadiness(status);
+      if (status.migration === 'APPLIED') {
+        const data = await request('/api/v1/admin/wallet/phonepe-credits/requests?page=1&pageSize=100', { token });
+        setRecords(Array.isArray(data.requests) ? data.requests : []);
+      } else setRecords([]);
+    } catch (e) { setError(e.status === 404 ? 'The connected server has not deployed the Admin Credits API yet. The app and server release must be updated together.' : (e.message || 'Could not load Admin Credits status.')); }
+    finally { setLoading(false); }
+  }, [request, token]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  const searchUsers = async () => {
+    const term = query.trim();
+    if (term.length < 3) { setError('Enter at least 3 digits or characters to search.'); return; }
+    setBusy(true); setError(''); setUsers([]); setSelectedUser(null);
+    try {
+      const data = await request(`/api/v1/admin/users?q=${encodeURIComponent(term)}&customerOnly=true&page=1&pageSize=20`, { token });
+      setUsers(Array.isArray(data.users) ? data.users : []);
+      if (!data.users?.length) setInfo('No active customer account matched that phone number or user ID.'); else setInfo('Select the exact account and confirm its current balance.');
+    } catch (e) { setError(e.message || 'User lookup failed.'); }
+    finally { setBusy(false); }
+  };
+  const createRequest = async () => {
+    const rupees = Number(String(amount).trim()); const amountPaise = rupees * 100;
+    if (!selectedUser) { setError('Search and select the intended user first.'); return; }
+    if (!Number.isSafeInteger(amountPaise) || amountPaise < 10000 || amountPaise > 1000000 || !Number.isInteger(rupees)) { setError('Enter a whole-rupee amount from ₹100 to ₹10,000.'); return; }
+    if (reason.trim().length < 8) { setError('Enter an audit reason of at least 8 characters.'); return; }
+    setBusy(true); setError(''); setInfo('');
+    try {
+      const result = await request('/api/v1/admin/wallet/phonepe-credits/requests', { token, method: 'POST', headers: { 'Idempotency-Key': newIdempotencyKey() }, body: {
+        targetUserId: selectedUser.id, verifiedPublicId: selectedUser.publicId, verifiedPhoneMasked: selectedUser.phoneMasked,
+        verifiedWalletBalancePaise: Number(selectedUser.walletBalancePaise || 0), amountPaise, reason: reason.trim(),
+      } });
+      setInfo(result.message || 'Payment request created; no wallet balance changed yet.'); setAmount(''); setSelectedUser(null); setUsers([]);
+      await refresh();
+    } catch (e) { setError(e.message || 'Could not create the payment request.'); }
+    finally { setBusy(false); }
+  };
+  const openPaymentApp = async (paymentRequest) => {
+    try { await Linking.openURL(phonePeCreditIntentUrl(paymentRequest)); setInfo('UPI app opened. Check the receiver ID and exact amount before paying. Return here and verify the received payment in the receiver-side PhonePe history.'); }
+    catch (e) { setError(e.message || 'No UPI app could open this payment request.'); }
+  };
+  const decide = async (paymentRequest, decision) => {
+    const currentReason = decisionReason.trim();
+    if (currentReason.length < 8) { setError('Enter an audit reason of at least 8 characters.'); return; }
+    if (decision === 'APPROVE') {
+      const validation = validatePhonePeApproval({ request: paymentRequest, reference: paymentReference, amountRupees: verifiedAmount, payeeVpa: verifiedVpa, receiverConfirmed, reason: currentReason });
+      if (validation) { setError(validation); return; }
+      const approved = await new Promise((resolve) => Alert.alert('Approve wallet credit?', `Credit ₹${(Number(paymentRequest.amountPaise) / 100).toFixed(2)} to ${paymentRequest.targetUser?.publicId || 'the selected user'} after confirming the exact amount, receiver VPA, and transaction in the receiver-side payment history. This cannot be undone from this screen.`, [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Approve verified payment', onPress: () => resolve(true) }], { cancelable: true, onDismiss: () => resolve(false) }));
+      if (!approved) return;
+    }
+    setBusy(true); setError(''); setInfo('');
+    try {
+      const result = await request(`/api/v1/admin/wallet/phonepe-credits/requests/${encodeURIComponent(paymentRequest.id)}/decision`, { token, method: 'POST', body: decision === 'APPROVE' ? {
+        decision, reason: currentReason, paymentReference: paymentReference.trim(), verifiedAmountPaise: Number(verifiedAmount) * 100,
+        verifiedPayeeVpa: verifiedVpa.trim(), receiverConfirmed: true,
+      } : { decision, reason: currentReason } });
+      setInfo(result.message || (decision === 'REJECT' ? 'Request rejected; balance unchanged.' : 'Receipt confirmed and wallet ledger updated.'));
+      setActiveRequest(null); setPaymentReference(''); setVerifiedAmount(''); setVerifiedVpa(''); setReceiverConfirmed(false); await refresh();
+    } catch (e) { setError(e.message || `Could not ${decision.toLowerCase()} the payment request.`); }
+    finally { setBusy(false); }
+  };
+  return <View>
+    <View style={styles.card}><Text style={styles.cardEyebrow}>SUPER ADMIN · MANUAL RECEIPT CONFIRMATION</Text><Text style={styles.cardTitle}>Admin Credits</Text><Text style={styles.cardNote}>Find an active user, enter the amount and open a UPI app. After payment, confirm the receipt in the receiver-side PhonePe/bank history. The server posts the wallet ledger only after the authenticated approval.</Text><Button title={loading ? 'Refreshing…' : 'Refresh status and requests'} secondary onPress={refresh} disabled={loading}/></View>
+    {readiness && !readiness.enabled ? <FinancialActionNotice title="Admin Credits setup is blocked" reason={readiness.blockers?.join(' ') || 'The server has not confirmed the required configuration.'}/> : null}
+    {readiness?.receiverVpa ? <View style={styles.card}><Text style={styles.detailLabel}>Configured payment recipient</Text><Text style={styles.cardTitle}>{readiness.receiverVpa}</Text></View> : null}
+    {error ? <Text style={styles.errorInline}>{error}</Text> : null}{info ? <Text style={styles.successInline}>{info}</Text> : null}
+    <View style={styles.card}><Text style={styles.cardTitle}>Create payment request</Text><Text style={styles.label}>User ID or mobile number</Text><View style={styles.decisionRow}><TextInput style={[styles.input,{flex:1}]} value={query} onChangeText={setQuery} placeholder="Search active user" placeholderTextColor={COLORS.muted} autoCapitalize="none" keyboardType="default" returnKeyType="search" onSubmitEditing={searchUsers}/><Button title={busy ? 'Searching…' : 'Find user'} onPress={searchUsers} disabled={busy || !readiness?.enabled}/></View>
+      {users.map((user) => <Pressable key={user.id} style={[styles.detailGroup, selectedUser?.id === user.id && { borderColor: COLORS.blue }]} onPress={() => { setSelectedUser(user); setInfo('Selected account. Check the public ID, masked phone, status and balance before continuing.'); setError(''); }}><Text style={styles.detailSectionTitle}>{user.displayName || 'PaisaPay user'} · {user.publicId || 'No public ID'}</Text><Text style={styles.rowDetail}>{user.phoneMasked} · {user.status} · Available ₹{(Number(user.walletBalancePaise || 0) / 100).toFixed(2)}</Text><Text style={styles.detailLink}>{selectedUser?.id === user.id ? 'Selected account' : 'Select this account'}</Text></Pressable>)}
+      {selectedUser ? <><Text style={styles.cardNote}>Selected: {selectedUser.publicId} · {selectedUser.phoneMasked} · current available balance ₹{(Number(selectedUser.walletBalancePaise || 0) / 100).toFixed(2)}</Text><Text style={styles.label}>Amount (whole rupees)</Text><TextInput style={styles.input} value={amount} onChangeText={(value) => setAmount(value.replace(/[^0-9]/g, '').slice(0, 5))} placeholder="100–10,000" placeholderTextColor={COLORS.muted} keyboardType="number-pad"/><Text style={styles.label}>Audit reason</Text><TextInput style={styles.input} value={reason} onChangeText={setReason} maxLength={500} placeholder="Reason for this payment request" placeholderTextColor={COLORS.muted}/><Button title={busy ? 'Creating…' : 'Create PhonePe payment request'} onPress={createRequest} disabled={busy || !readiness?.enabled}/></> : null}
+    </View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Payment requests and decisions</Text>{records.length ? records.map((item) => {
+      const expired = item.status === 'PENDING_PAYMENT' && new Date(item.expiresAt).getTime() <= Date.now();
+      const pending = item.status === 'PENDING_PAYMENT' && !expired;
+      return <View key={item.id} style={styles.detailGroup}><Text style={styles.detailSectionTitle}>{item.targetUser?.publicId || 'User'} · ₹{(Number(item.amountPaise) / 100).toLocaleString('en-IN')} · {expired ? 'EXPIRED' : item.status}</Text><Text style={styles.rowDetail}>{item.targetUser?.displayName || 'PaisaPay user'} · {item.targetUser?.phoneMasked || '—'} · {item.payeeVpa}</Text><Text style={styles.rowDetail}>Created {new Date(item.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}{item.paymentReferenceMasked ? ` · Ref ${item.paymentReferenceMasked}` : ''}</Text>
+        {pending ? <><Button title="Open UPI payment app" onPress={() => openPaymentApp(item)} disabled={busy}/><Button title={activeRequest?.id === item.id ? 'Close receipt review' : 'I received payment · review'} secondary onPress={() => { setActiveRequest(activeRequest?.id === item.id ? null : item); setPaymentReference(''); setVerifiedAmount(String(Number(item.amountPaise) / 100)); setVerifiedVpa(item.payeeVpa); setReceiverConfirmed(false); setDecisionReason('PhonePe receipt manually verified by Super Admin'); setError(''); }}/>
+          {activeRequest?.id === item.id ? <View style={styles.detailGroup}><Text style={styles.cardNote}>Check the received transaction in the receiver-side PhonePe/bank history. Do not approve from the payer screen or screenshot alone.</Text><Text style={styles.label}>PhonePe/UPI transaction reference</Text><TextInput style={styles.input} value={paymentReference} onChangeText={setPaymentReference} placeholder="Exact UTR / transaction reference" placeholderTextColor={COLORS.muted} autoCapitalize="characters"/><Text style={styles.label}>Received amount (₹)</Text><TextInput style={styles.input} value={verifiedAmount} onChangeText={(value) => setVerifiedAmount(value.replace(/[^0-9]/g, '').slice(0, 5))} keyboardType="number-pad" placeholder="Exact received amount" placeholderTextColor={COLORS.muted}/><Text style={styles.label}>Received at this UPI ID</Text><TextInput style={styles.input} value={verifiedVpa} onChangeText={setVerifiedVpa} autoCapitalize="none" placeholder={item.payeeVpa} placeholderTextColor={COLORS.muted}/><Pressable style={styles.confirmRow} onPress={() => setReceiverConfirmed((value) => !value)}><Text style={[styles.confirmBox, receiverConfirmed && styles.checkedBox]}>{receiverConfirmed ? '✓' : ''}</Text><Text style={styles.cardNote}>I confirmed the exact amount and UPI reference in the receiver-side payment history</Text></Pressable><Text style={styles.label}>Decision reason</Text><TextInput style={styles.input} value={decisionReason} onChangeText={setDecisionReason} maxLength={500} placeholder="Audit reason" placeholderTextColor={COLORS.muted}/><View style={styles.decisionRow}><Button title={busy ? 'Saving…' : 'Approve and credit'} onPress={() => decide(item,'APPROVE')} disabled={busy || !receiverConfirmed}/><Button title={busy ? 'Saving…' : 'Reject · no credit'} secondary onPress={() => decide(item,'REJECT')} disabled={busy}/></View></View> : null}</> : null}
+      </View>;
+    }) : <Text style={styles.cardNote}>{readiness?.migration === 'APPLIED' ? 'No payment requests have been recorded.' : 'Requests appear after the server migration is applied.'}</Text>}</View>
+  </View>;
 }
 function WalletAdjustmentAdminSection({ request, access, profile, setInfo, setError }) {
   const [targetPublicId, setTargetPublicId] = useState('');
@@ -239,7 +328,7 @@ function AppBody() {
     const item = NAV.find(x => x[0] === key); if ((!item && key !== 'walletCredits') || !token) return;
     setBusy(true); setError(''); if (key === 'reports') setPayloadSection(null);
     if (key === 'walletAdjustments') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
-    if (key === 'walletCredits') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
+    if (key === 'phonePeCredits' || key === 'walletCredits') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
     const queryParams = new URLSearchParams();
     if (query.trim() && key !== 'overview' && key !== 'ledger') queryParams.set('q', query.trim());
     if (statusFilter.trim() && key !== 'overview' && key !== 'ledger') queryParams.set('status', statusFilter.trim().toUpperCase());
@@ -510,7 +599,7 @@ function AppBody() {
       {section === 'withdrawals' && withdrawalReview.visible ? <FinancialActionNotice title="Withdrawal verification is read-only" reason={withdrawalReview.reason} /> : null}
       {section === 'ledger' && walletAdjustment.visible ? <FinancialActionNotice title="Wallet adjustments unavailable" reason={walletAdjustment.reason} /> : null}
       {section === 'walletAdjustments' ? <WalletAdjustmentAdminSection request={request} access={access} profile={profile} setInfo={setInfo} setError={setError} /> : null}
-      {section === 'walletCredits' ? <SuperAdminWalletCreditsSection request={request} access={access} profile={profile} setInfo={setInfo} setError={setError} loadSection={loadSection} /> : null}
+      {section === 'phonePeCredits' ? <AdminPhonePeCreditsSection request={request} token={access} /> : null}
       {section === 'health' && payoutProcessing.visible ? <FinancialActionNotice title="Payout processing unavailable" reason={payoutProcessing.reason} /> : null}
       {busy ? <ActivityIndicator color={COLORS.blue} size="large" style={{ marginTop: 30 }} /> : null}
       {section === 'overview' && payloadSection === section && payload ? <><View style={styles.card}><Text style={styles.cardEyebrow}>LIVE · DATABASE</Text><Text style={styles.cardTitle}>Operations overview</Text><Text style={styles.cardNote}>Tap a metric to open its related records. Figures come from the PaisaPay backend. Gross transaction volume and ledger balances are separate measures.</Text></View><View style={styles.grid}>{Object.entries(payload.metrics || {}).filter(([, v]) => typeof v === 'number' || typeof v === 'string' || v === null).map(([k, v]) => <Pressable key={k} onPress={() => selectSection(k.toLowerCase().includes('deposit') ? 'deposits' : k.toLowerCase().includes('withdraw') ? 'withdrawals' : k.toLowerCase().includes('user') ? 'users' : 'transactions')} style={({ pressed }) => [styles.metric, pressed && styles.pressed]}><Text style={styles.metricLabel}>{k.replace(/([A-Z])/g, ' $1').replace(/Paise$/i, '')}</Text><Text style={styles.metricValue}>{v === null ? 'Not configured' : /Paise$/i.test(k) ? `₹${(Number(v) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : String(v)}</Text><Text style={styles.metricHint}>View records ›</Text></Pressable>)}</View><View style={styles.card}><Text style={styles.cardTitle}>Transaction and registration trends</Text><View style={styles.decisionRow}>{[['daily','7 days'],['weekly','4 weeks'],['monthly','12 months']].map(([key,title]) => <Button key={key} title={chartRange === key ? `✓ ${title}` : title} secondary onPress={() => setChartRange(key)}/>)}</View><View style={styles.chartLegend}><Text style={styles.rowDetail}>● Deposits</Text><Text style={[styles.rowDetail,{color:COLORS.gold}]}>● Withdrawals</Text><Text style={[styles.rowDetail,{color:COLORS.green}]}>● New users</Text></View>{(payload.charts?.[chartRange] || []).map((point, index, list) => { const max = Math.max(1, ...list.map(x => Number(x.depositsPaise) + Number(x.withdrawalsPaise))); const dep = Math.max(4, 92 * Number(point.depositsPaise) / max); const wd = Math.max(4, 92 * Number(point.withdrawalsPaise) / max); const users = Math.min(24, Number(point.registrations) * 3); return <View key={`${point.date}-${index}`} style={styles.chartRow}><Text style={styles.chartDate}>{new Date(point.date).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}</Text><View style={styles.chartTrack}><View style={[styles.chartDeposit,{width:`${dep}%`}]}/><View style={[styles.chartWithdraw,{width:`${wd}%`}]}/></View><Text style={styles.chartUsers}>{Number(point.registrations)} users</Text></View>; })}</View></> : null}

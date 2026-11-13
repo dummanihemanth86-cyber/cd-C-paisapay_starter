@@ -1,8 +1,23 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getGatewaySmsStatus, sendGatewaySms } from '../integrations/sms/androidGateway.js';
 import { env } from '../config/env.js';
 
 const input = { phoneNumber: '+919876543210', message: 'Verification code 123456', requestId: 'challenge-123' };
+const originalGatewayConfig = {
+  smsGatewayUrl: env.smsGatewayUrl,
+  smsGatewayApiKey: env.smsGatewayApiKey,
+  smsGatewayConfigured: env.smsGatewayConfigured,
+};
+
+beforeEach(() => {
+  Object.assign(env, {
+    smsGatewayUrl: 'https://sms-gateway.example.test',
+    smsGatewayApiKey: 'test-only-not-a-secret',
+    smsGatewayConfigured: true,
+  });
+});
+
+afterEach(() => Object.assign(env, originalGatewayConfig));
 
 describe('Android SMS gateway adapter', () => {
   it('uses the documented endpoint, private header, request fields, and distinguishes queued from delivered', async () => {

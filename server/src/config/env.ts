@@ -39,6 +39,16 @@ const schema = z.object({
   ADMIN_WALLET_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   WALLET_ADJUSTMENT_ADMIN_USER_ID: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value, z.string().uuid().optional()),
+  ADMIN_PHONEPE_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_PHONEPE_CREDITS_ADMIN_PHONE_E164: z.preprocess(
+    (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().regex(/^\+[1-9]\d{7,14}$/).optional(),
+  ),
+  ADMIN_PHONEPE_RECEIVER_VPA: z.preprocess(
+    (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$/).optional(),
+  ),
   CASHFREE_CLIENT_ID: z.string().optional(),
   CASHFREE_CLIENT_SECRET: z.string().optional(),
   CASHFREE_API_VERSION: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).default('2026-01-01'),
@@ -144,6 +154,10 @@ if (values.NODE_ENV === 'production') {
     throw new Error('Production Admin wallet gates require the complete gate bundle, external bank reconciliation attestation, and explicit ADMIN_WALLET_PRODUCTION_APPROVED=true.');
   }
   if (values.ADMIN_WALLET_PRODUCTION_APPROVED && values.FINANCIAL_OPERATIONS_ENABLED) throw new Error('Admin wallet approval must remain isolated from FINANCIAL_OPERATIONS_ENABLED, which is reserved for separately approved payment and payout operations.');
+  if (values.ADMIN_PHONEPE_CREDITS_ENABLED && !values.ADMIN_PHONEPE_RECEIVER_VPA) throw new Error('Admin PhonePe credits require ADMIN_PHONEPE_RECEIVER_VPA so each payment request has an explicit receiver.');
+  if (values.ADMIN_PHONEPE_CREDITS_ENABLED && !values.ADMIN_PHONEPE_CREDITS_ADMIN_PHONE_E164) throw new Error('Admin PhonePe credits require ADMIN_PHONEPE_CREDITS_ADMIN_PHONE_E164 to bind the feature to the authorized Super Admin account.');
+  if (values.ADMIN_PHONEPE_CREDITS_ENABLED && !values.ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED) throw new Error('Production Admin PhonePe credits require ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED=true.');
+  if (values.ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED && !values.ADMIN_PHONEPE_CREDITS_ENABLED) throw new Error('ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED requires ADMIN_PHONEPE_CREDITS_ENABLED=true.');
   if (values.WELCOME_BONUS_ENABLED) throw new Error('WELCOME_BONUS_ENABLED is development-only in this build. Production promotional funding and terms have not been approved.');
 }
 if (values.WELCOME_BONUS_ENABLED && !['development', 'test'].includes(values.NODE_ENV)) {
@@ -196,6 +210,10 @@ export const env = {
   adminWalletProductionApproved: values.ADMIN_WALLET_PRODUCTION_APPROVED,
   adminWalletExternalReconciliationVerified: values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED,
   walletAdjustmentAdminUserId: values.WALLET_ADJUSTMENT_ADMIN_USER_ID,
+  adminPhonePeCreditsEnabled: values.ADMIN_PHONEPE_CREDITS_ENABLED,
+  adminPhonePeCreditsProductionApproved: values.ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED,
+  adminPhonePeCreditsAdminPhoneE164: values.ADMIN_PHONEPE_CREDITS_ADMIN_PHONE_E164,
+  adminPhonePeReceiverVpa: values.ADMIN_PHONEPE_RECEIVER_VPA,
   cashfreeClientId: values.CASHFREE_CLIENT_ID,
   cashfreeClientSecret: values.CASHFREE_CLIENT_SECRET,
   cashfreeApiVersion: values.CASHFREE_API_VERSION,

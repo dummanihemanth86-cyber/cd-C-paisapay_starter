@@ -10,6 +10,7 @@ import { assertFinancialOperationsEnabled, financialOperationsGate } from '../..
 import { env } from '../../config/env.js';
 import { grantVerifiedP2pOrderReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../payments/depositReward.js';
 import { grantVerifiedReferralCommission } from '../users/referralCommission.js';
+import { lockPaymentReference, paymentReferenceHash } from '../payments/paymentReferenceLock.js';
 import { committedP2pAmount, createWithdrawalOffer, deriveP2pOfferStatus, ensureOpenP2pOffersReserved, expireP2pOffers, expireUnconfirmedP2pMatches, p2pPaymentHandoffUnresolved, P2P_ACTIVE_ORDER_STATUSES, P2P_COMMITTED_ORDER_STATUSES, P2P_HELD_ORDER_STATUSES, P2P_MATCH_CONFIRM_TTL_MS, releaseOfferFunds, reserveOfferFunds, validateP2pEvidence } from './service.js';
 
 export const p2pRouter = Router();
@@ -287,13 +288,15 @@ p2pRouter.post('/deposits/orders/:id/payment-reference', p2pLimit, asyncRoute(as
     if (!['PAYMENT_PENDING', 'PAYMENT_EXPIRED_REVIEW', 'CANCELLED_PAYMENT_HOLD', 'PAYMENT_PROCESSING', 'DISPUTED'].includes(order.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'Order is not awaiting payment review.');
     if (order.claims.length) throw new HttpError(409, 'P2P_CLAIM_ALREADY_PENDING', 'Payment proof is already awaiting Finance review.');
     if (input.transactionReference) {
+      await lockPaymentReference(tx, input.transactionReference);
       const [usedP2pClaim, usedDeposit, usedManualClaim] = await Promise.all([
         tx.p2pPaymentClaim.findUnique({ where: { transactionReference: input.transactionReference }, select: { id: true } }),
         tx.deposit.findFirst({ where: { providerReference: input.transactionReference }, select: { id: true } }),
         tx.manualPaymentClaim.findUnique({ where: { transactionReference: input.transactionReference }, select: { id: true } }),
       ]);
       const usedP2pOrder = await tx.p2pDepositOrder.findFirst({ where: { providerReference: input.transactionReference }, select: { id: true } });
-      if (usedP2pClaim || usedDeposit || usedManualClaim || usedP2pOrder) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
+      const usedAdminCredit = await tx.adminPhonePeCreditRequest.findUnique({ where: { paymentReferenceHash: paymentReferenceHash(input.transactionReference) }, select: { id: true } });
+      if (usedP2pClaim || usedDeposit || usedManualClaim || usedP2pOrder || usedAdminCredit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
     }
     const image = Buffer.from(input.evidenceImageBase64, 'base64');
     const claim = await tx.p2pPaymentClaim.create({ data: {
@@ -558,12 +561,14 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires independently verified exact transaction reference, INR amount, and recipient receipt.');
     if (input.verifiedPayeeVpa !== claim.order.withdrawalOffer.payeeVpa) throw new HttpError(409, 'PAYEE_MISMATCH', 'Verified recipient UPI ID does not match the payee on this matched offer.');
     if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status) || !['MATCHED', 'PARTIALLY_MATCHED', 'CANCELLED'].includes(claim.order.withdrawalOffer.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting independent payment review.');
+    await lockPaymentReference(tx, input.verifiedTransactionReference);
     const [usedDeposit, usedP2pOrder, usedManualClaim] = await Promise.all([
       tx.deposit.findFirst({ where: { providerReference: input.verifiedTransactionReference! }, select: { id: true } }),
       tx.p2pDepositOrder.findFirst({ where: { providerReference: input.verifiedTransactionReference!, id: { not: claim.orderId } }, select: { id: true } }),
       tx.manualPaymentClaim.findUnique({ where: { transactionReference: input.verifiedTransactionReference! }, select: { id: true } }),
     ]);
-    if (usedDeposit || usedP2pOrder || usedManualClaim) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
+    const usedAdminCredit = await tx.adminPhonePeCreditRequest.findUnique({ where: { paymentReferenceHash: paymentReferenceHash(input.verifiedTransactionReference!) }, select: { id: true } });
+    if (usedDeposit || usedP2pOrder || usedManualClaim || usedAdminCredit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference is already attached to another payment.');
     const sellerReserved = await getLedgerAccount(tx, claim.order.sellerUserId, 'RESERVED');
     const buyerAvailable = await getLedgerAccount(tx, claim.order.buyerUserId, 'AVAILABLE');
     await tx.$queryRaw`SELECT id FROM ledger_accounts WHERE id IN (${sellerReserved.id}::uuid, ${buyerAvailable.id}::uuid) ORDER BY id FOR UPDATE`;

@@ -15,6 +15,7 @@ import { expireUnpaidUpiDeposits, UPI_DEPOSIT_EXPIRY_MS } from './depositExpiry.
 import { createCashfreeOrder, getCashfreeOrder, getCashfreePayments, verifyCashfreeWebhook, type CashfreePayment } from '../../integrations/payments/cashfree.js';
 import { createHash } from 'node:crypto';
 import { decodeManualClaimImage, validateUpiUtr } from './manualClaimEvidence.js';
+import { lockPaymentReference, paymentReferenceHash } from './paymentReferenceLock.js';
 
 export const paymentsRouter = Router();
 paymentsRouter.use(requireAuth);
@@ -233,6 +234,11 @@ paymentsRouter.post('/deposits/:id/manual-verification', financialOperationsGate
     if (!['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING', 'EXPIRED', 'CANCELLED'].includes(current.status)) throw new HttpError(409, 'DEPOSIT_NOT_REVIEWABLE', 'This deposit is not awaiting payment review.');
     if (current.manualPaymentClaim?.status === 'PENDING_REVIEW') throw new HttpError(409, 'CLAIM_ALREADY_PENDING', 'This transaction reference is already waiting for Finance review.');
     if (current.manualPaymentClaim?.status === 'APPROVED') throw new HttpError(409, 'CLAIM_ALREADY_APPROVED', 'This payment claim has already been approved.');
+    if (transactionReference) {
+      await lockPaymentReference(tx, transactionReference);
+      const phonePeCredit = await tx.adminPhonePeCreditRequest.findUnique({ where: { paymentReferenceHash: paymentReferenceHash(transactionReference) }, select: { id: true } });
+      if (phonePeCredit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference was already recorded for an Admin credit.');
+    }
 
     const saved = current.manualPaymentClaim
       ? await tx.manualPaymentClaim.update({ where: { id: current.manualPaymentClaim.id }, data: { transactionReference, evidenceImage: Uint8Array.from(evidenceImage.bytes), evidenceMimeType: evidenceImage.mimeType, status: 'PENDING_REVIEW', reviewedByUserId: null, reviewReason: null, evidenceReference: null, verifiedAmountPaise: null, verifiedCurrency: null, receiverConfirmed: false, reviewedAt: null } })
@@ -323,6 +329,9 @@ paymentsRouter.post('/admin/reconciliation/claims/:claimId/review', requireAdmin
       receiverConfirmed: input.receiverConfirmed!,
     });
     if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires an exact transaction-reference, amount, INR currency, and receiver match in merchant records.');
+    await lockPaymentReference(tx, input.verifiedTransactionReference);
+    const phonePeCredit = await tx.adminPhonePeCreditRequest.findUnique({ where: { paymentReferenceHash: paymentReferenceHash(input.verifiedTransactionReference!) }, select: { id: true } });
+    if (phonePeCredit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference was already recorded for an Admin credit.');
     if (!['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(claim.deposit.status)) throw new HttpError(409, 'DEPOSIT_NOT_REVIEWABLE', 'Deposit is no longer awaiting payment review.');
     const duplicate = await tx.deposit.findFirst({ where: { providerReference: input.verifiedTransactionReference!, id: { not: claim.depositId } }, select: { id: true } });
     if (duplicate) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This provider transaction reference is already attached to another deposit.');

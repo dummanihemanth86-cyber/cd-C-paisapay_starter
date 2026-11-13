@@ -14,6 +14,7 @@ import { env } from '../../config/env.js';
 import { formatReportResult, hasMoney, reportQuerySchema, safeSettingsSnapshot, type ReportKind } from './reporting.js';
 import { MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from './walletAdjustment.js';
 import { createCreditRequest, decideCreditRequest, createFundingRequest, decideFundingRequest, ADMIN_ADJUSTMENT_FUND_ID, ADMIN_SETTLEMENT_CASH_ID } from './walletCreditWorkflow.js';
+import { assertPhonePeCreditsAdmin, createPhonePeWalletCreditRequest, decidePhonePeWalletCredit, readPhonePeWalletCreditReadiness } from './phonePeWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
 import { createOtpChallenge } from '../auth/routes.js';
 
@@ -126,6 +127,18 @@ const financeRoles = new Set(['FINANCE', 'ADMIN', 'SUPER_ADMIN']);
 const operationsRoles = new Set(['OPERATIONS', 'ADMIN', 'SUPER_ADMIN']);
 function requireRole(role: string | undefined, allowed: Set<string>) { if (!role || !allowed.has(role)) throw new HttpError(403, 'ADMIN_PERMISSION_DENIED', 'Your administrator role cannot perform this action.'); }
 const phoneMasked = (phone: string) => `${phone.slice(0, Math.max(0, phone.length - 4)).replace(/\d/g, '*')}${phone.slice(-4)}`;
+const phonePeCreditRequestForApi = (request: any) => {
+  const { amountPaise, idempotencyKey: _idempotencyKey, paymentReferenceHash: _paymentReferenceHash, targetUser, makerUser, ...safe } = request;
+  return {
+    ...safe,
+    amountPaise: Number(amountPaise),
+    ...(targetUser ? { targetUser: {
+      id: targetUser.id, publicId: targetUser.publicId ?? null, displayName: targetUser.displayName ?? null,
+      status: targetUser.status, ...(targetUser.phoneE164 ? { phoneMasked: phoneMasked(targetUser.phoneE164) } : {}),
+    } } : {}),
+    ...(makerUser ? { makerUser: { publicId: makerUser.publicId ?? null, displayName: makerUser.displayName ?? null } } : {}),
+  };
+};
 
 adminRouter.get('/reports', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['ADMIN', 'SUPER_ADMIN']));
@@ -219,8 +232,13 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
   const walletFundingBlockers = [...(walletReadiness?.fundingBlockers ?? []), ...releaseBlockers];
   const walletCreditRequestsEnabled = walletCreditsAllowed && walletProductionAuthorized && env.adminWalletCreditsEnabled && env.walletAdjustmentsEnabled && walletReadiness?.creditBlockers.length === 0;
   const walletFundingRequestsEnabled = walletCreditsAllowed && walletProductionAuthorized && env.adminWalletFundingEnabled && env.adminWalletCreditsEnabled && env.walletAdjustmentsEnabled && walletReadiness?.fundingBlockers.length === 0;
+  const phonePeAdmin = walletCreditsAllowed && env.adminPhonePeCreditsAdminPhoneE164
+    ? await databaseRequired().user.findUnique({ where: { id: req.auth!.userId }, select: { phoneE164: true } })
+    : null;
+  const phonePeCreditsAllowed = walletCreditsAllowed && phonePeAdmin?.phoneE164 === env.adminPhonePeCreditsAdminPhoneE164;
   const allowedSections = [...(roleViews[role] || common)];
   if (walletCreditsAllowed) for (const section of ['walletCredits', 'walletCreditApprovals', 'walletCreditRejections', 'walletFunding', 'walletFundingApprovals', 'walletFundingRejections', 'walletReconciliation']) if (!allowedSections.includes(section)) allowedSections.push(section);
+  if (phonePeCreditsAllowed && !allowedSections.includes('phonePeCredits')) allowedSections.push('phonePeCredits');
   res.json({
     userId: req.auth!.userId,
     role,
@@ -240,6 +258,8 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     walletFundingRequestsEnabled,
     walletCreditBlockers,
     walletFundingBlockers,
+    phonePeCreditsAllowed,
+    phonePeCreditsEnabled: phonePeCreditsAllowed && env.adminPhonePeCreditsEnabled,
   });
 }));
 
@@ -322,6 +342,7 @@ adminRouter.get('/users', asyncRoute(async (req, res) => {
   // Finance reviewers need masked user lookup while reconciling deposits.
   requireRole(req.auth!.role, new Set([...operationsRoles, 'FINANCE']));
   const db = databaseRequired(); const input = pageInput.parse(req.query); const where: any = {};
+  if (req.query.customerOnly === 'true') { where.status = 'ACTIVE'; where.adminRole = { is: null }; }
   if (input.status) where.status = z.enum(['PENDING_PROFILE', 'ACTIVE', 'SUSPENDED', 'CLOSED']).parse(input.status);
   if (input.q) where.OR = [
     { publicId: { contains: input.q, mode: 'insensitive' } },
@@ -411,6 +432,71 @@ adminRouter.get('/wallets/ledger', asyncRoute(async (req, res) => {
   const where: any = { ...(input.userId ? { account: { userId: input.userId } } : {}) };
   const [total, rows] = await Promise.all([db.ledgerEntry.count({ where }), db.ledgerEntry.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, include: { account: { select: { userId: true, type: true, currency: true, user: { select: { publicId: true } } } }, transaction: { select: { id: true, eventType: true, referenceType: true, referenceId: true, actorUserId: true } } } })]);
   res.json({ entries: rows.map((e) => ({ id: e.id, userId: e.account.user?.publicId, accountType: e.account.type, currency: e.account.currency, creditPaise: Number(e.creditPaise), debitPaise: Number(e.debitPaise), transaction: e.transaction, createdAt: e.createdAt })), total, page: input.page, pageSize: input.pageSize });
+}));
+
+adminRouter.get('/wallet/phonepe-credits/readiness', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const db = databaseRequired();
+  await assertPhonePeCreditsAdmin(db, req.auth!.userId);
+  res.json(await readPhonePeWalletCreditReadiness(db));
+}));
+
+adminRouter.get('/wallet/phonepe-credits/requests', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const db = databaseRequired();
+  await assertPhonePeCreditsAdmin(db, req.auth!.userId);
+  const input = pageInput.parse(req.query);
+  const status = z.enum(['PENDING_PAYMENT', 'COMPLETED', 'REJECTED', 'EXPIRED']).optional().parse(req.query.status);
+  const where = status ? { status } : {};
+  const [requests, total] = await Promise.all([
+    db.adminPhonePeCreditRequest.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize,
+      include: { targetUser: { select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true } }, makerUser: { select: { publicId: true, displayName: true } } } }),
+    db.adminPhonePeCreditRequest.count({ where }),
+  ]);
+  res.json({ requests: requests.map(phonePeCreditRequestForApi), total, page: input.page, pageSize: input.pageSize });
+}));
+
+adminRouter.post('/wallet/phonepe-credits/requests', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const db = databaseRequired();
+  await assertPhonePeCreditsAdmin(db, req.auth!.userId);
+  const readiness = await readPhonePeWalletCreditReadiness(db);
+  if (!readiness.enabled || !readiness.receiverVpa) throw new HttpError(503, 'PHONEPE_CREDITS_NOT_READY', `PhonePe Admin credits cannot start: ${readiness.blockers.join('; ')} No wallet balance was changed.`);
+  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({
+    targetUserId: z.string().uuid(),
+    verifiedPublicId: z.string().trim().min(1).max(50),
+    verifiedPhoneMasked: z.string().trim().min(4).max(32),
+    verifiedWalletBalancePaise: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    amountPaise: z.number().int().min(MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE).max(MAX_ADMIN_ADJUSTMENT_PAISE).refine((amount) => amount % 100 === 0, 'Credit amount must use whole rupees.'),
+    reason: z.string().trim().min(8).max(500),
+  }).strict().parse(req.body);
+  const result = await db.$transaction((tx) => createPhonePeWalletCreditRequest(tx, { makerUserId: req.auth!.userId, idempotencyKey, ...input, payeeVpa: readiness.receiverVpa! }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(result.replayed ? 200 : 201).json({ request: phonePeCreditRequestForApi(result.request), replayed: result.replayed, message: result.replayed ? 'This exact payment request already exists; no duplicate request was created.' : `Payment request created for ${readiness.receiverVpa}. Complete payment in a UPI app, then confirm receipt manually before approval.` });
+}));
+
+adminRouter.post('/wallet/phonepe-credits/requests/:id/decision', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const db = databaseRequired();
+  await assertPhonePeCreditsAdmin(db, req.auth!.userId);
+  const input = z.object({
+    decision: z.enum(['APPROVE', 'REJECT']),
+    reason: z.string().trim().min(8).max(500),
+    paymentReference: z.string().trim().min(8).max(120).optional(),
+    verifiedAmountPaise: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    verifiedPayeeVpa: z.string().trim().max(100).optional(),
+    receiverConfirmed: z.boolean().optional(),
+  }).strict().parse(req.body);
+  if (input.decision === 'APPROVE') {
+    const readiness = await readPhonePeWalletCreditReadiness(db);
+    if (!readiness.enabled) throw new HttpError(503, 'PHONEPE_CREDITS_NOT_READY', `PhonePe Admin credits cannot be approved: ${readiness.blockers.join('; ')} No wallet balance was changed.`);
+  }
+  const result = await db.$transaction((tx) => decidePhonePeWalletCredit(tx, { requestId: z.string().uuid().parse(req.params.id), checkerUserId: req.auth!.userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.json({ ...result, request: phonePeCreditRequestForApi(result.request), message: result.replayed
+    ? 'This verified PhonePe credit was already posted; no duplicate ledger entry was created.'
+    : input.decision === 'APPROVE' && result.request.status === 'COMPLETED'
+      ? 'PhonePe receipt manually confirmed. Wallet credit and balanced ledger entries committed.'
+      : input.decision === 'REJECT' ? 'Payment request rejected; no wallet balance changed.' : 'Payment request expired; no wallet balance changed.' });
 }));
 
 adminRouter.get('/users/:id/wallet/credits', asyncRoute(async (req, res) => {

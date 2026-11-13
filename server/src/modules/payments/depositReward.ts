@@ -1,5 +1,6 @@
 import type { Prisma } from '../../generated/prisma/client.js';
 import { env } from '../../config/env.js';
+import { assertFinancialOperationsEnabled } from '../../middleware/financialOperations.js';
 import { DEVELOPMENT_REWARD_FUND_ACCOUNT_ID } from '../users/welcomeBonus.js';
 
 export const P2P_ORDER_REWARD_PERCENT_BPS = 600;
@@ -9,6 +10,7 @@ export async function grantVerifiedUpiDepositReward(
   tx: Prisma.TransactionClient,
   input: { depositId: string; userId: string; actorUserId: string; amountPaise: bigint },
 ): Promise<bigint> {
+  assertFinancialOperationsEnabled();
   if (!env.upiDepositRewardEnabled || env.upiDepositRewardPercentBps <= 0) return 0n;
 
   const rewardPaise = input.amountPaise * BigInt(env.upiDepositRewardPercentBps) / 10_000n;
@@ -68,6 +70,7 @@ export async function grantVerifiedP2pOrderReward(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; actorUserId: string; amountPaise: bigint },
 ): Promise<bigint> {
+  assertFinancialOperationsEnabled();
   if (!env.upiDepositRewardEnabled) return 0n;
   const rewardPaise = input.amountPaise * BigInt(P2P_ORDER_REWARD_PERCENT_BPS) / 10_000n;
   if (rewardPaise <= 0n) return 0n;

@@ -130,6 +130,8 @@ model User {
   adminWalletCreditTargets      AdminWalletCreditRequest[] @relation("AdminWalletCreditRequestTarget")
   adminWalletFundingRequestsMade AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestMaker")
   adminWalletFundingRequestsChecked AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestChecker")
+  adminPhonePeCreditRequestsMade AdminPhonePeCreditRequest[] @relation("AdminPhonePeCreditRequestMaker")
+  adminPhonePeCreditTargets AdminPhonePeCreditRequest[] @relation("AdminPhonePeCreditRequestTarget")
   submittedManualPaymentClaims ManualPaymentClaim[] @relation("ManualPaymentClaimSubmitter")
   reviewedManualPaymentClaims  ManualPaymentClaim[] @relation("ManualPaymentClaimReviewer")
   p2pWithdrawalOffers          P2pWithdrawalOffer[] @relation("P2pOfferCreator")
@@ -203,6 +205,8 @@ model LedgerTransaction {
   entries        LedgerEntry[]
   adminWalletCreditRequest AdminWalletCreditRequest?
   adminWalletFundingRequest AdminWalletFundingRequest?
+  adminPhonePeCreditFundingRequest AdminPhonePeCreditRequest? @relation("AdminPhonePeCreditFundingTransaction")
+  adminPhonePeCreditLedgerRequest AdminPhonePeCreditRequest? @relation("AdminPhonePeCreditLedgerTransaction")
   createdAt      DateTime      @default(now()) @map("created_at")
 
   @@index([referenceType, referenceId])
@@ -685,6 +689,33 @@ model AdminWalletFundingRequest {
 
   @@index([status, createdAt])
   @@map("admin_wallet_funding_requests")
+}
+
+model AdminPhonePeCreditRequest {
+  id                         String             @id @default(uuid()) @db.Uuid
+  targetUserId               String             @map("target_user_id") @db.Uuid
+  targetUser                 User               @relation("AdminPhonePeCreditRequestTarget", fields: [targetUserId], references: [id], onDelete: Restrict)
+  makerUserId                String             @map("maker_user_id") @db.Uuid
+  makerUser                  User               @relation("AdminPhonePeCreditRequestMaker", fields: [makerUserId], references: [id], onDelete: Restrict)
+  amountPaise                BigInt             @map("amount_paise")
+  payeeVpa                   String             @map("payee_vpa") @db.VarChar(100)
+  reason                     String             @db.VarChar(500)
+  status                     String             @default("PENDING_PAYMENT") @db.VarChar(24)
+  idempotencyKey             String             @unique @map("idempotency_key") @db.VarChar(100)
+  paymentReferenceHash       String?            @unique @map("payment_reference_hash") @db.Char(64)
+  paymentReferenceMasked     String?            @map("payment_reference_masked") @db.VarChar(24)
+  decisionReason             String?            @map("decision_reason") @db.VarChar(500)
+  fundingLedgerTransactionId String?            @unique @map("funding_ledger_transaction_id") @db.Uuid
+  fundingLedgerTransaction   LedgerTransaction? @relation("AdminPhonePeCreditFundingTransaction", fields: [fundingLedgerTransactionId], references: [id], onDelete: Restrict)
+  ledgerTransactionId        String?            @unique @map("ledger_transaction_id") @db.Uuid
+  ledgerTransaction          LedgerTransaction? @relation("AdminPhonePeCreditLedgerTransaction", fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  createdAt                  DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt                  DateTime           @map("expires_at") @db.Timestamptz(3)
+  decidedAt                  DateTime?          @map("decided_at") @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("admin_phonepe_credit_requests")
 }
 
 model IdempotencyKey {
