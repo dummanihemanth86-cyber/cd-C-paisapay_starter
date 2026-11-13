@@ -13,6 +13,10 @@ const schema = z.object({
     (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
     z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$/).optional(),
   ),
+  ADMIN_PHONEPE_RECEIVER_VPA: z.preprocess(
+    (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$/).optional(),
+  ),
   MIN_DEPOSIT_PAISE: z.coerce.number().int().positive().default(1000),
   MAX_DEPOSIT_PAISE: z.coerce.number().int().positive().default(1_000_000),
   P2P_WITHDRAWAL_OFFER_TTL_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
@@ -53,6 +57,8 @@ const schema = z.object({
   WALLET_ADJUSTMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_FUNDING_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_PHONEPE_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_STAGING_DIRECT_CREDITS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
@@ -174,6 +180,15 @@ if (values.NODE_ENV === 'production') {
   if (values.MANUAL_UPI_OPERATIONS_ENABLED && !isExplicitRenderStaging && !values.MANUAL_UPI_PRODUCTION_APPROVED) {
     throw new Error('Production manual UPI operations require MANUAL_UPI_PRODUCTION_APPROVED=true after recipient, reconciliation, and Finance review controls are verified.');
   }
+  if (values.ADMIN_PHONEPE_CREDITS_ENABLED && !values.ADMIN_PHONEPE_RECEIVER_VPA) {
+    throw new Error('Admin PhonePe credits require ADMIN_PHONEPE_RECEIVER_VPA so the UPI request has a configured recipient.');
+  }
+  if (values.ADMIN_PHONEPE_CREDITS_ENABLED && !isExplicitRenderStaging && !values.ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED) {
+    throw new Error('Production Admin PhonePe credits require ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED=true.');
+  }
+  if (values.ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED && !values.ADMIN_PHONEPE_CREDITS_ENABLED) {
+    throw new Error('ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED requires ADMIN_PHONEPE_CREDITS_ENABLED=true.');
+  }
   const anyAdminWalletGate = values.WALLET_ADJUSTMENTS_ENABLED || values.ADMIN_WALLET_FUNDING_ENABLED || values.ADMIN_WALLET_CREDITS_ENABLED;
   const allAdminWalletGates = values.WALLET_ADJUSTMENTS_ENABLED && values.ADMIN_WALLET_FUNDING_ENABLED && values.ADMIN_WALLET_CREDITS_ENABLED;
   if ((anyAdminWalletGate && (!allAdminWalletGates || !values.ADMIN_WALLET_PRODUCTION_APPROVED || !values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED)) || ((values.ADMIN_WALLET_PRODUCTION_APPROVED || values.ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED) && !allAdminWalletGates)) {
@@ -201,6 +216,7 @@ export const env = {
   host: values.HOST,
   appOrigins: values.APP_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean),
   depositReceiverUpiId: values.DEPOSIT_RECEIVER_UPI_ID,
+  adminPhonePeReceiverVpa: values.ADMIN_PHONEPE_RECEIVER_VPA,
   minDepositPaise: values.MIN_DEPOSIT_PAISE,
   // Cap configured deposits at ₹10,000; deployment config may choose a lower limit.
   maxDepositPaise: Math.min(values.MAX_DEPOSIT_PAISE, 1_000_000),
@@ -237,6 +253,8 @@ export const env = {
   walletAdjustmentsEnabled: values.WALLET_ADJUSTMENTS_ENABLED,
   adminWalletFundingEnabled: values.ADMIN_WALLET_FUNDING_ENABLED,
   adminWalletCreditsEnabled: values.ADMIN_WALLET_CREDITS_ENABLED,
+  adminPhonePeCreditsEnabled: values.ADMIN_PHONEPE_CREDITS_ENABLED,
+  adminPhonePeCreditsProductionApproved: values.ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED,
   stagingDirectWalletCreditsEnabled: values.ADMIN_STAGING_DIRECT_CREDITS_ENABLED && isExplicitRenderStaging,
   isExplicitRenderStaging,
   adminWalletProductionApproved: values.ADMIN_WALLET_PRODUCTION_APPROVED,

@@ -91,7 +91,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     await db.$transaction(async (tx) => {
       await tx.auditLog.deleteMany({ where: { target: { in: depositIds.map((id) => `DEPOSIT:${id}`) } } });
       await tx.auditLog.deleteMany({ where: { target: { in: ['REFERRAL_PROGRAM:CONFIG', 'REFERRAL_MILESTONE:TIER_5', `USER:${referrerId}`] } } });
-      await tx.commissionEntry.deleteMany({ where: { userId: { in: [customerId, referrerId, ancestorId] }, OR: [{ sourceUserId: customerId }, { kind: 'MILESTONE_REWARD' }] } });
+      await tx.commissionEntry.deleteMany({ where: { userId: { in: [customerId, referrerId, ancestorId] }, OR: [{ sourceUserId: { in: [customerId, referrerId] } }, { kind: 'MILESTONE_REWARD' }] } });
       await tx.notification.deleteMany({ where: { userId: { in: [customerId, adminId, referrerId, ancestorId] } } });
       await tx.manualPaymentClaim.deleteMany({ where: { depositId: { in: depositIds } } });
       await tx.referral.deleteMany({ where: { inviteeId: { in: [customerId, referrerId] } } });
@@ -335,6 +335,64 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     expect(updated.body.bankAccount.verificationStatus).toBe('UNVERIFIED');
     await request(app).delete(`/api/v1/users/me/bank-accounts/${bankAccountId}`).set(customerAuth).expect(200);
     bankAccountId = '';
+  });
+
+  it('creates an Admin UPI deposit without credit and settles only after exact Finance receipt verification', async () => {
+    const adminAuth = { Authorization: `Bearer ${adminToken}` };
+    const customerAuth = { Authorization: `Bearer ${referrerToken}` };
+    const idempotencyKey = `ADMIN_UPI_TEST_${randomUUID()}`;
+    const created = await request(app).post('/api/v1/admin/deposits/upi')
+      .set(adminAuth)
+      .set('Idempotency-Key', idempotencyKey)
+      .send({ userId: referrerId, amountPaise: 10_000 })
+      .expect(201);
+    const createdDepositId = created.body.deposit.id as string;
+    depositIds.push(createdDepositId);
+    expect(created.body.deposit).toMatchObject({ userId: referrerId, amountPaise: 10_000, currency: 'INR', method: 'UPI', status: 'PENDING_PAYMENT' });
+    expect(created.body.paymentUri).toMatch(/^upi:\/\/pay\?/);
+    expect(created.body).toMatchObject({ paymentStarted: false, automaticVerificationAvailable: false });
+    expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(0);
+
+    const replay = await request(app).post('/api/v1/admin/deposits/upi')
+      .set(adminAuth)
+      .set('Idempotency-Key', idempotencyKey)
+      .send({ userId: referrerId, amountPaise: 10_000 })
+      .expect(200);
+    expect(replay.body.deposit.id).toBe(createdDepositId);
+    expect(await db.deposit.count({ where: { idempotencyKey: `ADMIN_UPI:${adminId}:${referrerId}:${idempotencyKey}` } })).toBe(1);
+
+    const reference = randomUUID().replace(/\D/g, '').slice(0, 12).padEnd(12, '8');
+    const claimed = await request(app).post(`/api/v1/admin/deposits/${createdDepositId}/manual-claim`)
+      .set(adminAuth)
+      .send({ transactionReference: reference })
+      .expect(202);
+    expect(claimed.body.claim).toMatchObject({ status: 'PENDING_REVIEW', transactionReference: reference });
+    expect(claimed.body.deposit.status).toBe('PAYMENT_PROCESSING');
+    expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(0);
+
+    const reviewPath = `/api/v1/admin/reconciliation/claims/${claimed.body.claim.id}/review`;
+    await request(app).post(reviewPath).set(adminAuth).send({
+      decision: 'APPROVE', reason: 'Isolated integration fixture for exact receiver-side verification.',
+      evidenceReference: 'LOCAL_TEST_RECEIVER_RECORD', verifiedTransactionReference: reference,
+      verifiedAmountPaise: 9_999, verifiedCurrency: 'INR', receiverConfirmed: true,
+    }).expect(409);
+    expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(0);
+
+    const approved = await request(app).post(reviewPath).set(adminAuth).send({
+      decision: 'APPROVE', reason: 'Isolated integration fixture for exact receiver-side verification.',
+      evidenceReference: 'LOCAL_TEST_RECEIVER_RECORD', verifiedTransactionReference: reference,
+      verifiedAmountPaise: 10_000, verifiedCurrency: 'INR', receiverConfirmed: true,
+    }).expect(200);
+    expect(approved.body.deposit.status).toBe('COMPLETED');
+    const expectedRewardPaise = env.upiDepositRewardEnabled ? 1_700 : 0;
+    expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(10_000 + expectedRewardPaise);
+    expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `MANUAL_DEPOSIT:${createdDepositId}` } })).toBe(1);
+    await request(app).post(reviewPath).set(adminAuth).send({
+      decision: 'APPROVE', reason: 'Duplicate verification must not settle twice.',
+      evidenceReference: 'LOCAL_TEST_RECEIVER_RECORD', verifiedTransactionReference: reference,
+      verifiedAmountPaise: 10_000, verifiedCurrency: 'INR', receiverConfirmed: true,
+    }).expect(409);
+    expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `MANUAL_DEPOSIT:${createdDepositId}` } })).toBe(1);
   });
 
 });

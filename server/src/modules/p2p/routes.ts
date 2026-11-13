@@ -218,8 +218,8 @@ function p2pRewardPreview(amountPaise: bigint) {
     enabled: env.upiDepositRewardEnabled,
     status: env.upiDepositRewardEnabled ? 'PENDING_PAYMENT_VERIFICATION' : 'PENDING_VERIFICATION_AND_FUNDED_PROGRAM',
     message: env.upiDepositRewardEnabled
-      ? 'Estimated 6% order reward; credited after independent payment verification if the funded reward pool has enough balance.'
-      : 'Estimated 6% order reward; no reward program is funded/enabled, so this is not guaranteed wallet credit.',
+      ? 'Estimated 6.2% order reward; credited after independent payment verification if the funded reward pool has enough balance.'
+      : 'Estimated 6.2% order reward; no reward program is funded/enabled, so this is not guaranteed wallet credit.',
   };
 }
 

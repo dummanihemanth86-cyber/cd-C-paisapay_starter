@@ -34,7 +34,7 @@ export async function applyAdminWalletAdjustment(tx: Prisma.TransactionClient, i
   }
 
   const scopedKey = `${input.idempotencyScope ?? 'ADMIN_WALLET_ADJUSTMENT'}:${input.actorUserId}:${input.idempotencyKey}`;
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${scopedKey}))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${scopedKey}))`;
   const existing = await tx.ledgerTransaction.findUnique({ where: { idempotencyKey: scopedKey }, select: { id: true, referenceId: true, metadata: true, createdAt: true } });
   if (existing) {
     const target = await tx.user.findUnique({ where: { publicId: input.targetPublicId }, select: { id: true, publicId: true } });
@@ -85,8 +85,8 @@ export async function applyAdminWalletAdjustment(tx: Prisma.TransactionClient, i
 }
 
 export async function applySuperAdminWalletCredit(tx: Prisma.TransactionClient, input: Omit<WalletAdjustmentInput, 'direction' | 'targetPublicId'> & { targetUserId: string }) {
-  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise < MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE || input.amountPaise > MAX_ADMIN_ADJUSTMENT_PAISE) {
-    throw new HttpError(400, 'WALLET_CREDIT_AMOUNT_INVALID', 'Credit amount must be an integer from ₹100 to ₹10,000.');
+  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise < MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE || input.amountPaise > MAX_ADMIN_ADJUSTMENT_PAISE || input.amountPaise % 100 !== 0) {
+    throw new HttpError(400, 'WALLET_CREDIT_AMOUNT_INVALID', 'Credit amount must be whole rupees from ₹100 to ₹10,000.');
   }
   const target = await tx.user.findUnique({ where: { id: input.targetUserId }, select: { id: true, publicId: true } });
   if (!target) throw new HttpError(404, 'WALLET_ADJUSTMENT_USER_NOT_FOUND', 'No user was found for that ID.');

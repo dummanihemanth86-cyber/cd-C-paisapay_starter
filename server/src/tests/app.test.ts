@@ -48,11 +48,14 @@ describe('PaisaPay API foundation', () => {
       ['GET', '/orders'], ['GET', '/withdrawals'], ['GET', '/deposits/orders/my'],
       ['GET', '/support/tickets'], ['GET', '/notifications'], ['GET', '/admin/overview'],
       ['GET', '/admin/deposits'], ['GET', '/admin/referrals'], ['GET', '/admin/p2p/claims'],
+      ['POST', '/admin/deposits/upi'], ['POST', '/admin/deposits/00000000-0000-4000-8000-000000000001/manual-claim'],
       ['GET', '/admin/reports'], ['GET', '/admin/settings'],
       ['GET', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credits'],
       ['POST', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credit'],
       ['POST', '/admin/wallet/credits/direct'],
+      ['POST', '/admin/wallet/phonepe-credits/requests'], ['POST', '/admin/wallet/phonepe-credits/requests/00000000-0000-4000-8000-000000000001/decision'],
       ['GET', '/admin/wallet/credits/requests'], ['GET', '/admin/wallet/funding/requests'], ['GET', '/admin/wallet/reconciliation'],
+      ['GET', '/admin/wallet/phonepe-credits/readiness'], ['GET', '/admin/wallet/phonepe-credits/requests'],
     ];
     for (const [method, path] of protectedRoutes) {
       const response = await request(app)[method.toLowerCase() as 'get' | 'post'](`/api/v1${path}`);
@@ -106,17 +109,19 @@ describe('PaisaPay API foundation', () => {
       'post /auth/logout', 'post /admin/auth/login', 'post /admin/push-devices', 'delete /admin/push-devices',
       'patch /users/me', 'patch /users/me/upi',
       'post /users/me/bank-accounts', 'patch /users/me/bank-accounts/{id}', 'post /wallet-references', 'post /deposits',
+      'post /admin/deposits/upi', 'post /admin/deposits/{id}/manual-claim',
       'post /deposits/{id}/manual-verification', 'post /admin/reconciliation/claims/{claimId}/review', 'post /orders',
       'post /orders/{id}/reservations', 'post /withdrawals', 'post /deposits/quick-match',
       'post /deposits/orders/{id}/confirm', 'post /deposits/orders/{id}/handoff-attempt', 'post /deposits/orders/{id}/payment-reference', 'post /deposits/orders/{id}/seller-received',
       'post /orders/{id}/dispute', 'post /admin/p2p/offers/{id}/cancel', 'post /admin/p2p/claims/{id}/review',
       'post /support/tickets', 'post /admin/users/{id}/status',
       'post /admin/wallet/credits/requests', 'post /admin/wallet/credits/requests/{id}/decision',
+      'post /admin/wallet/phonepe-credits/requests', 'post /admin/wallet/phonepe-credits/requests/{id}/decision',
       'post /admin/wallet/funding/requests', 'post /admin/wallet/funding/requests/{id}/decision',
       'patch /admin/referrals/config', 'patch /admin/referrals/milestones/{key}', 'post /admin/support/tickets/{id}/reply',
       'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}',
     ];
-    expect(new Set(documentedJsonHandlers).size).toBe(43);
+    expect(new Set(documentedJsonHandlers).size).toBe(47);
     for (const entry of documentedJsonHandlers) {
       const separator = entry.indexOf(' ');
       const method = entry.slice(0, separator);
@@ -131,6 +136,10 @@ describe('PaisaPay API foundation', () => {
     expect(spec.paths['/auth/logout'].post.requestBody.required).toBe(false);
     expect(spec.paths['/orders/{id}/reservations'].post.requestBody.required).toBe(false);
     expect(spec.paths['/deposits/orders/{id}/confirm'].post.requestBody.required).toBe(false);
+
+    const creditRequestSchema = spec.paths['/admin/wallet/credits/requests'].post.requestBody.content['application/json'].schema;
+    expect(creditRequestSchema.properties.amountPaise).toMatchObject({ type: 'integer', minimum: 10_000, maximum: 1_000_000, multipleOf: 100 });
+    expect(spec.paths['/admin/users/{id}/wallet/credit'].post.responses['409'].description).toMatch(/independent-approval/i);
 
     for (const [path, operations] of Object.entries(spec.paths) as Array<[string, Record<string, { responses?: Record<string, { content?: Record<string, { schema?: unknown }> }>; security?: unknown }>]>) {
       for (const [method, operation] of Object.entries(operations)) {
@@ -270,6 +279,9 @@ describe('PaisaPay API foundation', () => {
       quickDeposit: { available: financialActionsAvailable },
       p2pMatching: { available: financialActionsAvailable },
     });
+    if (!response.body.financialOperations.capabilities.p2pMatching.available) {
+      expect(response.body.financialOperations.capabilities.p2pMatching.reason).not.toMatch(/recipient|payment-provider/i);
+    }
     if (!financialActionsAvailable) expect(response.body.financialOperations.blockers.length).toBeGreaterThan(0);
   });
 

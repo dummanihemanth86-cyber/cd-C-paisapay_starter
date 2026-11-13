@@ -66,6 +66,14 @@ export function getMethodAvailability(
   };
 }
 
+export function manualP2pUnavailableReason(databaseAvailable: boolean, manualUpiOperationsEnabled: boolean) {
+  const blockers = [
+    ...(!databaseAvailable ? ['Database-backed manual UPI/P2P readiness could not be confirmed.'] : []),
+    ...(!manualUpiOperationsEnabled ? ['Manual UPI/P2P operations are disabled by the server safety gate.'] : []),
+  ];
+  return blockers.length ? blockers.join(' ') : null;
+}
+
 /** Counts only provider authorizations completed by a verified backend flow.
  * A saved account reference or user-controlled toggle is never an active wallet.
  */
@@ -118,14 +126,15 @@ export async function getPaymentMethodAvailability() {
   });
   const livePaymentProviderAvailable = methods.some((method) => method.available && method.method !== 'CASHFREE');
   const manualP2pAvailable = databaseAvailable && env.manualUpiOperationsEnabled;
+  const manualP2pReason = manualP2pUnavailableReason(databaseAvailable, env.manualUpiOperationsEnabled);
   const manualDepositAvailable = databaseAvailable && env.manualUpiOperationsEnabled && Boolean(receiverVpa);
   const legacyProviderOperationsAvailable = databaseAvailable && env.financialOperationsEnabled && livePaymentProviderAvailable && Boolean(receiverVpa);
   const addMoneyAvailable = manualP2pAvailable || manualDepositAvailable || legacyProviderOperationsAvailable;
   const financialActionsAvailable = addMoneyAvailable || manualP2pAvailable;
   const financialBlockers = [
     ...(!databaseAvailable ? ['Database-backed payment configuration is unavailable.'] : []),
-    ...(!env.manualUpiOperationsEnabled && !legacyProviderOperationsAvailable ? ['Manual UPI and P2P operations are disabled by the server safety gate.'] : []),
-    ...(!receiverVpa ? ['Standard UPI deposits are unavailable because no authorized platform recipient is configured. P2P matching uses the seller destination recorded on each offer.'] : []),
+    ...(manualP2pReason && !legacyProviderOperationsAvailable ? [manualP2pReason] : []),
+    ...(!receiverVpa ? ['Standard UPI deposits are unavailable because no authorized platform recipient is configured.'] : []),
     ...(!livePaymentProviderAvailable && !manualP2pAvailable ? ['No approved operational live payment-provider flow is configured.'] : []),
   ];
   const financialReason = financialActionsAvailable ? null : financialBlockers.join(' ');
@@ -149,16 +158,16 @@ export async function getPaymentMethodAvailability() {
         },
         withdraw: {
           available: manualP2pAvailable,
-          reason: manualP2pAvailable ? null : financialReason,
+          reason: manualP2pReason,
           type: 'P2P_OFFER_NOT_BANK_PAYOUT',
         },
         quickDeposit: {
           available: manualP2pAvailable,
-          reason: manualP2pAvailable ? null : financialReason,
+          reason: manualP2pReason,
         },
         p2pMatching: {
           available: manualP2pAvailable,
-          reason: manualP2pAvailable ? null : financialReason,
+          reason: manualP2pReason,
         },
       },
     },
@@ -192,7 +201,7 @@ export async function getPaymentMethodAvailability() {
       ? 'Standard UPI deposits are unavailable because no authorized platform recipient is configured. Manual UPI and P2P operations are disabled by the server safety gate.'
       : methods.some((method) => method.available)
       ? 'Cashfree sandbox checkout is enabled for testing only. It does not add redeemable balance.'
-      : 'Manual UPI and P2P operations are disabled by the server safety gate. No providerless settlement flow is currently enabled.',
+      : 'Manual UPI and P2P operations are disabled by the server safety gate.',
     methods,
   };
 }

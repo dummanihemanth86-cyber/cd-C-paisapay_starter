@@ -106,8 +106,9 @@ app.use('/api/v1', (req, res, next) => {
     ['/users/me/bank-accounts', 'GET'], ['/users/me/bank-accounts', 'POST'],
     ['/users/me/balance', 'GET'], ['/users/me/transactions', 'GET'], ['/orders', 'GET'], ['/orders', 'POST'],
     ['/withdrawals', 'GET'], ['/withdrawals', 'POST'], ['/notifications', 'GET'], ['/support/tickets', 'GET'], ['/support/tickets', 'POST'],
-    ['/admin/auth/login', 'POST'], ['/admin/auth/forgot-password/request-otp', 'POST'], ['/admin/auth/password/reset', 'POST'], ['/admin/me', 'GET'], ['/admin/overview', 'GET'], ['/admin/users', 'GET'], ['/admin/deposits', 'GET'], ['/admin/withdrawals', 'GET'], ['/admin/transactions', 'GET'], ['/admin/wallets/ledger', 'GET'], ['/admin/wallet-adjustments', 'POST'], ['/admin/referrals', 'GET'], ['/admin/referrals/config', 'GET'], ['/admin/referrals/config', 'PATCH'], ['/admin/commissions', 'GET'], ['/admin/providers', 'GET'], ['/admin/audit-logs', 'GET'], ['/admin/system-health', 'GET'], ['/admin/reports', 'GET'], ['/admin/settings', 'GET'], ['/admin/p2p/overview', 'GET'], ['/admin/disputes', 'GET'], ['/admin/support/tickets', 'GET'], ['/admin/admins', 'GET'], ['/admin/reconciliation/claims', 'GET'], ['/admin/notifications', 'GET'], ['/admin/notifications', 'POST'], ['/admin/reward-rules', 'GET'], ['/deposits/orders/my', 'GET'], ['/admin/p2p/offers', 'GET'], ['/admin/p2p/orders', 'GET'], ['/admin/p2p/claims', 'GET'], ['/admin/push-events', 'GET'], ['/admin/push-devices', 'POST'], ['/admin/push-devices', 'DELETE'],
+    ['/admin/auth/login', 'POST'], ['/admin/auth/forgot-password/request-otp', 'POST'], ['/admin/auth/password/reset', 'POST'], ['/admin/me', 'GET'], ['/admin/overview', 'GET'], ['/admin/users', 'GET'], ['/admin/deposits', 'GET'], ['/admin/deposits/upi', 'POST'], ['/admin/withdrawals', 'GET'], ['/admin/transactions', 'GET'], ['/admin/wallets/ledger', 'GET'], ['/admin/wallet-adjustments', 'POST'], ['/admin/referrals', 'GET'], ['/admin/referrals/config', 'GET'], ['/admin/referrals/config', 'PATCH'], ['/admin/commissions', 'GET'], ['/admin/providers', 'GET'], ['/admin/audit-logs', 'GET'], ['/admin/system-health', 'GET'], ['/admin/reports', 'GET'], ['/admin/settings', 'GET'], ['/admin/p2p/overview', 'GET'], ['/admin/disputes', 'GET'], ['/admin/support/tickets', 'GET'], ['/admin/admins', 'GET'], ['/admin/reconciliation/claims', 'GET'], ['/admin/notifications', 'GET'], ['/admin/notifications', 'POST'], ['/admin/reward-rules', 'GET'], ['/deposits/orders/my', 'GET'], ['/admin/p2p/offers', 'GET'], ['/admin/p2p/orders', 'GET'], ['/admin/p2p/claims', 'GET'], ['/admin/push-events', 'GET'], ['/admin/push-devices', 'POST'], ['/admin/push-devices', 'DELETE'],
     ['/admin/wallet/credits/requests', 'GET'], ['/admin/wallet/credits/requests', 'POST'], ['/admin/wallet/funding/requests', 'GET'], ['/admin/wallet/funding/requests', 'POST'], ['/admin/wallet/reconciliation', 'GET'],
+    ['/admin/wallet/phonepe-credits/readiness', 'GET'], ['/admin/wallet/phonepe-credits/requests', 'GET'], ['/admin/wallet/phonepe-credits/requests', 'POST'],
     ['/admin/wallet/credits/direct', 'POST'],
   ].some(([route, method]) => path === route && req.method === method) ||
     (/^\/auth\/otp-status\/[^/]+$/.test(path) && req.method === 'GET') ||
@@ -115,6 +116,7 @@ app.use('/api/v1', (req, res, next) => {
     (/^\/deposits\/[^/]+\/cancel$/.test(path) && req.method === 'POST') ||
     (/^\/deposits\/[^/]+\/manual-verification$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/reconciliation\/claims\/[^/]+\/evidence$/.test(path) && req.method === 'GET') ||
+    (/^\/admin\/deposits\/[^/]+\/manual-claim$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/referrals\/milestones\/(TIER_5|TIER_10|TIER_20)$/.test(path) && req.method === 'PATCH') ||
     (/^\/admin\/reward-rules\/[^/]+$/.test(path) && req.method === 'PATCH') ||
     (/^\/admin\/support\/tickets\/[^/]+$/.test(path) && req.method === 'GET') ||
@@ -135,6 +137,7 @@ app.use('/api/v1', (req, res, next) => {
     (/^\/admin\/users\/[^/]+\/wallet\/credits$/.test(path) && req.method === 'GET') ||
     (/^\/admin\/users\/[^/]+\/wallet\/credit$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/wallet\/credits\/requests\/[^/]+\/decision$/.test(path) && req.method === 'POST') ||
+    (/^\/admin\/wallet\/phonepe-credits\/requests\/[^/]+\/decision$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/wallet\/funding\/requests\/[^/]+\/decision$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/users\/[^/]+\/status$/.test(path) && req.method === 'POST') ||
     (/^\/admin\/disputes$/.test(path) && req.method === 'GET') ||

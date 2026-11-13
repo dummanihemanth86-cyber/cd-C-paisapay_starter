@@ -9,7 +9,7 @@ export const ADMIN_SETTLEMENT_CASH_ID = '00000000-0000-4000-8000-000000000102';
 export function hashExternalReference(reference: string): string {
   return createHash('sha256').update(reference.trim().normalize('NFKC')).digest('hex');
 }
-async function requireActiveSuperAdmin(tx: Prisma.TransactionClient, userId: string) {
+export async function requireActiveSuperAdmin(tx: Prisma.TransactionClient, userId: string) {
   const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true, status: true, adminRole: { select: { role: true } } } });
   if (!user || user.status !== 'ACTIVE' || user.adminRole?.role !== 'SUPER_ADMIN') {
     throw new HttpError(403, 'SUPER_ADMIN_REQUIRED', 'An active SUPER_ADMIN account is required.');
@@ -22,8 +22,8 @@ export async function createCreditRequest(tx: Prisma.TransactionClient, input: {
   verifiedPublicId: string; verifiedPhoneMasked: string; verifiedWalletBalancePaise: number;
 }) {
   await requireActiveSuperAdmin(tx, input.makerUserId);
-  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise < MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE || input.amountPaise > MAX_ADMIN_ADJUSTMENT_PAISE) {
-    throw new HttpError(400, 'WALLET_CREDIT_AMOUNT_INVALID', 'Credit requests must be from ₹100 to ₹10,000.');
+  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise < MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE || input.amountPaise > MAX_ADMIN_ADJUSTMENT_PAISE || input.amountPaise % 100 !== 0) {
+    throw new HttpError(400, 'WALLET_CREDIT_AMOUNT_INVALID', 'Credit requests must be whole rupees from ₹100 to ₹10,000.');
   }
   const key = `ADMIN_CREDIT_REQUEST:${input.makerUserId}:${input.idempotencyKey}`;
   const existing = await tx.adminWalletCreditRequest.findUnique({ where: { idempotencyKey: key }, select: { id: true, targetUserId: true, amountPaise: true, reason: true } });
@@ -73,7 +73,7 @@ export async function createFundingRequest(tx: Prisma.TransactionClient, input: 
   if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise <= 0 || input.amountPaise > 100_000_000_000) throw new HttpError(400, 'FUNDING_AMOUNT_INVALID', 'Funding request amount is outside the allowed range.');
   const externalReferenceHash = hashExternalReference(input.externalReference);
   const key = `ADMIN_WALLET_FUNDING:${input.makerUserId}:${input.idempotencyKey}`;
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${externalReferenceHash}))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${externalReferenceHash}))`;
   const existing = await tx.adminWalletFundingRequest.findUnique({ where: { idempotencyKey: key }, select: { id: true, amountPaise: true, sourceAccountLabel: true, externalReferenceHash: true, evidenceReference: true, evidenceSha256: true, statementDate: true, reason: true } });
   if (existing) {
     const same = existing.amountPaise === BigInt(input.amountPaise) && existing.sourceAccountLabel === input.sourceAccountLabel && existing.externalReferenceHash === externalReferenceHash && existing.evidenceReference === input.evidenceReference && existing.evidenceSha256 === input.evidenceSha256 && existing.statementDate.getTime() === input.statementDate.getTime() && existing.reason === input.reason;

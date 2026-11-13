@@ -26,6 +26,8 @@ export const FINANCIAL_OPERATION_ROUTE_MANIFEST = [
   ['GET', '/api/v1/admin/p2p/claims/:claimId'],
   ['GET', '/api/v1/admin/p2p/claims/:claimId/evidence'],
   ['POST', '/api/v1/deposits'],
+  ['POST', '/api/v1/admin/deposits/upi'],
+  ['POST', '/api/v1/admin/deposits/:id/manual-claim'],
   ['POST', '/api/v1/deposits/:id/cancel'],
   ['POST', '/api/v1/deposits/:id/manual-verification'],
   ['POST', '/api/v1/admin/reconciliation/claims/:claimId/review'],

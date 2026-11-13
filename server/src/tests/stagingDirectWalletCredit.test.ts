@@ -39,6 +39,7 @@ function fixture(options: { balance?: bigint; fundBalance?: bigint; existingRequ
   const target = options.target ?? { id: targetId, publicId: 'STAGE123', phoneE164: '+919876543210', status: 'ACTIVE', adminRole: null };
   const actor = options.actor ?? { id: actorId, status: 'ACTIVE', adminRole: { role: 'SUPER_ADMIN' } };
   const tx = {
+    $executeRaw: vi.fn(async () => 1),
     $queryRaw: queryRaw as unknown,
     user: { findUnique: vi.fn(async ({ where }: any) => where.id === actorId ? actor : target) },
     adminWalletCreditRequest: {
@@ -133,6 +134,7 @@ describe('staging-only direct wallet credit ledger workflow', () => {
   it('enforces the ₹100–₹10,000 direct-credit range before database work', async () => {
     const belowMinimum = fixture();
     await expect(createStagingDirectCredit(belowMinimum.tx, { ...directInput, amountPaise: 9_999 })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
+    await expect(createStagingDirectCredit(belowMinimum.tx, { ...directInput, amountPaise: 10_050 })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
     const aboveMaximum = fixture();
     await expect(createStagingDirectCredit(aboveMaximum.tx, { ...directInput, amountPaise: 1_000_001 })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
     expect(belowMinimum.queryRaw).not.toHaveBeenCalled();

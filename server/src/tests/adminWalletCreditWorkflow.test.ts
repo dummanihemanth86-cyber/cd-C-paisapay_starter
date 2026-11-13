@@ -14,6 +14,7 @@ const pendingCredit = { id: requestId, makerUserId: maker, targetUserId: targetI
 function workflowTx(overrides: Record<string, unknown> = {}) {
   const calls = { ledgerCreate: vi.fn(async () => ({ id: 'ledger-id', createdAt: new Date('2026-11-07T00:00:00Z') })), auditCreate: vi.fn(async () => ({ id: 'audit-id' })), requestCreate: vi.fn(async (args: any) => ({ id: requestId, ...args.data })), requestUpdate: vi.fn(async (args: any) => ({ ...pendingCredit, ...args.data })) };
   const tx = {
+    $executeRaw: vi.fn(async () => 1),
     $queryRaw: vi.fn(async (parts: TemplateStringsArray) => { const sql = parts.join(''); return sql.includes('WHERE a.user_id') ? [{ balance: 0n }] : sql.includes('SUM(credit_paise - debit_paise)') ? [{ accountId: ADMIN_ADJUSTMENT_FUND_ID, balance: 1_000_000n }, { accountId: availableId, balance: 0n }] : []; }),
     user: { findUnique: vi.fn(async ({ where }: any) => where.id === targetId || where.publicId === 'USER12345' ? { id: targetId, publicId: 'USER12345', phoneE164: '+9112341234', status: 'ACTIVE', adminRole: null } : activeSuper) },
     adminWalletCreditRequest: { findUnique: vi.fn(async () => null), create: calls.requestCreate, update: calls.requestUpdate },
@@ -43,7 +44,7 @@ describe('Admin wallet credit Maker-Checker workflow', () => {
 
   it('rejects amounts outside ₹100–₹10,000 before any writes', async () => {
     const { tx, calls } = workflowTx();
-    for (const amountPaise of [9_999, 1_000_001]) await expect(createCreditRequest(tx, { makerUserId: maker, targetUserId: targetId, ...verifiedTarget, amountPaise, reason: 'Customer adjustment support', idempotencyKey: '11111111-1111-4111-8111-111111111111' })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
+    for (const amountPaise of [9_999, 10_050, 1_000_001]) await expect(createCreditRequest(tx, { makerUserId: maker, targetUserId: targetId, ...verifiedTarget, amountPaise, reason: 'Customer adjustment support', idempotencyKey: '11111111-1111-4111-8111-111111111111' })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
     expect(calls.requestCreate).not.toHaveBeenCalled();
     expect(calls.ledgerCreate).not.toHaveBeenCalled();
   });

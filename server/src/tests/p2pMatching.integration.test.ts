@@ -106,7 +106,7 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     expect(matched.status, JSON.stringify(matched.body)).toBe(201);
     const order = matched.body.order; orderIds.push(order.id);
     expect(order.status).toBe('MATCHED');
-    expect(matched.body.reward).toMatchObject({ percentBps: 600, estimatedPaise: 3000 });
+    expect(matched.body.reward).toMatchObject({ percentBps: 620, estimatedPaise: 3100 });
     expect(JSON.stringify(matched.body)).not.toContain('seller@testbank');
     expect((await request(app).get('/api/v1/withdrawals/marketplace').set(buyerAuth).expect(200)).body.offers.some((row: { id: string }) => row.id === offer.id)).toBe(false);
 
@@ -188,7 +188,7 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `P2P_PAYMENT_VERIFIED:${order.id}` } })).toBe(1);
     const buyerAvailable = await db.ledgerEntry.aggregate({ where: { account: { userId: buyerId, type: 'AVAILABLE' } }, _sum: { creditPaise: true, debitPaise: true } });
     const sellerReserved = await db.ledgerEntry.aggregate({ where: { account: { userId: sellerId, type: 'RESERVED' } }, _sum: { creditPaise: true, debitPaise: true } });
-    expect([0, 3000]).toContain(approved.body.rewardPaise);
+    expect([0, 3100]).toContain(approved.body.rewardPaise);
     expect(Number(buyerAvailable._sum.creditPaise ?? 0n) - Number(buyerAvailable._sum.debitPaise ?? 0n)).toBe(50000 + approved.body.rewardPaise);
     expect(Number(sellerReserved._sum.creditPaise ?? 0n) - Number(sellerReserved._sum.debitPaise ?? 0n)).toBe(0);
     const settledSellerOffer = (await request(app).get('/api/v1/withdrawals').set(sellerAuth).expect(200)).body.offers.find((row: { id: string }) => row.id === offer.id);
@@ -379,12 +379,12 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     expect(await db.p2pDepositOrder.aggregate({ where: { withdrawalOfferId: offer.id }, _sum: { amountPaise: true } })).toMatchObject({ _sum: { amountPaise: 500000n } });
   });
 
-  it('returns an unconfirmed expired match to matching and reports the 6% estimate', async () => {
+  it('returns an unconfirmed expired match to matching and reports the 6.2% estimate', async () => {
     const created = await createOffer(tokens[0], 10000).expect(201);
     const offer = created.body.withdrawalOffer; offerIds.push(offer.id);
     const matched = await request(app).post('/api/v1/deposits/quick-match').set(auth(tokens[1])).set('Idempotency-Key', key('expiry-match')).send({ amountPaise: 10000, withdrawalOfferId: offer.id }).expect(201);
     const order = matched.body.order; orderIds.push(order.id);
-    expect(matched.body.reward).toMatchObject({ percentBps: 600, estimatedPaise: 600 });
+    expect(matched.body.reward).toMatchObject({ percentBps: 620, estimatedPaise: 620 });
     await db.p2pDepositOrder.update({ where: { id: order.id }, data: { expiresAt: new Date(Date.now() - 1) } });
     const mine = await request(app).get('/api/v1/deposits/orders/my').set(auth(tokens[1])).expect(200);
     expect(mine.body.orders.find((row: { id: string }) => row.id === order.id).status).toBe('EXPIRED');

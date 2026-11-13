@@ -3,7 +3,7 @@ import { env } from '../../config/env.js';
 import { DEVELOPMENT_REWARD_FUND_ACCOUNT_ID } from '../users/welcomeBonus.js';
 import { assertFinancialOrManualUpiOperationsEnabled } from '../../middleware/financialOperations.js';
 
-export const P2P_ORDER_REWARD_PERCENT_BPS = 600;
+export const P2P_ORDER_REWARD_PERCENT_BPS = 620;
 
 /** Credit a verified UPI deposit reward from the funded development pool once. */
 export async function grantVerifiedUpiDepositReward(
@@ -65,7 +65,7 @@ export async function grantVerifiedUpiDepositReward(
   return rewardPaise;
 }
 
-/** Grant each buyer order's 6% P2P reward once, only from the funded test pool. */
+/** Grant each buyer order's 6.2% P2P reward once, only from the funded test pool. */
 export async function grantVerifiedP2pOrderReward(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; actorUserId: string; amountPaise: bigint },

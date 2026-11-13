@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getMethodAvailability, paymentMethodRules, summarizeWalletActivation, walletIntegrationInfo, walletLinkProviders } from '../modules/payments/availability.js';
+import { getMethodAvailability, manualP2pUnavailableReason, paymentMethodRules, summarizeWalletActivation, walletIntegrationInfo, walletLinkProviders } from '../modules/payments/availability.js';
 
 const ready = { databaseAvailable: true, providerConfigured: true, providerOperational: true };
 
@@ -52,6 +52,20 @@ describe('wallet activation summary', () => {
 
   it('counts only backend-verified provider authorizations', () => {
     expect(summarizeWalletActivation(['AUTHORIZED_CONNECTED', 'REFERENCE_SAVED_NOT_CONNECTED']).activeCount).toBe(1);
+  });
+});
+
+describe('manual UPI/P2P availability reasons', () => {
+  it('reports the manual safety gate without unrelated recipient or provider blockers', () => {
+    const reason = manualP2pUnavailableReason(true, false);
+    expect(reason).toMatch(/manual UPI\/P2P operations are disabled by the server safety gate/i);
+    expect(reason).not.toMatch(/recipient|provider/i);
+  });
+
+  it('reports database readiness separately and returns no blocker only when both checks pass', () => {
+    expect(manualP2pUnavailableReason(false, true)).toMatch(/database-backed manual UPI\/P2P readiness/i);
+    expect(manualP2pUnavailableReason(false, false)).toMatch(/safety gate/i);
+    expect(manualP2pUnavailableReason(true, true)).toBeNull();
   });
 });
 

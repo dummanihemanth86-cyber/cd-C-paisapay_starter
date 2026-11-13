@@ -6,5 +6,7 @@ import type { Prisma } from '../../generated/prisma/client.js';
 export async function lockPaymentReference(tx: Prisma.TransactionClient, reference: string | null | undefined) {
   const normalized = reference?.trim().toUpperCase();
   if (!normalized) return;
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${normalized}, 0))`;
+  // pg_advisory_xact_lock returns PostgreSQL `void`; $queryRaw cannot decode
+  // that scalar. $executeRaw executes the lock without trying to deserialize it.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${normalized}, 0))`;
 }

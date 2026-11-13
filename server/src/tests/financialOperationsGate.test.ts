@@ -7,11 +7,16 @@ import { env } from '../config/env.js';
 import { assertFinancialOperationsEnabled, assertManualUpiOperationsEnabled, FINANCIAL_OPERATION_ROUTE_MANIFEST, FINANCIAL_OPERATIONS_DISABLED_CODE, MANUAL_UPI_OPERATIONS_DISABLED_CODE, financialOperationsGate, manualUpiOperationsGate } from '../middleware/financialOperations.js';
 import { openapi } from '../openapi.js';
 import { createWithdrawalOffer, releaseOfferFunds, reserveOfferFunds } from '../modules/p2p/service.js';
-import { grantVerifiedP2pOrderReward, grantVerifiedUpiDepositReward } from '../modules/payments/depositReward.js';
+import { grantVerifiedP2pOrderReward, grantVerifiedUpiDepositReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../modules/payments/depositReward.js';
 import { expireUnpaidUpiDeposits } from '../modules/payments/depositExpiry.js';
 import { recordVerifiedReferralCommission } from '../modules/users/referralCommission.js';
 
 describe('financial operations safety gate policy', () => {
+  it('sets the P2P order reward rate to 6.2 percent', () => {
+    expect(P2P_ORDER_REWARD_PERCENT_BPS).toBe(620);
+    expect(50_000n * BigInt(P2P_ORDER_REWARD_PERCENT_BPS) / 10_000n).toBe(3_100n);
+  });
+
   const runProductionConfig = (overrides: NodeJS.ProcessEnv) => {
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,

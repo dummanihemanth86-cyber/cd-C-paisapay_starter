@@ -24,6 +24,7 @@ function fixture(options: { fundBalance?: bigint; userBalance?: bigint; existing
     return [];
   });
   const tx = {
+    $executeRaw: vi.fn(async () => 1),
     $queryRaw: queryRaw as unknown,
     ledgerTransaction: {
       findUnique: vi.fn(async () => options.existing ?? null),
@@ -136,6 +137,10 @@ describe('Super Admin wallet credit service', () => {
     await expect(applySuperAdminWalletCredit(mock.tx, {
       actorUserId, idempotencyKey: '00000000-0000-4000-8000-000000000006', targetUserId: targetId,
       amountPaise: MAX_ADMIN_ADJUSTMENT_PAISE + 1, reason: 'Approved customer adjustment',
+    })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
+    await expect(applySuperAdminWalletCredit(mock.tx, {
+      actorUserId, idempotencyKey: '00000000-0000-4000-8000-000000000007', targetUserId: targetId,
+      amountPaise: 10_050, reason: 'Approved customer adjustment',
     })).rejects.toMatchObject({ code: 'WALLET_CREDIT_AMOUNT_INVALID' });
     expect(mock.transactionCreate).not.toHaveBeenCalled();
     expect(mock.auditCreate).not.toHaveBeenCalled();

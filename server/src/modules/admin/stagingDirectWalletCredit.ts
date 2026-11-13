@@ -14,8 +14,8 @@ export async function createStagingDirectCredit(tx: Prisma.TransactionClient, in
   amountPaise: number;
   reason: string;
 }) {
-  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise < MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE || input.amountPaise > MAX_ADMIN_ADJUSTMENT_PAISE) {
-    throw new HttpError(400, 'WALLET_CREDIT_AMOUNT_INVALID', 'Credit amount must be an integer from ₹100 to ₹10,000.');
+  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise < MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE || input.amountPaise > MAX_ADMIN_ADJUSTMENT_PAISE || input.amountPaise % 100 !== 0) {
+    throw new HttpError(400, 'WALLET_CREDIT_AMOUNT_INVALID', 'Credit amount must be whole rupees from ₹100 to ₹10,000.');
   }
   await tx.$queryRaw`SELECT id FROM users WHERE id = ${input.actorUserId}::uuid FOR UPDATE`;
   const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { id: true, status: true, adminRole: { select: { role: true } } } });
@@ -24,7 +24,7 @@ export async function createStagingDirectCredit(tx: Prisma.TransactionClient, in
   }
 
   const requestKey = `ADMIN_STAGING_DIRECT:${input.actorUserId}:${input.idempotencyKey}`;
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${requestKey}))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${requestKey}))`;
   let request = await tx.adminWalletCreditRequest.findUnique({ where: { idempotencyKey: requestKey } });
   if (request) {
     if (request.targetUserId !== input.targetUserId || request.amountPaise !== BigInt(input.amountPaise) || request.reason !== input.reason) {
