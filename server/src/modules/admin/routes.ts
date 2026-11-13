@@ -17,6 +17,7 @@ import { createCreditRequest, decideCreditRequest, createFundingRequest, decideF
 import { assertPhonePeCreditsAdmin, createPhonePeWalletCreditRequest, decidePhonePeWalletCredit, readPhonePeWalletCreditReadiness } from './phonePeWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
 import { createOtpChallenge } from '../auth/routes.js';
+import { buildUserLookupConditions } from './userLookup.js';
 
 export const adminRouter = Router();
 export const adminAuthRouter = Router();
@@ -344,12 +345,7 @@ adminRouter.get('/users', asyncRoute(async (req, res) => {
   const db = databaseRequired(); const input = pageInput.parse(req.query); const where: any = {};
   if (req.query.customerOnly === 'true') { where.status = 'ACTIVE'; where.adminRole = { is: null }; }
   if (input.status) where.status = z.enum(['PENDING_PROFILE', 'ACTIVE', 'SUSPENDED', 'CLOSED']).parse(input.status);
-  if (input.q) where.OR = [
-    { publicId: { contains: input.q, mode: 'insensitive' } },
-    { displayName: { contains: input.q, mode: 'insensitive' } },
-    { phoneE164: { contains: input.q } },
-    ...(z.string().uuid().safeParse(input.q).success ? [{ id: input.q }] : []),
-  ];
+  if (input.q) where.OR = buildUserLookupConditions(input.q);
   const [total, rows] = await Promise.all([db.user.count({ where }), db.user.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize, select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true, createdAt: true, updatedAt: true, sessions: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } }, _count: { select: { deposits: true, withdrawals: true, buyOrders: true, sellOrders: true } } } })]);
   const ids = rows.map((u) => u.id);
   const [balances, depositsByUser, withdrawalsByUser] = ids.length ? await Promise.all([

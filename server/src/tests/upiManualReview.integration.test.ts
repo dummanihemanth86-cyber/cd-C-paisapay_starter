@@ -120,6 +120,10 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
       const users = await request(app).get(`/api/v1/admin/users?q=${encodeURIComponent(customerPhone)}`).set(adminAuth).expect(200);
       const listedCustomer = users.body.users.find((user: { id: string }) => user.id === customerId);
       expect(listedCustomer?.phoneMasked).toContain('****');
+      const localPhone = customerPhone.slice(3);
+      const formattedPhone = `+91 ${localPhone.slice(0, 3)}-${localPhone.slice(3, 6)}-${localPhone.slice(6)}`;
+      const formattedLookup = await request(app).get(`/api/v1/admin/users?q=${encodeURIComponent(formattedPhone)}`).set(adminAuth).expect(200);
+      expect(formattedLookup.body.users.some((user: { id: string }) => user.id === customerId)).toBe(true);
       const detail = await request(app).get(`/api/v1/admin/users/${customerId}`).set(adminAuth).expect(200);
       expect(detail.body.user.phoneMasked).toBe(listedCustomer.phoneMasked);
       expect(detail.body.user).not.toHaveProperty('phoneE164');
