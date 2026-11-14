@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createFinancialWorkerGate } from '../lib/financialWorkerGate.js';
+import { createFinancialWorkerGate, financialBackgroundWorkEnabled } from '../lib/financialWorkerGate.js';
+
+describe('financialBackgroundWorkEnabled', () => {
+  it('runs financial and manual UPI maintenance only when either matching gate is enabled', () => {
+    expect(financialBackgroundWorkEnabled(false, false)).toBe(false);
+    expect(financialBackgroundWorkEnabled(true, false)).toBe(true);
+    expect(financialBackgroundWorkEnabled(false, true)).toBe(true);
+    expect(financialBackgroundWorkEnabled(true, true)).toBe(true);
+  });
+});
 
 describe('financial background worker gate', () => {
   it('skips every worker tick while disabled and logs one informational notice', () => {

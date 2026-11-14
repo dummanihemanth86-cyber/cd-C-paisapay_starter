@@ -1,7 +1,7 @@
 import { env } from './config/env.js';
 import { closeDatabase, prisma } from './lib/db.js';
 import { logger } from './lib/logger.js';
-import { createFinancialWorkerGate } from './lib/financialWorkerGate.js';
+import { createFinancialWorkerGate, financialBackgroundWorkEnabled } from './lib/financialWorkerGate.js';
 import app from './app.js';
 import { expireUnpaidUpiDeposits } from './modules/payments/depositExpiry.js';
 import { expireP2pOffersBatch } from './modules/p2p/service.js';
@@ -16,11 +16,11 @@ const server = app.listen(env.port, env.host, () => {
 });
 
 let p2pExpiryWorkerRunning = false;
-const runFinancialWorker = createFinancialWorkerGate(env.financialOperationsEnabled, () => {
-  logger.info('Financial background workers are disabled by FINANCIAL_OPERATIONS_ENABLED=false.');
+const runFinancialWorker = createFinancialWorkerGate(financialBackgroundWorkEnabled(env.financialOperationsEnabled, env.manualUpiOperationsEnabled), () => {
+  logger.info('Financial and manual UPI background workers are disabled by server safety controls.');
 });
 async function runP2pExpiryWorker() {
-  if (!env.financialOperationsEnabled || !prisma || p2pExpiryWorkerRunning) return;
+  if (!financialBackgroundWorkEnabled(env.financialOperationsEnabled, env.manualUpiOperationsEnabled) || !prisma || p2pExpiryWorkerRunning) return;
   p2pExpiryWorkerRunning = true;
   try { await expireP2pOffersBatch(prisma); }
   catch (error) { logger.warn({ err: error }, 'Could not expire old P2P matches and offers'); }
