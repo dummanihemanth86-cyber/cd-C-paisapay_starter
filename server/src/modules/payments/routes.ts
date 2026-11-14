@@ -6,7 +6,7 @@ import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { uuidRef } from '../../lib/security.js';
 import { requireAdmin, requireAuth } from '../../middleware/auth.js';
-import { assertFinancialOperationsEnabled, financialOperationsGate } from '../../middleware/financialOperations.js';
+import { assertFinancialOperationsEnabled, assertManualUpiOperationsEnabled } from '../../middleware/financialOperations.js';
 import { getPaymentMethodAvailability, summarizeWalletActivation } from './availability.js';
 import { validateManualReviewEvidence } from './manualReview.js';
 import { grantVerifiedUpiDepositReward } from './depositReward.js';
@@ -15,13 +15,14 @@ import { expireUnpaidUpiDeposits, UPI_DEPOSIT_EXPIRY_MS } from './depositExpiry.
 import { createCashfreeOrder, getCashfreeOrder, getCashfreePayments, verifyCashfreeWebhook, type CashfreePayment } from '../../integrations/payments/cashfree.js';
 import { createHash } from 'node:crypto';
 import { decodeManualClaimImage, validateUpiUtr } from './manualClaimEvidence.js';
-import { lockPaymentReference, paymentReferenceHash } from './paymentReferenceLock.js';
+import { lockPaymentReference } from './paymentReferenceLock.js';
 
 export const paymentsRouter = Router();
 paymentsRouter.use(requireAuth);
 const MANUAL_DEPOSIT_CLEARING_ACCOUNT_ID = '00000000-0000-4000-8000-000000000097';
 const manualClaimLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 6, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'TOO_MANY_CLAIMS', message: 'Too many manual payment claims. Wait before trying again.' } } });
 const adminReviewLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'TOO_MANY_REVIEWS', message: 'Too many review requests. Wait before trying again.' } } });
+const adminManualUpiLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'TOO_MANY_ADMIN_UPI_ACTIONS', message: 'Too many Admin UPI actions. Wait before trying again.' } } });
 
 const methods = {
   UPI: { enum: 'UPI' as const, buy: false, sell: false },
@@ -111,7 +112,134 @@ paymentsRouter.get('/wallet-methods', asyncRoute(async (req, res) => {
   });
 }));
 
-paymentsRouter.post('/deposits', financialOperationsGate, asyncRoute(async (req, res) => {
+function adminDepositUserSummary(user: { id: string; publicId: string | null; displayName: string | null; phoneE164: string }) {
+  return { id: user.id, publicId: user.publicId, displayName: user.displayName, phoneMasked: `${user.phoneE164.slice(0, 3)}••••${user.phoneE164.slice(-3)}` };
+}
+
+function adminUpiIntent(input: { receiverVpa: string; amountPaise: number; merchantReference: string }) {
+  const params = new URLSearchParams({
+    pa: input.receiverVpa,
+    pn: 'PaisaPay',
+    am: (input.amountPaise / 100).toFixed(2),
+    cu: 'INR',
+    tn: `PaisaPay deposit ${input.merchantReference}`,
+    tr: input.merchantReference,
+  });
+  return `upi://pay?${params.toString()}`;
+}
+
+paymentsRouter.post('/admin/deposits/upi', requireAdmin, adminManualUpiLimit, asyncRoute(async (req, res) => {
+  if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertManualUpiOperationsEnabled();
+  if (!env.depositReceiverUpiId) throw new HttpError(503, 'DEPOSIT_RECEIVER_NOT_CONFIGURED', 'UPI deposits are unavailable because no authorized platform recipient is configured. No deposit was created.');
+  const input = z.object({ userId: z.string().uuid(), amountPaise: z.number().int().positive() }).strict().parse(req.body);
+  if (input.amountPaise % 10_000 !== 0) throw new HttpError(400, 'DEPOSIT_AMOUNT_INCREMENT_INVALID', 'Deposit amount must be in increments of ₹100 (for example ₹100, ₹200, or ₹500).');
+  if (input.amountPaise < env.minDepositPaise || input.amountPaise > env.maxDepositPaise) throw new HttpError(400, 'DEPOSIT_AMOUNT_OUT_OF_RANGE', `Deposit amount must be between ₹${(env.minDepositPaise / 100).toFixed(2)} and ₹${(env.maxDepositPaise / 100).toFixed(2)}.`);
+  const requestKey = req.header('idempotency-key');
+  if (!requestKey || requestKey.length < 8 || requestKey.length > 80 || !/^[A-Za-z0-9_-]+$/.test(requestKey)) throw new HttpError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send a unique Idempotency-Key containing 8–80 letters, numbers, underscores, or hyphens.');
+  const db = databaseRequired();
+  const target = await db.user.findUnique({ where: { id: input.userId }, select: { id: true, publicId: true, displayName: true, phoneE164: true, status: true, adminRole: { select: { userId: true } } } });
+  if (!target) throw new HttpError(404, 'USER_NOT_FOUND', 'No PaisaPay account matched that user ID.');
+  if (target.status !== 'ACTIVE' || target.adminRole) throw new HttpError(409, 'CUSTOMER_ACCOUNT_REQUIRED', 'Choose an active customer account. Admin, inactive, and suspended accounts cannot receive an Admin-created deposit.');
+  const idempotencyKey = `ADMIN_UPI:${req.auth!.userId}:${target.id}:${requestKey}`;
+  const prior = await db.deposit.findUnique({ where: { idempotencyKey } });
+  if (prior && (prior.userId !== target.id || prior.amountPaise !== BigInt(input.amountPaise) || prior.method !== 'UPI')) throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This request key was already used for a different deposit.');
+  const now = new Date();
+  const result = prior ? { deposit: prior, pending: null, created: false } : await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${target.id}::uuid FOR UPDATE`;
+    const repeated = await tx.deposit.findUnique({ where: { idempotencyKey } });
+    if (repeated) {
+      if (repeated.userId !== target.id || repeated.amountPaise !== BigInt(input.amountPaise) || repeated.method !== 'UPI') throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This request key was already used for a different deposit.');
+      return { deposit: repeated, pending: null, created: false };
+    }
+    await tx.deposit.updateMany({ where: { userId: target.id, method: 'UPI', status: { in: ['CREATED', 'PENDING_PAYMENT'] }, expiresAt: { lte: now } }, data: { status: 'EXPIRED' } });
+    const pending = await tx.deposit.findMany({ where: { userId: target.id, method: 'UPI', status: { in: ['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'] } }, orderBy: { createdAt: 'asc' }, take: 20, select: { id: true, amountPaise: true, status: true, createdAt: true, expiresAt: true, merchantReference: true } });
+    if (pending.length >= 1) return { deposit: null, pending, created: false };
+    const deposit = await tx.deposit.create({ data: {
+      userId: target.id,
+      amountPaise: BigInt(input.amountPaise),
+      currency: 'INR',
+      method: 'UPI',
+      status: 'PENDING_PAYMENT',
+      merchantReference: uuidRef('PPDEP'),
+      idempotencyKey,
+      expiresAt: new Date(now.getTime() + UPI_DEPOSIT_EXPIRY_MS),
+    } });
+    await tx.auditLog.create({ data: { actorId: req.auth!.userId, action: 'ADMIN_MANUAL_UPI_DEPOSIT_CREATED', target: `DEPOSIT:${deposit.id}`, reason: 'Admin initiated a manual UPI deposit for the selected customer.', metadata: { userId: target.id, publicId: target.publicId, amountPaise: input.amountPaise, currency: 'INR', merchantReference: deposit.merchantReference } } });
+    return { deposit, pending: null, created: true };
+  }, { isolationLevel: 'Serializable' });
+  if (result.pending) return res.status(409).json({ error: { code: 'PENDING_DEPOSIT_EXISTS', message: 'This customer already has an active UPI deposit. Review it or wait for it to expire before creating another.' }, pendingDeposits: result.pending.map((item) => ({ ...item, amountPaise: Number(item.amountPaise) })) });
+  const deposit = result.deposit!;
+  const amountPaise = Number(deposit.amountPaise);
+  const payable = ['CREATED', 'PENDING_PAYMENT'].includes(deposit.status) && (!deposit.expiresAt || deposit.expiresAt > now);
+  res.status(result.created ? 201 : 200).json({
+    deposit: { id: deposit.id, userId: deposit.userId, amountPaise, currency: deposit.currency, method: 'UPI', status: deposit.status, merchantReference: deposit.merchantReference, expiresAt: deposit.expiresAt },
+    user: adminDepositUserSummary(target),
+    receiverVpa: env.depositReceiverUpiId,
+    paymentUri: payable
+      ? adminUpiIntent({ receiverVpa: env.depositReceiverUpiId, amountPaise, merchantReference: deposit.merchantReference })
+      : null,
+    paymentStarted: false,
+    automaticVerificationAvailable: false,
+    message: payable
+      ? 'Pending UPI request created. PhonePe handoff does not verify payment; only an exact receipt confirmed in recipient-side records can be approved and credited.'
+      : 'This request is already being reviewed or is no longer payable. Do not send another payment.',
+  });
+}));
+
+paymentsRouter.post('/admin/deposits/:id/manual-claim', requireAdmin, adminManualUpiLimit, asyncRoute(async (req, res) => {
+  if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
+  assertManualUpiOperationsEnabled();
+  const input = z.object({ transactionReference: z.string().trim().regex(/^\d{12}$/) }).strict().parse(req.body);
+  const db = databaseRequired();
+  const initial = await db.deposit.findUnique({ where: { id: req.params.id }, include: { user: { select: { publicId: true, displayName: true, phoneE164: true } }, manualPaymentClaim: true } });
+  if (!initial) throw new HttpError(404, 'DEPOSIT_NOT_FOUND', 'Deposit was not found.');
+  if (initial.method !== 'UPI' || !initial.idempotencyKey.startsWith('ADMIN_UPI:')) throw new HttpError(409, 'ADMIN_UPI_DEPOSIT_REQUIRED', 'This action is available only for a pending UPI deposit created from the Admin flow.');
+  if (!['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING', 'EXPIRED', 'CANCELLED'].includes(initial.status)) throw new HttpError(409, 'DEPOSIT_NOT_REVIEWABLE', 'This deposit is not awaiting payment review.');
+  const outcome = await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM deposits WHERE id = ${initial.id}::uuid FOR UPDATE`;
+    const current = await tx.deposit.findUniqueOrThrow({ where: { id: initial.id }, include: { manualPaymentClaim: true } });
+    if (current.status === 'COMPLETED' || current.status === 'PAYMENT_VERIFIED') throw new HttpError(409, 'DEPOSIT_ALREADY_VERIFIED', 'This deposit already has a verified payment.');
+    if (current.manualPaymentClaim?.status === 'PENDING_REVIEW') {
+      if (current.manualPaymentClaim.transactionReference?.toLowerCase() !== input.transactionReference.toLowerCase()) throw new HttpError(409, 'CLAIM_ALREADY_PENDING', 'A different payment reference is already awaiting review for this deposit.');
+      return { claim: current.manualPaymentClaim, depositStatus: current.status, created: false };
+    }
+    await lockPaymentReference(tx, input.transactionReference);
+    const [usedClaim, p2pClaim, p2pSellerReceipt, p2pPayment, usedDeposit, existingReconciliation] = await Promise.all([
+      tx.manualPaymentClaim.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' }, depositId: { not: current.id } }, select: { id: true } }),
+      tx.p2pPaymentClaim.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pSellerPaymentConfirmation.findFirst({ where: { transactionReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: input.transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+      tx.deposit.findFirst({ where: { providerReference: { equals: input.transactionReference, mode: 'insensitive' }, id: { not: current.id } }, select: { id: true } }),
+      tx.reconciliationRecord.findUnique({ where: { provider_providerReference: { provider: 'MANUAL_UPI', providerReference: input.transactionReference } }, select: { internalReference: true } }),
+    ]);
+    if (usedClaim || p2pClaim || p2pSellerReceipt || p2pPayment || usedDeposit || existingReconciliation && existingReconciliation.internalReference !== current.merchantReference) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This PhonePe/UPI reference is already attached to another payment. No claim was submitted.');
+    const saved = current.manualPaymentClaim
+      ? await tx.manualPaymentClaim.update({ where: { id: current.manualPaymentClaim.id }, data: { userId: current.userId, transactionReference: input.transactionReference, evidenceImage: null, evidenceMimeType: null, status: 'PENDING_REVIEW', reviewedByUserId: null, reviewReason: null, evidenceReference: null, verifiedAmountPaise: null, verifiedCurrency: null, receiverConfirmed: false, reviewedAt: null } })
+      : await tx.manualPaymentClaim.create({ data: { depositId: current.id, userId: current.userId, transactionReference: input.transactionReference } });
+    if (['CREATED', 'PENDING_PAYMENT', 'EXPIRED', 'CANCELLED'].includes(current.status)) await tx.deposit.update({ where: { id: current.id }, data: { status: 'PAYMENT_PROCESSING' } });
+    await tx.reconciliationRecord.updateMany({ where: { provider: 'MANUAL_UPI', internalReference: current.merchantReference, status: 'REJECTED' }, data: { status: 'SUPERSEDED' } });
+    await tx.reconciliationRecord.upsert({
+      where: { provider_providerReference: { provider: 'MANUAL_UPI', providerReference: input.transactionReference } },
+      create: { provider: 'MANUAL_UPI', providerReference: input.transactionReference, internalReference: current.merchantReference, amountPaise: current.amountPaise, currency: 'INR', status: 'PENDING_REVIEW' },
+      update: { internalReference: current.merchantReference, amountPaise: current.amountPaise, currency: 'INR', status: 'PENDING_REVIEW' },
+    });
+    await tx.auditLog.create({ data: { actorId: req.auth!.userId, action: 'ADMIN_MANUAL_UPI_PAYMENT_REFERENCE_SUBMITTED', target: `DEPOSIT:${current.id}`, reason: 'Admin submitted a UPI payment reference for independent recipient-side verification.', metadata: { claimId: saved.id, amountPaise: Number(current.amountPaise), currency: 'INR', transactionReference: input.transactionReference, submittedByAdmin: true } } });
+    return { claim: saved, depositStatus: 'PAYMENT_PROCESSING', created: true };
+  }, { isolationLevel: 'Serializable' });
+  res.status(outcome.created ? 202 : 200).json({
+    claim: { id: outcome.claim.id, status: outcome.claim.status, transactionReference: outcome.claim.transactionReference, evidenceAttached: false, createdAt: outcome.claim.createdAt },
+    deposit: { id: initial.id, amountPaise: Number(initial.amountPaise), currency: initial.currency, merchantReference: initial.merchantReference, status: outcome.depositStatus },
+    user: adminDepositUserSummary({ id: initial.userId, ...initial.user }),
+    message: 'Payment reference recorded as an unverified claim. Approve only after confirming the exact reference, amount, INR currency, and recipient receipt in receiver-side records.',
+  });
+}));
+
+paymentsRouter.post('/deposits', asyncRoute(async (req, res) => {
+  const requestedMethod = req.body && typeof req.body === 'object' ? (req.body as { method?: unknown }).method : undefined;
+  if (requestedMethod === 'UPI') assertManualUpiOperationsEnabled();
+  else if (typeof requestedMethod === 'string' && Object.hasOwn(methods, requestedMethod)) assertFinancialOperationsEnabled();
+  else if (!env.financialOperationsEnabled && !env.manualUpiOperationsEnabled) assertFinancialOperationsEnabled();
   const input = z.object({ amountPaise: z.number().int().min(1), method: z.enum(['UPI', 'Paytm', 'PhonePe', 'Navi', 'Cashfree']) }).strict().parse(req.body);
   if (input.amountPaise % 10_000 !== 0) {
     throw new HttpError(400, 'DEPOSIT_AMOUNT_INCREMENT_INVALID', 'Deposit amount must be in increments of ₹100 (for example ₹100, ₹200, or ₹500).');
@@ -192,12 +320,13 @@ paymentsRouter.post('/deposits', financialOperationsGate, asyncRoute(async (req,
 
 paymentsRouter.get('/deposits', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  if (env.financialOperationsEnabled) await expireUnpaidUpiDeposits(db);
+  if (env.manualUpiOperationsEnabled) await expireUnpaidUpiDeposits(db);
   const deposits = await db.deposit.findMany({ where: { userId: req.auth!.userId }, include: { manualPaymentClaim: { select: { status: true, createdAt: true, reviewedAt: true, reviewReason: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
   res.json({ currency: 'INR', deposits: deposits.map((item) => ({ ...item, amountPaise: Number(item.amountPaise), method: Object.keys(methods).find((name) => methods[name as keyof typeof methods].enum === item.method) ?? (item.method === 'MOBIKWIK' ? 'MobiKwik (legacy)' : item.method) })) });
 }));
 
-paymentsRouter.post('/deposits/:id/cancel', financialOperationsGate, asyncRoute(async (req, res) => {
+paymentsRouter.post('/deposits/:id/cancel', asyncRoute(async (req, res) => {
+  assertManualUpiOperationsEnabled();
   const db = databaseRequired();
   const result = await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM deposits WHERE id = ${req.params.id}::uuid FOR UPDATE`;
@@ -216,7 +345,8 @@ paymentsRouter.post('/deposits/:id/cancel', financialOperationsGate, asyncRoute(
   res.json({ deposit: { id: result.id, status: result.status, expiresAt: result.expiresAt }, message: result.status === 'CANCELLED' ? 'Deposit cancelled. No wallet credit was made.' : 'This deposit is expired. If you already paid, submit its reference for manual review; do not pay again.' });
 }));
 
-paymentsRouter.post('/deposits/:id/manual-verification', financialOperationsGate, manualClaimLimit, asyncRoute(async (req, res) => {
+paymentsRouter.post('/deposits/:id/manual-verification', manualClaimLimit, asyncRoute(async (req, res) => {
+  assertManualUpiOperationsEnabled();
   const input = z.object({ transactionReference: z.string().optional(), evidenceImageBase64: z.string(), evidenceMimeType: z.string() }).strict().parse(req.body);
   const transactionReference = input.transactionReference?.trim() || null;
   if (transactionReference && !validateUpiUtr(transactionReference)) throw new HttpError(400, 'INVALID_UTR_FORMAT', 'If provided, enter the exact 12-digit UTR/RRN from your payment app.');
@@ -236,8 +366,13 @@ paymentsRouter.post('/deposits/:id/manual-verification', financialOperationsGate
     if (current.manualPaymentClaim?.status === 'APPROVED') throw new HttpError(409, 'CLAIM_ALREADY_APPROVED', 'This payment claim has already been approved.');
     if (transactionReference) {
       await lockPaymentReference(tx, transactionReference);
-      const phonePeCredit = await tx.adminPhonePeCreditRequest.findUnique({ where: { paymentReferenceHash: paymentReferenceHash(transactionReference) }, select: { id: true } });
-      if (phonePeCredit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference was already recorded for an Admin credit.');
+      const [p2pClaim, p2pSellerReceipt, p2pPayment, existingDeposit] = await Promise.all([
+        tx.p2pPaymentClaim.findFirst({ where: { transactionReference: { equals: transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+        tx.p2pSellerPaymentConfirmation.findFirst({ where: { transactionReference: { equals: transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+        tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: transactionReference, mode: 'insensitive' } }, select: { id: true } }),
+        tx.deposit.findFirst({ where: { providerReference: { equals: transactionReference, mode: 'insensitive' }, id: { not: current.id } }, select: { id: true } }),
+      ]);
+      if (p2pClaim || p2pSellerReceipt || p2pPayment || existingDeposit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This UPI reference is already attached to another payment. No payment claim was submitted.');
     }
 
     const saved = current.manualPaymentClaim
@@ -261,7 +396,7 @@ paymentsRouter.post('/deposits/:id/manual-verification', financialOperationsGate
 
 paymentsRouter.get('/admin/reconciliation/claims', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const status = typeof req.query.status === 'string' ? req.query.status : 'PENDING_REVIEW';
   if (!['PENDING_REVIEW', 'APPROVED', 'REJECTED', 'SUPERSEDED'].includes(status)) throw new HttpError(400, 'INVALID_CLAIM_STATUS', 'Unsupported reconciliation status.');
   const page = z.coerce.number().int().min(1).default(1).parse(req.query.page ?? '1');
@@ -276,7 +411,7 @@ paymentsRouter.get('/admin/reconciliation/claims', requireAdmin, asyncRoute(asyn
 
 paymentsRouter.get('/admin/reconciliation/claims/:claimId/evidence', requireAdmin, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const claim = await databaseRequired().manualPaymentClaim.findUnique({ where: { id: req.params.claimId }, select: { evidenceImage: true, evidenceMimeType: true } });
   if (!claim?.evidenceImage || !claim.evidenceMimeType) throw new HttpError(404, 'PAYMENT_EVIDENCE_NOT_FOUND', 'No transaction screenshot is attached to this claim.');
   res.set({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline; filename="payment-evidence"' });
@@ -285,7 +420,7 @@ paymentsRouter.get('/admin/reconciliation/claims/:claimId/evidence', requireAdmi
 
 paymentsRouter.post('/admin/reconciliation/claims/:claimId/review', requireAdmin, adminReviewLimit, asyncRoute(async (req, res) => {
   if (!['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(req.auth!.role ?? '')) throw new HttpError(403, 'FINANCE_REVIEW_REQUIRED', 'Finance reviewer access is required.');
-  assertFinancialOperationsEnabled();
+  assertManualUpiOperationsEnabled();
   const input = z.object({
     decision: z.enum(['APPROVE', 'REJECT']),
     reason: z.string().trim().min(8).max(500),
@@ -329,14 +464,18 @@ paymentsRouter.post('/admin/reconciliation/claims/:claimId/review', requireAdmin
       receiverConfirmed: input.receiverConfirmed!,
     });
     if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires an exact transaction-reference, amount, INR currency, and receiver match in merchant records.');
-    await lockPaymentReference(tx, input.verifiedTransactionReference);
-    const phonePeCredit = await tx.adminPhonePeCreditRequest.findUnique({ where: { paymentReferenceHash: paymentReferenceHash(input.verifiedTransactionReference!) }, select: { id: true } });
-    if (phonePeCredit) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This transaction reference was already recorded for an Admin credit.');
     if (!['CREATED', 'PENDING_PAYMENT', 'PAYMENT_PROCESSING'].includes(claim.deposit.status)) throw new HttpError(409, 'DEPOSIT_NOT_REVIEWABLE', 'Deposit is no longer awaiting payment review.');
-    const duplicate = await tx.deposit.findFirst({ where: { providerReference: input.verifiedTransactionReference!, id: { not: claim.depositId } }, select: { id: true } });
+    await lockPaymentReference(tx, input.verifiedTransactionReference);
+    const [duplicate, duplicateClaim, p2pClaim, p2pSellerReceipt, p2pPayment] = await Promise.all([
+      tx.deposit.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' }, id: { not: claim.depositId } }, select: { id: true } }),
+      tx.manualPaymentClaim.findFirst({ where: { transactionReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' }, id: { not: claim.id } }, select: { id: true } }),
+      tx.p2pPaymentClaim.findFirst({ where: { transactionReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pSellerPaymentConfirmation.findFirst({ where: { transactionReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
+      tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
+    ]);
     if (duplicate) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This provider transaction reference is already attached to another deposit.');
-    const duplicateClaim = await tx.manualPaymentClaim.findFirst({ where: { transactionReference: input.verifiedTransactionReference!, id: { not: claim.id } }, select: { id: true } });
     if (duplicateClaim) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This provider transaction reference is already attached to another payment claim.');
+    if (p2pClaim || p2pSellerReceipt || p2pPayment) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This provider transaction reference is already attached to another P2P payment.');
     const reconciliation = await tx.reconciliationRecord.findUnique({ where: { provider_providerReference: { provider: 'MANUAL_UPI', providerReference: input.verifiedTransactionReference! } } });
     if (reconciliation && reconciliation.internalReference !== claim.deposit.merchantReference) throw new HttpError(409, 'TRANSACTION_ALREADY_USED', 'This provider transaction reference is already attached to another deposit.');
 

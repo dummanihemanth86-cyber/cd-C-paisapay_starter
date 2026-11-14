@@ -4,16 +4,51 @@ import express, { type ErrorRequestHandler } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { env } from '../config/env.js';
-import { assertFinancialOperationsEnabled, FINANCIAL_OPERATION_ROUTE_MANIFEST, FINANCIAL_OPERATIONS_DISABLED_CODE, financialOperationsGate } from '../middleware/financialOperations.js';
+import { assertFinancialOperationsEnabled, assertManualUpiOperationsEnabled, FINANCIAL_OPERATION_ROUTE_MANIFEST, FINANCIAL_OPERATIONS_DISABLED_CODE, MANUAL_UPI_OPERATIONS_DISABLED_CODE, financialOperationsGate, manualUpiOperationsGate } from '../middleware/financialOperations.js';
 import { openapi } from '../openapi.js';
 import { createWithdrawalOffer, releaseOfferFunds, reserveOfferFunds } from '../modules/p2p/service.js';
-import { grantVerifiedP2pOrderReward, grantVerifiedUpiDepositReward } from '../modules/payments/depositReward.js';
+import { grantVerifiedP2pOrderReward, grantVerifiedUpiDepositReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../modules/payments/depositReward.js';
 import { expireUnpaidUpiDeposits } from '../modules/payments/depositExpiry.js';
 import { recordVerifiedReferralCommission } from '../modules/users/referralCommission.js';
 
 describe('financial operations safety gate policy', () => {
+  it('sets the P2P order reward rate to 6.2 percent', () => {
+    expect(P2P_ORDER_REWARD_PERCENT_BPS).toBe(620);
+    expect(50_000n * BigInt(P2P_ORDER_REWARD_PERCENT_BPS) / 10_000n).toBe(3_100n);
+  });
+
+  const runProductionConfig = (overrides: NodeJS.ProcessEnv) => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      NODE_ENV: 'production',
+      PAISAPAY_DEPLOYMENT_ENV: 'production',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      APP_ORIGIN: '',
+      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
+      SESSION_HASH_SECRET: 'a'.repeat(64),
+      BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
+      OTP_PROVIDER: 'renflair-v1',
+      RENFLAIR_API_KEY: 'cfg-test-key-value-not-for-use-0123456789',
+      OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      WELCOME_BONUS_ENABLED: 'false',
+      UPI_DEPOSIT_REWARD_ENABLED: 'false',
+      PAYMENT_PROVIDER: 'disabled',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+      ADMIN_STAGING_DIRECT_CREDITS_ENABLED: 'false',
+      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
+      ...overrides,
+    };
+    delete childEnv.DEMO_LOGIN_PHONE_E164;
+    delete childEnv.DEMO_LOGIN_PASSWORD;
+    delete childEnv.SMS_GATEWAY_URL;
+    delete childEnv.SMS_GATEWAY_API_KEY;
+    return spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+  };
+
   it('defaults to disabled in the test environment and has a stable error code', () => {
     expect(env.financialOperationsEnabled).toBe(false);
+    expect(env.manualUpiOperationsEnabled).toBe(false);
     expect(env.walletAdjustmentsEnabled).toBe(false);
     expect(FINANCIAL_OPERATIONS_DISABLED_CODE).toBe('FINANCIAL_OPERATIONS_DISABLED');
   });
@@ -38,50 +73,103 @@ describe('financial operations safety gate policy', () => {
 
   it('blocks direct financial service calls before any database operation while disabled', async () => {
     const previous = env.financialOperationsEnabled;
+    const previousManual = env.manualUpiOperationsEnabled;
     env.financialOperationsEnabled = false;
+    env.manualUpiOperationsEnabled = false;
     let databaseCalls = 0;
     const tx = new Proxy({}, { get: () => { databaseCalls += 1; throw new Error('Database must not be touched while financial operations are disabled.'); } });
     try {
       const expected = { code: FINANCIAL_OPERATIONS_DISABLED_CODE, statusCode: 503 };
-      await expect(createWithdrawalOffer({ userId: 'user', amountPaise: 10_000, idempotencyKey: 'test-key-123' })).rejects.toMatchObject(expected);
-      await expect(releaseOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null, 'P2P_WITHDRAWAL_CANCELLED')).rejects.toMatchObject(expected);
-      await expect(reserveOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null)).rejects.toMatchObject(expected);
-      await expect(expireUnpaidUpiDeposits(tx as never)).rejects.toMatchObject(expected);
+      const manualExpected = { code: MANUAL_UPI_OPERATIONS_DISABLED_CODE, statusCode: 503 };
+      await expect(createWithdrawalOffer({ userId: 'user', amountPaise: 10_000, idempotencyKey: 'test-key-123' })).rejects.toMatchObject(manualExpected);
+      await expect(releaseOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null, 'P2P_WITHDRAWAL_CANCELLED')).rejects.toMatchObject(manualExpected);
+      await expect(reserveOfferFunds(tx as never, { id: 'offer', userId: 'user', amountPaise: 10_000n }, null)).rejects.toMatchObject(manualExpected);
+      await expect(expireUnpaidUpiDeposits(tx as never)).rejects.toMatchObject(manualExpected);
       await expect(grantVerifiedUpiDepositReward(tx as never, { depositId: 'deposit', userId: 'user', actorUserId: 'admin', amountPaise: 10_000n })).rejects.toMatchObject(expected);
       await expect(grantVerifiedP2pOrderReward(tx as never, { orderId: 'order', userId: 'user', actorUserId: 'admin', amountPaise: 10_000n })).rejects.toMatchObject(expected);
       await expect(recordVerifiedReferralCommission(tx as never, { sourceReference: 'test', sourceUserId: 'user', actorUserId: 'admin', amountPaise: 10_000n })).rejects.toMatchObject(expected);
       expect(databaseCalls).toBe(0);
     } finally {
       env.financialOperationsEnabled = previous;
+      env.manualUpiOperationsEnabled = previousManual;
     }
   });
 
-  it('rejects production startup when financial operations are explicitly enabled in this provider-disabled build', () => {
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      NODE_ENV: 'production',
-      APP_ORIGIN: '',
-      DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
-      SESSION_HASH_SECRET: 'a'.repeat(64),
-      BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
-      OTP_PROVIDER: 'renflair-v1',
-      RENFLAIR_API_KEY: 'test-only-placeholder',
-      OTP_RATE_LIMIT_BYPASS_PHONE: '',
-      WELCOME_BONUS_ENABLED: 'false',
-      UPI_DEPOSIT_REWARD_ENABLED: 'false',
-      PAYMENT_PROVIDER: 'disabled',
+  it('uses a separate, explicit manual UPI gate without enabling the provider financial gate', async () => {
+    const previousFinancial = env.financialOperationsEnabled;
+    const previousManual = env.manualUpiOperationsEnabled;
+    const testApp = express();
+    testApp.post('/manual-upi', manualUpiOperationsGate, (_req, res) => res.status(204).end());
+    const gateErrorHandler: ErrorRequestHandler = (error, _req, res, _next) => res.status(error.statusCode).json({ error: { code: error.code, message: error.message } });
+    testApp.use(gateErrorHandler);
+    try {
+      env.financialOperationsEnabled = false;
+      env.manualUpiOperationsEnabled = false;
+      const disabled = await request(testApp).post('/manual-upi').expect(503);
+      expect(disabled.body.error.code).toBe(MANUAL_UPI_OPERATIONS_DISABLED_CODE);
+      env.manualUpiOperationsEnabled = true;
+      await request(testApp).post('/manual-upi').expect(204);
+      expect(env.financialOperationsEnabled).toBe(false);
+      expect(() => assertManualUpiOperationsEnabled()).not.toThrow();
+    } finally {
+      env.financialOperationsEnabled = previousFinancial;
+      env.manualUpiOperationsEnabled = previousManual;
+    }
+  });
+
+  it('allows financial operations in production mode only for explicitly identified Render staging', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
       FINANCIAL_OPERATIONS_ENABLED: 'true',
-      ADMIN_WALLET_PRODUCTION_APPROVED: 'false',
-      ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'false',
-      DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
-    };
-    delete childEnv.DEMO_LOGIN_PHONE_E164;
-    delete childEnv.DEMO_LOGIN_PASSWORD;
-    delete childEnv.SMS_GATEWAY_URL;
-    delete childEnv.SMS_GATEWAY_API_KEY;
-    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('allows the explicitly identified Render staging service to start with financial operations disabled', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('allows the explicit staging manual UPI gate while the provider financial gate stays off', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api-staging',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+      MANUAL_UPI_OPERATIONS_ENABLED: 'true',
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('rejects production manual UPI enablement without an explicit production approval flag', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'production',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      FINANCIAL_OPERATIONS_ENABLED: 'false',
+      MANUAL_UPI_OPERATIONS_ENABLED: 'true',
+      MANUAL_UPI_PRODUCTION_APPROVED: 'false',
+    });
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('FINANCIAL_OPERATIONS_ENABLED cannot be enabled in production');
+    expect(result.stderr).toContain('Production manual UPI/P2P requires MANUAL_UPI_PRODUCTION_APPROVED=true');
+  });
+
+  it('rejects financial operations in production even if the staging label is mistakenly set', () => {
+    const result = runProductionConfig({
+      PAISAPAY_DEPLOYMENT_ENV: 'staging',
+      RENDER: 'true',
+      RENDER_SERVICE_NAME: 'paisapay-api',
+      FINANCIAL_OPERATIONS_ENABLED: 'true',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('only for the explicitly identified paisapay-api-staging Render service');
   });
 
   it('rejects production startup when private wallet adjustments are explicitly enabled', () => {
@@ -89,7 +177,7 @@ describe('financial operations safety gate policy', () => {
       ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
       DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
       SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
-      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder',
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'cfg-test-key-value-not-for-use-0123456789',
       OTP_RATE_LIMIT_BYPASS_PHONE: '', WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false',
       PAYMENT_PROVIDER: 'disabled', FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'true',
       DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
@@ -108,7 +196,7 @@ describe('financial operations safety gate policy', () => {
       ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
       DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
       SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
-      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder', OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'cfg-test-key-value-not-for-use-0123456789', OTP_RATE_LIMIT_BYPASS_PHONE: '',
       WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false', PAYMENT_PROVIDER: 'disabled',
       FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'false',
       ADMIN_WALLET_PRODUCTION_APPROVED: 'false',
@@ -131,7 +219,7 @@ describe('financial operations safety gate policy', () => {
       ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
       DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
       SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
-      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder', OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'cfg-test-key-value-not-for-use-0123456789', OTP_RATE_LIMIT_BYPASS_PHONE: '',
       WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false', PAYMENT_PROVIDER: 'disabled',
       FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'true',
       ADMIN_WALLET_FUNDING_ENABLED: 'true', ADMIN_WALLET_CREDITS_ENABLED: 'true', ADMIN_WALLET_PRODUCTION_APPROVED: 'true', ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED: 'true',
@@ -150,7 +238,7 @@ describe('financial operations safety gate policy', () => {
       ...process.env, NODE_ENV: 'production', APP_ORIGIN: '',
       DATABASE_URL: 'postgresql://test:test@db.example.invalid/paisapay?sslmode=require',
       SESSION_HASH_SECRET: 'a'.repeat(64), BANK_ACCOUNT_ENCRYPTION_KEY: 'b'.repeat(64),
-      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'test-only-placeholder', OTP_RATE_LIMIT_BYPASS_PHONE: '',
+      OTP_PROVIDER: 'renflair-v1', RENFLAIR_API_KEY: 'cfg-test-key-value-not-for-use-0123456789', OTP_RATE_LIMIT_BYPASS_PHONE: '',
       WELCOME_BONUS_ENABLED: 'false', UPI_DEPOSIT_REWARD_ENABLED: 'false', PAYMENT_PROVIDER: 'disabled',
       FINANCIAL_OPERATIONS_ENABLED: 'false', WALLET_ADJUSTMENTS_ENABLED: 'true',
       ADMIN_WALLET_FUNDING_ENABLED: 'true', ADMIN_WALLET_CREDITS_ENABLED: 'true',
@@ -193,9 +281,11 @@ describe('financial operations safety gate policy', () => {
     const p2pSource = readFileSync(new URL('../modules/p2p/routes.ts', import.meta.url), 'utf8');
     const p2pPattern = /\bp2pRouter\.(get|post|put|patch|delete)\((?:'([^']*)'|"([^"]*)")/g;
     const explicitlyReadOnlyRoutes = new Set([
-      'GET /admin/p2p/offers', 'GET /admin/p2p/orders',
       'GET /withdrawals', 'GET /withdrawals/marketplace',
       'GET /deposits/orders/my', 'GET /deposits/orders/:id',
+      'GET /admin/p2p/offers', 'GET /admin/p2p/orders',
+      'GET /admin/p2p/claims', 'GET /admin/p2p/claims/:claimId',
+      'GET /admin/p2p/claims/:claimId/evidence',
     ]);
     for (const match of p2pSource.matchAll(p2pPattern)) {
       const method = match[1].toUpperCase();
@@ -217,7 +307,6 @@ describe('financial operations safety gate policy', () => {
       ['get', '/config'], ['get', '/users/me'], ['get', '/notifications'], ['get', '/support/tickets'],
       ['get', '/withdrawals'], ['get', '/withdrawals/marketplace'],
       ['get', '/deposits/orders/my'], ['get', '/deposits/orders/:id'],
-      ['get', '/orders'], ['get', '/orders/:id'],
     ] as const;
     for (const [method, path] of nonFinancial) {
       expect(FINANCIAL_OPERATION_ROUTE_MANIFEST.some(([gatedMethod, gatedPath]) => gatedMethod.toLowerCase() === method && gatedPath.endsWith(path))).toBe(false);

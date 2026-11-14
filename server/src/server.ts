@@ -5,6 +5,7 @@ import app from './app.js';
 import { expireUnpaidUpiDeposits } from './modules/payments/depositExpiry.js';
 import { expireP2pOffersBatch } from './modules/p2p/service.js';
 import { runAdminPushOutboxBatch } from './modules/admin/pushNotifications.js';
+import { createFinancialWorkerGate } from './lib/financialWorkerGate.js';
 
 const server = app.listen(env.port, env.host, () => {
   logger.info({ host: env.host, port: env.port, databaseConfigured: Boolean(env.databaseUrl), otpProvider: env.otpProvider, paymentProvider: env.paymentProvider }, 'PaisaPay API started');
@@ -15,8 +16,12 @@ const server = app.listen(env.port, env.host, () => {
 
 let p2pExpiryWorkerRunning = false;
 let adminPushWorkerRunning = false;
+const financialBackgroundWorkEnabled = env.financialOperationsEnabled || env.manualUpiOperationsEnabled;
+const runFinancialWorker = createFinancialWorkerGate(financialBackgroundWorkEnabled, () => {
+  logger.info('Financial expiry workers remain disabled by server safety gates');
+});
 async function runP2pExpiryWorker() {
-  if (!prisma || p2pExpiryWorkerRunning) return;
+  if (!financialBackgroundWorkEnabled || !prisma || p2pExpiryWorkerRunning) return;
   p2pExpiryWorkerRunning = true;
   try { await expireP2pOffersBatch(prisma); }
   catch (error) { logger.warn({ err: error }, 'Could not expire old P2P matches and offers'); }
@@ -31,13 +36,21 @@ async function runAdminPushWorker() {
   finally { adminPushWorkerRunning = false; }
 }
 
+function runFinancialWorkers() {
+  const db = prisma;
+  if (!db) return;
+  runFinancialWorker(() => {
+    void expireUnpaidUpiDeposits(db).catch((error) => logger.warn({ err: error }, 'Could not expire old unpaid UPI deposits'));
+    void runP2pExpiryWorker();
+  });
+}
+
+runFinancialWorkers();
 const depositExpiryTimer = setInterval(() => {
-  if (prisma) void expireUnpaidUpiDeposits(prisma).catch((error) => logger.warn({ err: error }, 'Could not expire old unpaid UPI deposits'));
-  void runP2pExpiryWorker();
+  runFinancialWorkers();
   void runAdminPushWorker();
 }, 5_000);
 depositExpiryTimer.unref();
-void runP2pExpiryWorker();
 void runAdminPushWorker();
 
 async function shutdown(signal: string) {
