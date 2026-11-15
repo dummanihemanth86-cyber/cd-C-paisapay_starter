@@ -9,6 +9,31 @@ const openapiBase = {
     schemas: { Error: { type: 'object', properties: { error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } }, required: ['code', 'message'] } } } },
   },
   paths: {
+    '/app-version': {
+      get: {
+        security: [],
+        summary: 'Public User App release metadata; availability requires a configured HTTPS APK and SHA-256 digest',
+        responses: {
+          '200': {
+            description: 'Latest signed User App release metadata',
+            content: { 'application/json': { schema: {
+              type: 'object', additionalProperties: false,
+              required: ['appId', 'version', 'buildCode', 'minSupportedBuildCode', 'apkUrl', 'sha256'],
+              properties: {
+                appId: { type: 'string', enum: ['com.paisapay.app'] },
+                version: { type: 'string', pattern: '^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$' },
+                buildCode: { type: 'integer', minimum: 1 },
+                minSupportedBuildCode: { type: 'integer', minimum: 0 },
+                apkUrl: { type: 'string', format: 'uri', description: 'HTTPS URL of the APK' },
+                sha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' },
+                releaseNotes: { type: 'string', maxLength: 500 },
+              },
+            } } },
+          },
+          '503': { description: 'No complete signed User App release is configured', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
     '/api/v2/availability': {
       get: {
         servers: [{ url: '/' }],

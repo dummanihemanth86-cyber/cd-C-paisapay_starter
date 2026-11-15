@@ -145,7 +145,7 @@ describe('PaisaPay API foundation', () => {
             }
           }
         }
-        const isPublic = path === '/config' || path === '/api/v2/availability' || path.startsWith('/auth/') || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
+        const isPublic = path === '/config' || path === '/app-version' || path === '/api/v2/availability' || path.startsWith('/auth/') || path === '/admin/auth/login' || path.startsWith('/admin/auth/forgot-password/') || path === '/admin/auth/password/reset' || path.startsWith('/webhooks/payments/');
         if (!isPublic) expect(operation.security, `${method.toUpperCase()} ${path} security`).toEqual([{ bearerAuth: [] }]);
       }
     }
@@ -285,6 +285,13 @@ describe('PaisaPay API foundation', () => {
     const legacy = await request(app).get('/api/v1/config').expect(200);
     expect(legacy.body).not.toHaveProperty('apiVersion');
     expect(legacy.body).not.toHaveProperty('financialOperations');
+  });
+
+  it('fails closed for app updates until complete HTTPS release metadata is configured', async () => {
+    const response = await request(app).get('/api/v1/app-version').expect(503);
+    expect(response.headers['cache-control']).toContain('no-store');
+    expect(response.body.error.code).toBe('APP_RELEASE_NOT_CONFIGURED');
+    assertOpenApiResponse(openapi, 'GET', '/app-version', response);
   });
 
   it('returns helpful API information at root', async () => {

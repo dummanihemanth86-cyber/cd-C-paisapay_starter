@@ -22,6 +22,7 @@ import { getPaymentMethodAvailability } from './modules/payments/availability.js
 import { openapi } from './openapi.js';
 import { adminAuthRouter, adminRouter } from './modules/admin/routes.js';
 import { financialOperationsGate } from './middleware/financialOperations.js';
+import { getConfiguredUserAppRelease } from './modules/appRelease/release.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -57,6 +58,21 @@ app.get('/api/v2/availability', asyncRoute(async (_req, res) => {
   const availability = await getPaymentMethodAvailability({ includeFinancialOperations: true });
   res.json({ apiVersion: '2.0.0', schemaVersion: 2, ...availability });
 }));
+app.get('/api/v1/app-version', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  const release = getConfiguredUserAppRelease({
+    version: env.userAppReleaseVersion,
+    buildCode: env.userAppReleaseBuildCode,
+    minSupportedBuildCode: env.userAppReleaseMinSupportedBuildCode,
+    apkUrl: env.userAppReleaseApkUrl,
+    sha256: env.userAppReleaseSha256,
+    releaseNotes: env.userAppReleaseNotes,
+  });
+  if (!release) {
+    return res.status(503).json({ error: { code: 'APP_RELEASE_NOT_CONFIGURED', message: 'The latest User App release is not configured.' } });
+  }
+  return res.json(release);
+});
 // Compatibility alias for the earlier demo client. Remove after all installations use /api/v1.
 app.get('/v1/config', asyncRoute(async (_req, res) => {
   res.json({ ...await getPaymentMethodAvailability(), demoOnly: true });
