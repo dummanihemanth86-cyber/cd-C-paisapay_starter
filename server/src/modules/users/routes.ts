@@ -9,6 +9,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { VIP_LEVEL_CONFIGURATION } from './vipConfig.js';
 import { buildVipProgress } from './vipProgress.js';
 import { REFERRAL_COMMISSION_PERCENT_BPS, INDIRECT_REFERRAL_COMMISSION_PERCENT_BPS } from './referralCommission.js';
+import { buildReferralMemberMetrics, indiaDayStart } from './referralMetrics.js';
 
 export const usersRouter = Router();
 usersRouter.use(requireAuth);
@@ -221,32 +222,44 @@ usersRouter.get('/me/referrals', asyncRoute(async (req, res) => {
   const indirect = direct.length ? await db.user.findMany({ where: { referredById: { in: direct.map((member) => member.id) } }, select: { id: true, displayName: true, phoneE164: true, createdAt: true } }) : [];
   const query = z.object({ period: z.enum(['today', '7d', '30d', 'all']).default('all') }).parse(req.query);
   const now = new Date();
-  const since = query.period === 'today' ? new Date(now.getFullYear(), now.getMonth(), now.getDate()) : query.period === '7d' ? new Date(now.getTime() - 7 * 86400000) : query.period === '30d' ? new Date(now.getTime() - 30 * 86400000) : null;
+  const since = query.period === 'today' ? indiaDayStart(now) : query.period === '7d' ? new Date(now.getTime() - 7 * 86400000) : query.period === '30d' ? new Date(now.getTime() - 30 * 86400000) : null;
   const periodCreatedAt = since ? { gte: since } : undefined;
   const memberIds = [...direct, ...indirect].map((member) => member.id);
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const [me, program, milestoneRules, commissionAll, commissionStats, memberCommissionGroups, commissionPeriod, commissionToday, depositGroups, allDepositGroups, todayDepositGroups, todayDirect, todayIndirect] = await Promise.all([
+  const todayStart = indiaDayStart(now);
+  const [me, program, milestoneRules, commissionAll, commissionStats, memberCommissionGroups, memberCommissionTodayGroups, commissionPeriod, commissionToday, depositGroups, allDepositGroups, todayDepositGroups, p2pDepositGroups, allP2pDepositGroups, todayP2pDepositGroups, todayDirect, todayIndirect] = await Promise.all([
     db.user.findUniqueOrThrow({ where: { id: req.auth!.userId }, select: { referralCode: true } }),
     db.referralProgramConfig.upsert({ where: { id: 1 }, create: { id: 1, directRateBps: REFERRAL_COMMISSION_PERCENT_BPS, indirectRateBps: INDIRECT_REFERRAL_COMMISSION_PERCENT_BPS }, update: {} }),
     db.referralMilestoneRule.findMany({ where: { enabled: true }, orderBy: { requiredReferrals: 'asc' } }),
     db.commissionEntry.findMany({ where: { userId: req.auth!.userId }, select: { id: true, amountPaise: true, status: true, kind: true, level: true, createdAt: true, qualifyingReference: true }, orderBy: { createdAt: 'desc' }, take: 100 }),
     db.commissionEntry.groupBy({ by: ['kind', 'status'], where: { userId: req.auth!.userId }, _sum: { amountPaise: true } }),
     db.commissionEntry.groupBy({ by: ['sourceUserId'], where: { userId: req.auth!.userId, status: { not: 'REVERSED' }, sourceUserId: { in: memberIds } }, _sum: { amountPaise: true } }),
+    memberIds.length ? db.commissionEntry.groupBy({ by: ['sourceUserId'], where: { userId: req.auth!.userId, status: { not: 'REVERSED' }, sourceUserId: { in: memberIds }, createdAt: { gte: todayStart } }, _sum: { amountPaise: true } }) : Promise.resolve([]),
     db.commissionEntry.aggregate({ where: { userId: req.auth!.userId, ...(periodCreatedAt ? { createdAt: periodCreatedAt } : {}), status: { not: 'REVERSED' } }, _sum: { amountPaise: true } }),
     db.commissionEntry.aggregate({ where: { userId: req.auth!.userId, createdAt: { gte: todayStart }, status: { not: 'REVERSED' } }, _sum: { amountPaise: true } }),
-    memberIds.length ? db.deposit.groupBy({ by: ['userId'], where: { userId: { in: memberIds }, status: { in: ['PAYMENT_VERIFIED', 'COMPLETED'] }, currency: 'INR', ...(periodCreatedAt ? { createdAt: periodCreatedAt } : {}) }, _sum: { amountPaise: true }, _count: true }) : Promise.resolve([]),
+    memberIds.length ? db.deposit.groupBy({ by: ['userId'], where: { userId: { in: memberIds }, status: { in: ['PAYMENT_VERIFIED', 'COMPLETED'] }, currency: 'INR', ...(periodCreatedAt ? { updatedAt: periodCreatedAt } : {}) }, _sum: { amountPaise: true }, _count: true }) : Promise.resolve([]),
     memberIds.length ? db.deposit.groupBy({ by: ['userId'], where: { userId: { in: memberIds }, status: { in: ['PAYMENT_VERIFIED', 'COMPLETED'] }, currency: 'INR' }, _sum: { amountPaise: true }, _count: true }) : Promise.resolve([]),
-    memberIds.length ? db.deposit.groupBy({ by: ['userId'], where: { userId: { in: memberIds }, status: { in: ['PAYMENT_VERIFIED', 'COMPLETED'] }, currency: 'INR', createdAt: { gte: todayStart } }, _sum: { amountPaise: true }, _count: true }) : Promise.resolve([]),
+    memberIds.length ? db.deposit.groupBy({ by: ['userId'], where: { userId: { in: memberIds }, status: { in: ['PAYMENT_VERIFIED', 'COMPLETED'] }, currency: 'INR', updatedAt: { gte: todayStart } }, _sum: { amountPaise: true }, _count: true }) : Promise.resolve([]),
+    memberIds.length ? db.p2pDepositOrder.groupBy({ by: ['buyerUserId'], where: { buyerUserId: { in: memberIds }, status: 'COMPLETED', currency: 'INR', ...(periodCreatedAt ? { updatedAt: periodCreatedAt } : {}) }, _sum: { amountPaise: true }, _count: true }).then((rows) => rows.map((row) => ({ userId: row.buyerUserId, _sum: row._sum, _count: row._count }))) : Promise.resolve([]),
+    memberIds.length ? db.p2pDepositOrder.groupBy({ by: ['buyerUserId'], where: { buyerUserId: { in: memberIds }, status: 'COMPLETED', currency: 'INR' }, _sum: { amountPaise: true }, _count: true }).then((rows) => rows.map((row) => ({ userId: row.buyerUserId, _sum: row._sum, _count: row._count }))) : Promise.resolve([]),
+    memberIds.length ? db.p2pDepositOrder.groupBy({ by: ['buyerUserId'], where: { buyerUserId: { in: memberIds }, status: 'COMPLETED', currency: 'INR', updatedAt: { gte: todayStart } }, _sum: { amountPaise: true }, _count: true }).then((rows) => rows.map((row) => ({ userId: row.buyerUserId, _sum: row._sum, _count: row._count }))) : Promise.resolve([]),
     db.user.count({ where: { referredById: req.auth!.userId, createdAt: { gte: todayStart } } }),
     direct.length ? db.user.count({ where: { referredById: { in: direct.map((member) => member.id) }, createdAt: { gte: todayStart } } }) : Promise.resolve(0),
   ]);
-  const depositsByUser = new Map(allDepositGroups.map((row) => [row.userId, row._sum.amountPaise ?? 0n]));
-  const commissionBySource = new Map(memberCommissionGroups.filter((row) => row.sourceUserId).map((row) => [row.sourceUserId!, row._sum.amountPaise ?? 0n]));
-  const teamDepositTotal = depositGroups.reduce((sum, row) => sum + (row._sum.amountPaise ?? 0n), 0n);
-  const todayDepositTotal = todayDepositGroups.reduce((sum, row) => sum + (row._sum.amountPaise ?? 0n), 0n);
-  const periodDepositCount = depositGroups.reduce((sum, row) => sum + row._count, 0);
-  const todayDepositCount = todayDepositGroups.reduce((sum, row) => sum + row._count, 0);
-  const lifetimeDepositCount = allDepositGroups.reduce((sum, row) => sum + row._count, 0);
+  const memberMetrics = buildReferralMemberMetrics(memberIds, {
+    deposits: allDepositGroups,
+    p2pDeposits: allP2pDepositGroups,
+    todayDeposits: todayDepositGroups,
+    todayP2pDeposits: todayP2pDepositGroups,
+    commissions: memberCommissionGroups,
+    todayCommissions: memberCommissionTodayGroups,
+  });
+  const sumGroups = (groups: readonly { _sum: { amountPaise: bigint | null } }[]) => groups.reduce((sum, row) => sum + (row._sum.amountPaise ?? 0n), 0n);
+  const countGroups = (groups: readonly { _count: number }[]) => groups.reduce((sum, row) => sum + row._count, 0);
+  const teamDepositTotal = sumGroups(depositGroups) + sumGroups(p2pDepositGroups);
+  const todayDepositTotal = sumGroups(todayDepositGroups) + sumGroups(todayP2pDepositGroups);
+  const periodDepositCount = countGroups(depositGroups) + countGroups(p2pDepositGroups);
+  const todayDepositCount = countGroups(todayDepositGroups) + countGroups(todayP2pDepositGroups);
+  const lifetimeDepositCount = countGroups(allDepositGroups) + countGroups(allP2pDepositGroups);
   const totalBy = (kind: string, statuses: string[]) => commissionStats.filter((item) => item.kind === kind && statuses.includes(item.status)).reduce((sum, item) => sum + (item._sum.amountPaise ?? 0n), 0n);
   const todayCommissionPaise = commissionPeriod._sum.amountPaise ?? 0n;
   const actualTodayCommissionPaise = commissionToday._sum.amountPaise ?? 0n;
@@ -260,6 +273,7 @@ usersRouter.get('/me/referrals', asyncRoute(async (req, res) => {
   res.json({
     referralCode: me.referralCode,
     referralLink: `paisapay://register?ref=${encodeURIComponent(me.referralCode)}`,
+    memberActivityVersion: 2,
     period: query.period,
     directCount: direct.length,
     indirectCount: indirect.length,
@@ -272,7 +286,7 @@ usersRouter.get('/me/referrals', asyncRoute(async (req, res) => {
     periodVerifiedDepositCount: periodDepositCount,
     todayVerifiedDepositCount: todayDepositCount,
     totalVerifiedDepositCount: lifetimeDepositCount,
-    totalVerifiedDepositsPaise: paiseJson(allDepositGroups.reduce((sum, row) => sum + (row._sum.amountPaise ?? 0n), 0n)),
+    totalVerifiedDepositsPaise: paiseJson(sumGroups(allDepositGroups) + sumGroups(allP2pDepositGroups)),
     totalEarningsPaise: paiseJson(earnedCommissionPaise),
     todayEarningsPaise: paiseJson(actualTodayCommissionPaise),
     periodEarningsPaise: paiseJson(todayCommissionPaise),
@@ -289,14 +303,14 @@ usersRouter.get('/me/referrals', asyncRoute(async (req, res) => {
     payoutRulesConfigured: false,
     rewardFundingMessage: 'Referral commissions and milestone rewards remain pending. A funded, approved payout program is not configured; no wallet balance is credited.',
     milestones: milestoneRules.map((rule) => {
-      const eligibleCount = rule.qualifyingTopUpPaise ? direct.filter((member) => (depositsByUser.get(member.id) ?? 0n) >= rule.qualifyingTopUpPaise!).length : 0;
+      const eligibleCount = rule.qualifyingTopUpPaise ? direct.filter((member) => (memberMetrics.get(member.id)?.verifiedTopUpPaise ?? 0n) >= rule.qualifyingTopUpPaise!).length : 0;
       const entry = milestoneEntries.get(`REFERRAL:MILESTONE:${req.auth!.userId}:${rule.key}`);
       return { key: rule.key, requiredReferrals: rule.requiredReferrals, qualifyingTopUpPaise: rule.qualifyingTopUpPaise === null ? null : paiseJson(rule.qualifyingTopUpPaise), rewardAmountPaise: paiseJson(rule.rewardAmountPaise), qualifiedReferrals: eligibleCount, status: entry?.status ?? (eligibleCount >= rule.requiredReferrals && rule.qualifyingTopUpPaise ? 'ELIGIBLE_PENDING_REVIEW' : rule.qualifyingTopUpPaise ? 'IN_PROGRESS' : 'SETUP_REQUIRED') };
     }),
     commissionHistory: commissionAll.map((entry) => ({ id: entry.id, amountPaise: paiseJson(entry.amountPaise), status: entry.status, kind: entry.kind, level: entry.level, createdAt: entry.createdAt })),
     members: [
-      ...direct.map((member) => ({ id: member.id, displayName: member.displayName, permittedIdentifier: mask(member.phoneE164), depth: 1, joinedAt: member.createdAt, verifiedTopUpPaise: paiseJson(depositsByUser.get(member.id) ?? 0n), earningsGeneratedPaise: paiseJson(commissionBySource.get(member.id) ?? 0n) })),
-      ...indirect.map((member) => ({ id: member.id, displayName: member.displayName, permittedIdentifier: mask(member.phoneE164), depth: 2, joinedAt: member.createdAt, verifiedTopUpPaise: paiseJson(depositsByUser.get(member.id) ?? 0n), earningsGeneratedPaise: paiseJson(commissionBySource.get(member.id) ?? 0n) })),
+      ...direct.map((member) => { const metrics = memberMetrics.get(member.id)!; return { id: member.id, displayName: member.displayName, permittedIdentifier: mask(member.phoneE164), depth: 1, joinedAt: member.createdAt, verifiedTopUpPaise: paiseJson(metrics.verifiedTopUpPaise), todayVerifiedTopUpPaise: paiseJson(metrics.todayVerifiedTopUpPaise), verifiedDepositCount: metrics.verifiedDepositCount, todayVerifiedDepositCount: metrics.todayVerifiedDepositCount, earningsGeneratedPaise: paiseJson(metrics.earningsGeneratedPaise), todayEarningsGeneratedPaise: paiseJson(metrics.todayEarningsGeneratedPaise) }; }),
+      ...indirect.map((member) => { const metrics = memberMetrics.get(member.id)!; return { id: member.id, displayName: member.displayName, permittedIdentifier: mask(member.phoneE164), depth: 2, joinedAt: member.createdAt, verifiedTopUpPaise: paiseJson(metrics.verifiedTopUpPaise), todayVerifiedTopUpPaise: paiseJson(metrics.todayVerifiedTopUpPaise), verifiedDepositCount: metrics.verifiedDepositCount, todayVerifiedDepositCount: metrics.todayVerifiedDepositCount, earningsGeneratedPaise: paiseJson(metrics.earningsGeneratedPaise), todayEarningsGeneratedPaise: paiseJson(metrics.todayEarningsGeneratedPaise) }; }),
     ],
   });
 }));
