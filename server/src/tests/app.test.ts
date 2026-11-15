@@ -170,6 +170,9 @@ describe('PaisaPay API foundation', () => {
     const referrals = spec.paths['/users/me/referrals'].get.responses['200'].content['application/json'].schema;
     expect(referrals.properties.members.type).toBe('array');
     expect(referrals.properties.commissionHistory.type).toBe('array');
+    expect(referrals.properties.memberActivityVersion).toEqual({ type: 'integer' });
+    expect(referrals.properties.members.items.properties.todayVerifiedTopUpPaise).toEqual({ type: 'integer' });
+    expect(referrals.properties.members.items.properties.todayEarningsGeneratedPaise).toEqual({ type: 'integer' });
     const announcement = spec.paths['/admin/notifications'].post.responses['201'].content['application/json'].schema;
     expect(announcement.properties.recipientCount).toEqual({ type: 'integer' });
     expect(announcement.properties.notifications).toBeUndefined();
