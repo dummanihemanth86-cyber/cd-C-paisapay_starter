@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1769F5"/><stop offset="1" stop-color="#073A9B"/></linearGradient>
+    <linearGradient id="wallet" x1="0" y1="0" x2="0.9" y2="1"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#D9EEFF"/></linearGradient>
+  </defs>
+  <rect width="1200" height="480" rx="38" fill="url(#bg)"/>
+  <circle cx="345" cy="95" r="130" fill="#48D5FF" opacity=".13"/>
+  <rect x="85" y="133" width="340" height="222" rx="32" fill="url(#wallet)"/>
+  <path d="M85 193h340v57H85z" fill="#CFE7FF"/>
+  <rect x="265" y="233" width="184" height="112" rx="30" fill="#20A7F7"/>
+  <circle cx="311" cy="289" r="11" fill="#E9FAFF"/><path d="M352 267h46m-46 43h46" stroke="#D9F6FF" stroke-width="12" stroke-linecap="round"/>
+  <text x="510" y="218" fill="#FFFFFF" font-family="Arial,sans-serif" font-size="78" font-weight="700" letter-spacing="1">PaisaPay</text>
+  <text x="516" y="290" fill="#A9E9FF" font-family="Arial,sans-serif" font-size="28" font-weight="700" letter-spacing="8">YOUR EVERYDAY WALLET</text>
+  <text x="518" y="348" fill="#E3F4FF" font-family="Arial,sans-serif" font-size="22" letter-spacing="4">SIMPLE  ·  SECURE  ·  FAST</text>
+</svg>

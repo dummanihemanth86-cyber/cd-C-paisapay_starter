@@ -3,26 +3,37 @@
     "name": "PaisaPay",
     "slug": "paisapay",
     "scheme": "paisapay",
-    "version": "1.0.0",
+    "version": "1.1.29",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/paisapay-neon-logo.png",
-      "imageWidth": 220,
+      "image": "./assets/paisapay-crowned-rupee-logo.png",
+      "imageWidth": 150,
       "resizeMode": "contain",
-      "backgroundColor": "#080F1F"
+      "backgroundColor": "#050505"
     },
     "android": {
       "package": "com.paisapay.app",
+      "versionCode": 40,
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
       "adaptiveIcon": {
-        "foregroundImage": "./assets/paisapay-neon-logo.png",
-        "backgroundColor": "#080F1F"
+        "foregroundImage": "./assets/paisapay-crowned-rupee-logo.png",
+        "backgroundColor": "#050505"
       }
     },
     "plugins": [
       "expo-secure-store",
       "expo-notifications"
     ],
-    "icon": "./assets/paisapay-neon-logo.png"
+    "icon": "./assets/paisapay-crowned-rupee-logo.png",
+    "extra": {
+      "eas": {
+        "projectId": "961acd30-3cd3-4860-9c98-4ec096c14372"
+      }
+    }
   }
 }

@@ -2,15 +2,26 @@
   "cli": { "version": ">= 16.0.0", "appVersionSource": "local" },
   "build": {
     "preview": { "environment": "preview", "distribution": "internal", "android": { "buildType": "apk" } },
+    "staging": {
+      "environment": "preview",
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://paisapay-api-staging.onrender.com",
+        "EXPO_PUBLIC_DEPLOYMENT_ENV": "staging"
+      },
+      "android": { "buildType": "apk" }
+    },
     "production-apk": {
       "environment": "production",
       "distribution": "internal",
       "autoIncrement": true,
+      "env": { "EXPO_PUBLIC_API_URL": "https://paisapay-api.onrender.com", "EXPO_PUBLIC_DEPLOYMENT_ENV": "production" },
       "android": { "buildType": "apk" }
     },
     "production": {
       "environment": "production",
       "autoIncrement": true,
+      "env": { "EXPO_PUBLIC_API_URL": "https://paisapay-api.onrender.com", "EXPO_PUBLIC_DEPLOYMENT_ENV": "production" },
       "android": { "buildType": "app-bundle" }
     }
   }

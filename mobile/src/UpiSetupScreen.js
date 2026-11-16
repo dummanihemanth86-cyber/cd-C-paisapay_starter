@@ -1,15 +1,38 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
+import { Animated, Image, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 
 export default function UpiSetupScreen({ upiProfile, upiInput, setUpiInput, upiNameInput, setUpiNameInput, saveUpiId, removeUpiId, working, go, colors }) {
   const entrance = useRef(new Animated.Value(0)).current;
   const [helpVisible, setHelpVisible] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [loginPassword, setLoginPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
   const { width, height } = useWindowDimensions();
   useEffect(() => {
     Animated.timing(entrance, { toValue: 1, duration: 380, useNativeDriver: true }).start();
     return () => entrance.stopAnimation();
   }, [entrance]);
   const saved = upiProfile?.detailsStatus === 'USER_CONFIRMED' && !!upiProfile?.upiId;
+  const passwordConfirmationSupported = upiProfile?.passwordConfirmationRequired === true;
+  const closePasswordConfirmation = () => {
+    setPasswordVisible(false);
+    setLoginPassword('');
+    setShowLoginPassword(false);
+    setPasswordError('');
+  };
+  const confirmAndSave = async () => {
+    if (!loginPassword) {
+      setPasswordError('Enter your PaisaPay login password to continue.');
+      return;
+    }
+    setPasswordError('');
+    const error = await saveUpiId(loginPassword);
+    setLoginPassword('');
+    setShowLoginPassword(false);
+    if (!error) closePasswordConfirmation();
+    else setPasswordError(error);
+  };
   return <>
   <ScrollView style={{ flex: 1, backgroundColor: colors.bg }} contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
     <Animated.View style={{ opacity: entrance }}>
@@ -35,8 +58,9 @@ export default function UpiSetupScreen({ upiProfile, upiInput, setUpiInput, upiN
           <Text style={[styles.helpLinkText, { color: colors.blue }]}>How to get your UPI ID? <Text style={{ color: colors.cyan }}>›</Text></Text>
         </TouchableOpacity>
         <View style={[styles.reminder, { backgroundColor: colors.warningSurface }]}><Text style={{ fontSize: 16, marginRight: 8 }}>ⓘ</Text><Text style={[styles.reminderText, { color: colors.warningText }]}>Check spelling carefully. PaisaPay saves these details for P2P matching; this does not confirm UPI ownership.</Text></View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel={saved ? 'Update UPI details' : 'Save UPI details'} disabled={working || !upiInput.trim() || !upiNameInput.trim()} onPress={saveUpiId} activeOpacity={0.86} style={[styles.primary, { backgroundColor: working || !upiInput.trim() || !upiNameInput.trim() ? colors.line : colors.blue }]}>
-          <Text style={styles.primaryText}>{working ? 'Saving details…' : saved ? '✓  Save UPI details' : 'Save UPI details  →'}</Text>
+        {!passwordConfirmationSupported && <View accessibilityRole="alert" style={[styles.reminder, { backgroundColor: colors.warningSurface }]}><Text style={[styles.reminderText, { color: colors.warningText }]}>UPI changes are waiting for a server update that verifies your login password. No changes will be sent until the server confirms password checks are active.</Text></View>}
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel={passwordConfirmationSupported ? (saved ? 'Update UPI details' : 'Save UPI details') : 'UPI details save requires a server update'} disabled={working || !passwordConfirmationSupported || !upiInput.trim() || !upiNameInput.trim()} onPress={() => { setLoginPassword(''); setShowLoginPassword(false); setPasswordError(''); setPasswordVisible(true); }} activeOpacity={0.86} style={[styles.primary, { backgroundColor: working || !passwordConfirmationSupported || !upiInput.trim() || !upiNameInput.trim() ? colors.line : colors.blue }]}>
+          <Text style={styles.primaryText}>{working ? 'Saving details…' : !passwordConfirmationSupported ? 'Server update required' : saved ? '✓  Save UPI details' : 'Save UPI details  →'}</Text>
         </TouchableOpacity>
         {saved && <TouchableOpacity accessibilityRole="button" disabled={working} onPress={removeUpiId} style={[styles.removeButton, { borderColor: colors.line }]}><Text style={{ color: colors.red, fontSize: 12, fontWeight: '800' }}>Remove saved UPI details</Text></TouchableOpacity>}
       </View>
@@ -62,21 +86,53 @@ export default function UpiSetupScreen({ upiProfile, upiInput, setUpiInput, upiN
       </View>
     </View>
   </Modal>
+  <Modal visible={passwordVisible} transparent animationType="fade" onRequestClose={closePasswordConfirmation} statusBarTranslucent>
+    <KeyboardAvoidingView style={styles.passwordBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <View style={[styles.passwordModal, { width: Math.min(width - 32, 440), backgroundColor: colors.card, borderColor: colors.line }]}>
+        <Text style={[styles.passwordTitle, { color: colors.ink }]}>Confirm it’s you</Text>
+        <Text style={[styles.passwordCopy, { color: colors.muted }]}>Enter your PaisaPay login password to save these UPI details. PaisaPay will not ask for your UPI PIN or payment OTP.</Text>
+        <View style={[styles.passwordInputWrap, { backgroundColor: colors.bg, borderColor: passwordError ? colors.red : colors.line }]}>
+          <TextInput
+            accessibilityLabel="PaisaPay login password"
+            value={loginPassword}
+            onChangeText={(value) => { setLoginPassword(value); setPasswordError(''); }}
+            placeholder="Login password"
+            placeholderTextColor={colors.muted}
+            secureTextEntry={!showLoginPassword}
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!working}
+            returnKeyType="done"
+            onSubmitEditing={confirmAndSave}
+            style={[styles.passwordInput, { color: colors.ink }]}
+          />
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={showLoginPassword ? 'Hide password' : 'Show password'} disabled={working} onPress={() => setShowLoginPassword((visible) => !visible)} hitSlop={10} style={styles.passwordVisibilityButton}>
+            <View style={[styles.eyeShape, { borderColor: colors.muted }]}><View style={[styles.eyePupil, { backgroundColor: colors.muted }]} />{!showLoginPassword && <View style={[styles.eyeSlash, { backgroundColor: colors.muted }]} />}</View>
+          </TouchableOpacity>
+        </View>
+        {!!passwordError && <Text accessibilityRole="alert" style={styles.passwordError}>{passwordError}</Text>}
+        <View style={styles.passwordActions}>
+          <TouchableOpacity accessibilityRole="button" disabled={working} onPress={closePasswordConfirmation} style={[styles.passwordCancel, { borderColor: colors.line }]}><Text style={{ color: colors.muted, fontWeight: '800' }}>Cancel</Text></TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" disabled={working || !loginPassword} onPress={confirmAndSave} style={[styles.passwordConfirm, { backgroundColor: working || !loginPassword ? colors.line : colors.blue }]}><Text style={styles.primaryText}>{working ? 'Saving…' : 'Confirm & save'}</Text></TouchableOpacity>
+        </View>
+      </View>
+    </KeyboardAvoidingView>
+  </Modal>
   </>;
 }
 
 const styles = StyleSheet.create({
   page: { padding: 16, paddingBottom: 32 },
-  hero: { borderWidth: 1, borderRadius: 24, padding: 20, marginBottom: 14, overflow: 'hidden', elevation: 8, shadowColor: '#176BFF', shadowOpacity: 0.18, shadowRadius: 15, shadowOffset: { width: 0, height: 7 } },
+  hero: { borderWidth: 1, borderRadius: 24, padding: 20, marginBottom: 14, overflow: 'hidden', elevation: 8, shadowColor: '#B88112', shadowOpacity: 0.18, shadowRadius: 15, shadowOffset: { width: 0, height: 7 } },
   heroTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   heroIcon: { width: 48, height: 48, borderRadius: 16, backgroundColor: '#FFFFFF18', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#FFFFFF33' },
   heroIconText: { fontSize: 23, color: '#FFFFFF', fontWeight: '900' },
-  securePill: { borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: '#16D9F526', borderWidth: 1, borderColor: '#16D9F555' },
-  secureText: { color: '#67E8F9', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  securePill: { borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: '#D9A93526', borderWidth: 1, borderColor: '#D9A93555' },
+  secureText: { color: '#F5CD69', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   heroTitle: { color: '#FFFFFF', fontSize: 23, fontWeight: '900', marginTop: 17 },
   heroCopy: { color: '#CBD5E1', fontSize: 12, lineHeight: 18, marginTop: 5 },
   heroFoot: { flexDirection: 'row', alignItems: 'center', marginTop: 15 },
-  heroDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#16D9F5', marginRight: 8 },
+  heroDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#F5CD69', marginRight: 8 },
   heroFootText: { color: '#E2E8F0', fontSize: 10, fontWeight: '700' },
   savedCard: { borderWidth: 1, borderRadius: 18, padding: 13, marginBottom: 13, flexDirection: 'row', alignItems: 'center', gap: 11 },
   savedIcon: { width: 38, height: 38, borderRadius: 13, backgroundColor: '#12B98122', alignItems: 'center', justifyContent: 'center' },
@@ -96,7 +152,7 @@ const styles = StyleSheet.create({
   helpLinkText: { fontSize: 11, fontWeight: '800' },
   reminder: { flexDirection: 'row', alignItems: 'flex-start', borderRadius: 13, padding: 11, marginTop: 15 },
   reminderText: { flex: 1, fontSize: 9, lineHeight: 14, fontWeight: '600' },
-  primary: { minHeight: 51, borderRadius: 15, alignItems: 'center', justifyContent: 'center', marginTop: 16, elevation: 4, shadowColor: '#176BFF', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
+  primary: { minHeight: 51, borderRadius: 15, alignItems: 'center', justifyContent: 'center', marginTop: 16, elevation: 4, shadowColor: '#B88112', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
   primaryText: { color: '#FFFFFF', fontSize: 12, fontWeight: '900' },
   removeButton: { minHeight: 43, borderWidth: 1, borderRadius: 13, alignItems: 'center', justifyContent: 'center', marginTop: 9 },
   infoCard: { borderWidth: 1, borderRadius: 20, padding: 16 },
@@ -107,6 +163,20 @@ const styles = StyleSheet.create({
   depositLink: { minHeight: 42, borderWidth: 1, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 14 },
   helpBackdrop: { flex: 1, backgroundColor: '#020817D9', alignItems: 'center', justifyContent: 'center', padding: 14 },
   helpModal: { borderWidth: 1, borderRadius: 22, padding: 14, overflow: 'hidden' },
+  passwordBackdrop: { flex: 1, backgroundColor: '#020817D9', alignItems: 'center', justifyContent: 'center', padding: 16 },
+  passwordModal: { borderWidth: 1, borderRadius: 22, padding: 20, elevation: 16 },
+  passwordTitle: { fontSize: 19, fontWeight: '900' },
+  passwordCopy: { fontSize: 12, lineHeight: 18, marginTop: 7 },
+  passwordInputWrap: { minHeight: 50, borderWidth: 1, borderRadius: 14, paddingHorizontal: 13, marginTop: 17, flexDirection: 'row', alignItems: 'center' },
+  passwordInput: { flex: 1, minHeight: 48, fontSize: 14, paddingVertical: 8 },
+  passwordVisibilityButton: { width: 34, height: 42, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+  eyeShape: { width: 21, height: 14, borderWidth: 1.7, borderRadius: 10, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '-5deg' }] },
+  eyePupil: { width: 5, height: 5, borderRadius: 3 },
+  eyeSlash: { position: 'absolute', width: 25, height: 2, borderRadius: 1, transform: [{ rotate: '42deg' }] },
+  passwordError: { color: '#B91C1C', fontSize: 11, marginTop: 8, fontWeight: '700' },
+  passwordActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 9, marginTop: 17 },
+  passwordCancel: { minHeight: 45, borderWidth: 1, borderRadius: 13, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 17 },
+  passwordConfirm: { minHeight: 45, borderRadius: 13, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 },
   helpModalHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   helpTitle: { fontSize: 17, fontWeight: '900' },
   helpSubtitle: { fontSize: 10, lineHeight: 15, marginTop: 4 },
