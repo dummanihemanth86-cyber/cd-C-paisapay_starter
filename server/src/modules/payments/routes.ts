@@ -322,7 +322,23 @@ paymentsRouter.get('/deposits', asyncRoute(async (req, res) => {
   const db = databaseRequired();
   if (env.manualUpiOperationsEnabled) await expireUnpaidUpiDeposits(db);
   const deposits = await db.deposit.findMany({ where: { userId: req.auth!.userId }, include: { manualPaymentClaim: { select: { status: true, createdAt: true, reviewedAt: true, reviewReason: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
-  res.json({ currency: 'INR', deposits: deposits.map((item) => ({ ...item, amountPaise: Number(item.amountPaise), method: Object.keys(methods).find((name) => methods[name as keyof typeof methods].enum === item.method) ?? (item.method === 'MOBIKWIK' ? 'MobiKwik (legacy)' : item.method) })) });
+  const rewardKeys = deposits.filter((item) => item.method === 'UPI').map((item) => `UPI_DEPOSIT_REWARD:${item.id}`);
+  const rewards = rewardKeys.length
+    ? await db.ledgerTransaction.findMany({ where: { idempotencyKey: { in: rewardKeys } }, select: { idempotencyKey: true, metadata: true } })
+    : [];
+  const rewardByDeposit = new Map(rewards.map((item) => [item.idempotencyKey.slice('UPI_DEPOSIT_REWARD:'.length), recordedRewardAmountPaise(item.metadata)]));
+  res.json({ currency: 'INR', deposits: deposits.map((item) => {
+    const amountPaise = Number(item.amountPaise);
+    const rewardAmountPaise = rewardByDeposit.get(item.id) ?? 0;
+    return {
+      ...item,
+      amountPaise,
+      method: Object.keys(methods).find((name) => methods[name as keyof typeof methods].enum === item.method) ?? (item.method === 'MOBIKWIK' ? 'MobiKwik (legacy)' : item.method),
+      rewardRateBps: item.method === 'UPI' ? 620 : 0,
+      rewardAmountPaise,
+      creditedAmountPaise: item.status === 'COMPLETED' ? amountPaise + rewardAmountPaise : 0,
+    };
+  }) });
 }));
 
 paymentsRouter.post('/deposits/:id/cancel', asyncRoute(async (req, res) => {
@@ -504,7 +520,7 @@ paymentsRouter.post('/admin/reconciliation/claims/:claimId/review', requireAdmin
     if (claim.transactionReference) await tx.reconciliationRecord.updateMany({ where: { provider: 'MANUAL_UPI', providerReference: claim.transactionReference, status: 'PENDING_REVIEW' }, data: { status: 'APPROVED' } });
     else await tx.reconciliationRecord.create({ data: { provider: 'MANUAL_UPI', providerReference: input.verifiedTransactionReference!, internalReference: claim.deposit.merchantReference, amountPaise: claim.deposit.amountPaise, currency: 'INR', status: 'APPROVED' } });
     await tx.auditLog.create({ data: { actorId: req.auth!.userId, action: 'MANUAL_PAYMENT_CLAIM_APPROVED', target: `DEPOSIT:${claim.depositId}`, reason: input.reason, metadata: { claimId: claim.id, evidenceReference: input.evidenceReference, amountPaise: input.verifiedAmountPaise, currency: 'INR', receiverConfirmed: true } } });
-    await tx.notification.create({ data: { userId: claim.userId, title: 'Payment verified', body: rewardAmountPaise > 0n ? `Finance verified your payment. Your deposit is complete and ${Number(rewardAmountPaise) / 100} INR development reward was credited.` : 'Finance verified your payment against merchant records. Your deposit is complete.' } });
+    await tx.notification.create({ data: { userId: claim.userId, title: 'Payment verified', body: rewardAmountPaise > 0n ? `Finance verified your payment. Your deposit is complete and a 6.2% verified-deposit reward of ₹${(Number(rewardAmountPaise) / 100).toFixed(2)} was credited.` : 'Finance verified your payment against recipient-side records. Your deposit principal is complete; no reward was credited because the reward program is disabled.' } });
     return { claim: updatedClaim, deposit: updatedDeposit, ledgerTransactionId: ledger.id, rewardAmountPaise };
   }, { isolationLevel: 'Serializable' });
   res.json({ claim: { id: result.claim.id, status: result.claim.status, reviewedAt: result.claim.reviewedAt }, deposit: { id: result.deposit.id, status: result.deposit.status, amountPaise: Number(result.deposit.amountPaise), currency: result.deposit.currency }, rewardAmountPaise: Number(result.rewardAmountPaise), ledgerTransactionId: result.ledgerTransactionId });
@@ -524,8 +540,24 @@ paymentsRouter.get('/deposits/:id', asyncRoute(async (req, res) => {
       throw new HttpError(503, 'PAYMENT_STATUS_CHECK_FAILED', 'Cashfree sandbox payment status could not be checked. The current order status is unchanged.');
     }
   }
-  res.json({ deposit: { ...deposit, amountPaise: Number(deposit.amountPaise) } });
+  const reward = await db.ledgerTransaction.findUnique({ where: { idempotencyKey: `UPI_DEPOSIT_REWARD:${deposit.id}` }, select: { metadata: true } });
+  const amountPaise = Number(deposit.amountPaise);
+  const rewardAmountPaise = recordedRewardAmountPaise(reward?.metadata);
+  res.json({ deposit: {
+    ...deposit,
+    amountPaise,
+    rewardRateBps: deposit.method === 'UPI' ? 620 : 0,
+    rewardAmountPaise,
+    creditedAmountPaise: deposit.status === 'COMPLETED' ? amountPaise + rewardAmountPaise : 0,
+  } });
 }));
+
+function recordedRewardAmountPaise(metadata: unknown): number {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return 0;
+  const value = (metadata as Record<string, unknown>).amountPaise;
+  const amount = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : 0;
+  return Number.isSafeInteger(amount) && amount > 0 ? amount : 0;
+}
 
 paymentsRouter.post('/wallet-references', asyncRoute(async (req, res) => {
   const input = z.object({ method: z.enum(['Paytm', 'PhonePe', 'Navi']), reference: z.string().trim().regex(/^[\w.\-]+@[\w.\-]+$/).max(120) }).strict().parse(req.body);

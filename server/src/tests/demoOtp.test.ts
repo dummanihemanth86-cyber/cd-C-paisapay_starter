@@ -101,8 +101,8 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
     const methods = await request(app).get('/api/v1/wallet-methods').set('Authorization', `Bearer ${verified.body.accessToken}`).expect(200);
     expect(methods.body.livePaymentsEnabled).toBe(false);
     expect(methods.body.methods.every((method: { available: boolean }) => !method.available)).toBe(true);
-    expect(methods.body.upiDeposit.rewardPercentBps).toBe(1700);
-    expect(methods.body.upiDeposit.rewardEnabled).toBe(env.upiDepositRewardEnabled);
+    expect(methods.body.upiDeposit.rewardPercentBps).toBe(620);
+    expect(methods.body.upiDeposit.rewardEnabled).toBe(env.p2pOrderRewardEnabled);
 
     expect(methods.body.methods.some((method: { name: string }) => method.name === 'MobiKwik')).toBe(false);
     await request(app).get('/api/v1/wallet-links').set('Authorization', `Bearer ${verified.body.accessToken}`).expect(404);

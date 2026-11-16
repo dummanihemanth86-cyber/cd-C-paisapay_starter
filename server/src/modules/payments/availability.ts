@@ -175,12 +175,12 @@ export async function getPaymentMethodAvailability(options: { includeFinancialOp
       receiverVpa,
       minAmountPaise: env.minDepositPaise,
       maxAmountPaise: env.maxDepositPaise,
-      rewardPercentBps: env.upiDepositRewardPercentBps,
-      rewardEnabled: env.upiDepositRewardEnabled,
+      rewardPercentBps: 620,
+      rewardEnabled: env.p2pOrderRewardEnabled,
       ...(options.includeFinancialOperations ? { available: manualDepositAvailable } : {}),
-      rewardMessage: env.upiDepositRewardEnabled
-        ? 'Development test rewards are funded from the local reward pool and are credited only after an eligible UPI deposit is independently verified, subject to available pool balance.'
-        : 'A reward estimate can be shown, but no funded deposit reward program is active; no reward will be credited.',
+      rewardMessage: env.p2pOrderRewardEnabled
+        ? 'The same 6.2% reward applies to every independently verified INR deposit, including manual UPI and matched P2P deposits, when the dedicated reward fund has enough balance.'
+        : 'The 6.2% reward program is disabled. A verified deposit credits its principal only; no reward will be credited.',
       paymentInitiation: manualDepositAvailable ? 'UPI_INTENT' : 'UNAVAILABLE',
       verificationMode: 'MANUAL_RECONCILIATION',
       automaticVerificationAvailable: false,
@@ -189,6 +189,25 @@ export async function getPaymentMethodAvailability(options: { includeFinancialOp
         : !receiverVpa
           ? `UPI deposits are unavailable because no recipient is configured for the platform. ${env.manualUpiOperationsEnabled ? '' : 'Manual UPI operations are also disabled by the server safety gate. '}No deposit request can be created.`
           : 'Standard UPI deposits are unavailable because manual UPI operations are disabled by the server safety gate. No deposit request can be created.',
+    },
+    verifiedDepositReward: {
+      percentBps: 620,
+      enabled: env.p2pOrderRewardEnabled,
+      rewardFundAccountMapped: Boolean(env.p2pOrderRewardFundAccountId),
+      fundingSource: env.p2pOrderRewardEnabled ? env.p2pOrderRewardFundingSource : null,
+      message: env.p2pOrderRewardEnabled
+        ? 'A 6.2% reward may be credited to any account after independent deposit verification, only when the mapped dedicated INR REWARD_FUND ledger account has sufficient balance.'
+        : 'Verified-deposit rewards are disabled. No additional reward will be credited.',
+    },
+    // Backward-compatible alias for older clients that call this the P2P reward.
+    p2pOrderReward: {
+      percentBps: 620,
+      enabled: env.p2pOrderRewardEnabled,
+      rewardFundAccountMapped: Boolean(env.p2pOrderRewardFundAccountId),
+      fundingSource: env.p2pOrderRewardEnabled ? env.p2pOrderRewardFundingSource : null,
+      message: env.p2pOrderRewardEnabled
+        ? 'A 6.2% verified-deposit reward may be credited after independent receipt verification when the mapped dedicated INR REWARD_FUND has enough balance.'
+        : 'Verified-deposit rewards are disabled. No additional reward will be credited.',
     },
     // A configured Cashfree sandbox is useful for checkout testing but is not
     // a live payment route and never credits redeemable funds.

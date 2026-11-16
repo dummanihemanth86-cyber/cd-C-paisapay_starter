@@ -14,6 +14,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
   const previousDepositReceiver = env.depositReceiverUpiId;
   const previousFinancialOperationsEnabled = env.financialOperationsEnabled;
   const previousManualUpiOperationsEnabled = env.manualUpiOperationsEnabled;
+  const previousDepositRewardEnabled = env.p2pOrderRewardEnabled;
   const customerPhone = `+919${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '7')}`;
   const adminPhone = `+918${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '6')}`;
   const referrerPhone = `+917${randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '5')}`;
@@ -39,6 +40,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     await db.$connect();
     env.financialOperationsEnabled = true;
     env.manualUpiOperationsEnabled = true;
+    env.p2pOrderRewardEnabled = false;
     env.depositReceiverUpiId = 'test-only@okaxis';
     const [customer, admin, referrer, ancestor] = await Promise.all([
       db.user.create({ data: { phoneE164: customerPhone, displayName: 'UPI Test Customer' } }),
@@ -81,6 +83,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
   afterAll(async () => {
     env.financialOperationsEnabled = previousFinancialOperationsEnabled;
     env.manualUpiOperationsEnabled = previousManualUpiOperationsEnabled;
+    env.p2pOrderRewardEnabled = previousDepositRewardEnabled;
     env.depositReceiverUpiId = previousDepositReceiver;
     if (!customerId || !adminId) return;
     await db.$transaction(async (tx) => {
@@ -198,14 +201,14 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     }).expect(200);
     expect(approved.body.claim.status).toBe('APPROVED');
     expect(approved.body.deposit.status).toBe('COMPLETED');
-    const expectedRewardPaise = env.upiDepositRewardEnabled ? 1700 : 0;
+    const expectedRewardPaise = env.p2pOrderRewardEnabled ? 620 : 0;
     expect(approved.body.rewardAmountPaise).toBe(expectedRewardPaise);
     expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `MANUAL_DEPOSIT:${depositId}` } })).toBe(1);
-    expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `UPI_DEPOSIT_REWARD:${depositId}` } })).toBe(env.upiDepositRewardEnabled ? 1 : 0);
+    expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `UPI_DEPOSIT_REWARD:${depositId}` } })).toBe(env.p2pOrderRewardEnabled ? 1 : 0);
     const balance = await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200);
     expect(balance.body.availablePaise).toBe(10000 + expectedRewardPaise);
     expect(balance.body.rewardProfitPaise).toBe(expectedRewardPaise);
-    expect(await db.ledgerTransaction.count({ where: { referenceId: depositId, eventType: 'UPI_DEPOSIT_REWARD' } })).toBe(env.upiDepositRewardEnabled ? 1 : 0);
+    expect(await db.ledgerTransaction.count({ where: { referenceId: depositId, eventType: 'UPI_DEPOSIT_REWARD' } })).toBe(env.p2pOrderRewardEnabled ? 1 : 0);
     const referralEntries = await db.commissionEntry.findMany({ where: { sourceUserId: customerId }, orderBy: { level: 'asc' } });
     expect(referralEntries.map((entry) => ({ level: entry.level, kind: entry.kind, amountPaise: Number(entry.amountPaise), status: entry.status }))).toEqual([
       { level: 1, kind: 'DIRECT_COMMISSION', amountPaise: 40, status: 'PENDING' },
@@ -384,7 +387,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
       verifiedAmountPaise: 10_000, verifiedCurrency: 'INR', receiverConfirmed: true,
     }).expect(200);
     expect(approved.body.deposit.status).toBe('COMPLETED');
-    const expectedRewardPaise = env.upiDepositRewardEnabled ? 1_700 : 0;
+    const expectedRewardPaise = env.p2pOrderRewardEnabled ? 620 : 0;
     expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(10_000 + expectedRewardPaise);
     expect(await db.ledgerTransaction.count({ where: { idempotencyKey: `MANUAL_DEPOSIT:${createdDepositId}` } })).toBe(1);
     await request(app).post(reviewPath).set(adminAuth).send({

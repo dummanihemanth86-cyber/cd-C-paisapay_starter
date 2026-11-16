@@ -9,7 +9,7 @@ export const ADMIN_SETTLEMENT_CASH_ID = '00000000-0000-4000-8000-000000000102';
 export function hashExternalReference(reference: string): string {
   return createHash('sha256').update(reference.trim().normalize('NFKC')).digest('hex');
 }
-async function requireActiveSuperAdmin(tx: Prisma.TransactionClient, userId: string) {
+export async function requireActiveSuperAdmin(tx: Prisma.TransactionClient, userId: string) {
   const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true, status: true, adminRole: { select: { role: true } } } });
   if (!user || user.status !== 'ACTIVE' || user.adminRole?.role !== 'SUPER_ADMIN') {
     throw new HttpError(403, 'SUPER_ADMIN_REQUIRED', 'An active SUPER_ADMIN account is required.');

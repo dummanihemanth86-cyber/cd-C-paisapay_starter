@@ -16,9 +16,18 @@ const schema = z.object({
   MAX_DEPOSIT_PAISE: z.coerce.number().int().positive().default(1_000_000),
   P2P_WITHDRAWAL_OFFER_TTL_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
   EXPO_PUSH_ACCESS_TOKEN: z.string().trim().min(1).max(512).optional(),
-  UPI_DEPOSIT_REWARD_PERCENT_BPS: z.coerce.number().int().min(0).max(10_000).default(1_700),
+  UPI_DEPOSIT_REWARD_PERCENT_BPS: z.coerce.number().int().min(0).max(10_000).default(620),
   UPI_DEPOSIT_REWARD_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   UPI_DEPOSIT_REWARD_FUNDING_SOURCE: z.string().trim().default(''),
+  P2P_ORDER_REWARD_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  P2P_ORDER_REWARD_FUND_ACCOUNT_ID: z.preprocess(
+    (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().uuid().optional(),
+  ),
+  P2P_ORDER_REWARD_FUNDING_SOURCE: z.enum(['', 'DEDICATED_REWARD_FUND']).default(''),
+  P2P_ORDER_REWARD_PRODUCTION_APPROVED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  P2P_ORDER_REWARD_EXTERNAL_RECONCILIATION_VERIFIED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  REWARD_FUND_FUNDING_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   USER_APP_RELEASE_VERSION: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
     z.string().trim().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/).optional()),
   USER_APP_RELEASE_BUILD_CODE: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
@@ -197,6 +206,19 @@ if (values.UPI_DEPOSIT_REWARD_ENABLED && !['development', 'test'].includes(value
 if (values.UPI_DEPOSIT_REWARD_ENABLED && (values.UPI_DEPOSIT_REWARD_PERCENT_BPS <= 0 || values.UPI_DEPOSIT_REWARD_FUNDING_SOURCE !== 'DEVELOPMENT_TEST_FUND')) {
   throw new Error('Enabled UPI deposit rewards require a positive percentage and UPI_DEPOSIT_REWARD_FUNDING_SOURCE=DEVELOPMENT_TEST_FUND.');
 }
+if (values.P2P_ORDER_REWARD_ENABLED && (!values.P2P_ORDER_REWARD_FUND_ACCOUNT_ID || values.P2P_ORDER_REWARD_FUNDING_SOURCE !== 'DEDICATED_REWARD_FUND')) {
+  throw new Error('Enabled verified-deposit rewards require P2P_ORDER_REWARD_FUND_ACCOUNT_ID mapped to a funded INR REWARD_FUND ledger account and P2P_ORDER_REWARD_FUNDING_SOURCE=DEDICATED_REWARD_FUND.');
+}
+if (values.NODE_ENV === 'production' && !isExplicitRenderStaging && values.P2P_ORDER_REWARD_FUND_ACCOUNT_ID === '00000000-0000-4000-8000-000000000099') {
+  throw new Error('The development-only reward account cannot fund production verified-deposit rewards.');
+}
+if (values.NODE_ENV === 'production' && values.P2P_ORDER_REWARD_ENABLED && !isExplicitRenderStaging
+  && (!values.P2P_ORDER_REWARD_PRODUCTION_APPROVED || !values.P2P_ORDER_REWARD_EXTERNAL_RECONCILIATION_VERIFIED)) {
+  throw new Error('Production verified-deposit rewards require explicit approval and verified external reconciliation of the dedicated reward fund.');
+}
+if (!values.P2P_ORDER_REWARD_ENABLED && (values.P2P_ORDER_REWARD_PRODUCTION_APPROVED || values.P2P_ORDER_REWARD_EXTERNAL_RECONCILIATION_VERIFIED)) {
+  throw new Error('Verified-deposit reward production approvals require P2P_ORDER_REWARD_ENABLED=true.');
+}
 
 export const env = {
   nodeEnv: values.NODE_ENV,
@@ -214,6 +236,12 @@ export const env = {
   upiDepositRewardPercentBps: values.UPI_DEPOSIT_REWARD_PERCENT_BPS,
   upiDepositRewardEnabled: values.UPI_DEPOSIT_REWARD_ENABLED,
   upiDepositRewardFundingSource: values.UPI_DEPOSIT_REWARD_FUNDING_SOURCE,
+  p2pOrderRewardEnabled: values.P2P_ORDER_REWARD_ENABLED,
+  p2pOrderRewardFundAccountId: values.P2P_ORDER_REWARD_FUND_ACCOUNT_ID,
+  p2pOrderRewardFundingSource: values.P2P_ORDER_REWARD_FUNDING_SOURCE,
+  p2pOrderRewardProductionApproved: values.P2P_ORDER_REWARD_PRODUCTION_APPROVED,
+  p2pOrderRewardExternalReconciliationVerified: values.P2P_ORDER_REWARD_EXTERNAL_RECONCILIATION_VERIFIED,
+  rewardFundFundingEnabled: values.REWARD_FUND_FUNDING_ENABLED,
   userAppReleaseVersion: values.USER_APP_RELEASE_VERSION,
   userAppReleaseBuildCode: values.USER_APP_RELEASE_BUILD_CODE,
   userAppReleaseMinSupportedBuildCode: values.USER_APP_RELEASE_MIN_SUPPORTED_BUILD_CODE,

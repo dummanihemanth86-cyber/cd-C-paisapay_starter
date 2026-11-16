@@ -52,6 +52,7 @@ describe('PaisaPay API foundation', () => {
       ['GET', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credits'],
       ['POST', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credit'],
       ['GET', '/admin/wallet/credits/requests'], ['GET', '/admin/wallet/funding/requests'], ['GET', '/admin/wallet/reconciliation'],
+      ['GET', '/admin/reward-fund/readiness'], ['GET', '/admin/reward-fund/fundings'], ['POST', '/admin/reward-fund/fundings'],
     ];
     for (const [method, path] of protectedRoutes) {
       const response = await request(app)[method.toLowerCase() as 'get' | 'post'](`/api/v1${path}`);
@@ -109,9 +110,9 @@ describe('PaisaPay API foundation', () => {
       'post /admin/wallet/credits/requests', 'post /admin/wallet/credits/requests/{id}/decision',
       'post /admin/wallet/funding/requests', 'post /admin/wallet/funding/requests/{id}/decision',
       'patch /admin/referrals/config', 'patch /admin/referrals/milestones/{key}', 'post /admin/support/tickets/{id}/reply',
-      'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}',
+      'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}', 'post /admin/reward-fund/fundings',
     ];
-    expect(new Set(documentedJsonHandlers).size).toBe(42);
+    expect(new Set(documentedJsonHandlers).size).toBe(43);
     for (const entry of documentedJsonHandlers) {
       const separator = entry.indexOf(' ');
       const method = entry.slice(0, separator);
@@ -252,8 +253,10 @@ describe('PaisaPay API foundation', () => {
     expect(response.body.upiDeposit.receiverVpa).toBe(env.depositReceiverUpiId ?? null);
     expect(response.body.upiDeposit.paymentInitiation).toBe(env.depositReceiverUpiId ? 'UPI_INTENT' : 'UNAVAILABLE');
     if (!env.depositReceiverUpiId) expect(response.body.upiDeposit.message).toMatch(/unavailable because no recipient is configured/i);
-    expect(response.body.upiDeposit.rewardPercentBps).toBe(1700);
-    expect(response.body.upiDeposit.rewardEnabled).toBe(env.upiDepositRewardEnabled);
+    expect(response.body.upiDeposit.rewardPercentBps).toBe(620);
+    expect(response.body.verifiedDepositReward).toMatchObject({ percentBps: 620, enabled: false });
+    expect(response.body.p2pOrderReward).toMatchObject({ percentBps: 620, enabled: false });
+    expect(response.body.upiDeposit.rewardEnabled).toBe(env.p2pOrderRewardEnabled);
     expect(response.body.methods.find((item: { name: string }) => item.name === 'PhonePe').buyEnabled).toBe(false);
     expect(response.body.methods.every((item: { available: boolean }) => item.available === false)).toBe(true);
     expect(response.body.availabilityMessage).toMatch(/unavailable/);

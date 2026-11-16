@@ -16,6 +16,7 @@ import { MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from 
 import { createCreditRequest, decideCreditRequest, createFundingRequest, decideFundingRequest, ADMIN_ADJUSTMENT_FUND_ID, ADMIN_SETTLEMENT_CASH_ID } from './walletCreditWorkflow.js';
 import { assertPhonePeCreditsAdmin, createPhonePeWalletCreditRequest, decidePhonePeWalletCredit, readPhonePeWalletCreditReadiness } from './phonePeWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
+import { readRewardFundReadiness, recordRewardFundFunding } from './rewardFundFunding.js';
 import { createOtpChallenge } from '../auth/routes.js';
 import { buildUserLookupConditions } from './userLookup.js';
 
@@ -219,7 +220,7 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     OPERATIONS: [...common, 'users', 'deposits', 'withdrawals', 'p2p', 'providers', 'referrals', 'support', 'audit'],
     FINANCE: [...common, 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'commissions', 'rewardRules', 'disputes', 'reconciliation'],
     ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'audit', 'health', 'reports', 'notifications', 'settings'],
-    SUPER_ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'admins', 'audit', 'health', 'reports', 'notifications', 'settings'],
+    SUPER_ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'rewardFund', 'admins', 'audit', 'health', 'reports', 'notifications', 'settings'],
   };
   const walletAdjustmentAllowed = role === 'ADMIN' && env.walletAdjustmentAdminUserId === req.auth!.userId;
   const walletCreditsAllowed = role === 'SUPER_ADMIN';
@@ -239,6 +240,7 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
   const phonePeCreditsAllowed = walletCreditsAllowed && phonePeAdmin?.phoneE164 === env.adminPhonePeCreditsAdminPhoneE164;
   const allowedSections = [...(roleViews[role] || common)];
   if (walletCreditsAllowed) for (const section of ['walletCredits', 'walletCreditApprovals', 'walletCreditRejections', 'walletFunding', 'walletFundingApprovals', 'walletFundingRejections', 'walletReconciliation']) if (!allowedSections.includes(section)) allowedSections.push(section);
+  if (walletCreditsAllowed && !allowedSections.includes('rewardFund')) allowedSections.push('rewardFund');
   if (phonePeCreditsAllowed && !allowedSections.includes('phonePeCredits')) allowedSections.push('phonePeCredits');
   res.json({
     userId: req.auth!.userId,
@@ -251,6 +253,11 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     walletAdjustmentsEnabled: role === 'SUPER_ADMIN' ? env.walletAdjustmentsEnabled && walletProductionAuthorized : walletAdjustmentAllowed && env.walletAdjustmentsEnabled && env.financialOperationsEnabled,
     walletCreditsAllowed,
     adminWalletFundingEnabled: env.adminWalletFundingEnabled,
+    rewardFundFundingEnabled: role === 'SUPER_ADMIN' && env.rewardFundFundingEnabled,
+    depositRewardEnabled: env.p2pOrderRewardEnabled
+      && Boolean(env.p2pOrderRewardFundAccountId)
+      && env.p2pOrderRewardFundingSource === 'DEDICATED_REWARD_FUND',
+    depositRewardRateBps: 620,
     adminWalletCreditsEnabled: env.adminWalletCreditsEnabled,
     adminWalletProductionApproved: env.adminWalletProductionApproved,
     adminWalletExternalReconciliationVerified: env.adminWalletExternalReconciliationVerified,
@@ -596,6 +603,84 @@ adminRouter.get('/wallet/funding/requests', asyncRoute(async (req, res) => {
     db.adminWalletFundingRequest.count({ where }),
   ]);
   res.json({ requests: requests.map(walletWorkflowRequestForApi), total, page: input.page, pageSize: input.pageSize });
+}));
+
+type RewardFundRecordForApi = {
+  id: string;
+  verifiedByUserId: string;
+  amountPaise: bigint;
+  sourceAccountLabel: string;
+  externalReferenceHash: string;
+  evidenceReference: string;
+  evidenceSha256: string;
+  statementDate: Date;
+  reason: string;
+  ledgerTransactionId: string;
+  createdAt: Date;
+  verifiedBy?: { publicId: string | null; displayName: string | null };
+  ledgerTransaction?: { id: string; createdAt: Date };
+};
+
+function rewardFundRecordForApi(record: RewardFundRecordForApi) {
+  return {
+    id: record.id,
+    verifiedByUserId: record.verifiedByUserId,
+    amountPaise: Number(record.amountPaise),
+    sourceAccountLabel: record.sourceAccountLabel,
+    externalReferenceHash: record.externalReferenceHash,
+    evidenceReference: record.evidenceReference,
+    evidenceSha256: record.evidenceSha256,
+    statementDate: record.statementDate,
+    reason: record.reason,
+    ledgerTransactionId: record.ledgerTransactionId,
+    createdAt: record.createdAt,
+    ...(record.verifiedBy ? { verifiedBy: record.verifiedBy } : {}),
+    ...(record.ledgerTransaction ? { ledgerTransaction: record.ledgerTransaction } : {}),
+  };
+}
+
+adminRouter.get('/reward-fund/readiness', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  res.json(await readRewardFundReadiness(databaseRequired()));
+}));
+
+adminRouter.get('/reward-fund/fundings', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const input = pageInput.parse(req.query);
+  const db = databaseRequired();
+  const [records, total] = await Promise.all([
+    db.rewardFundFundingRecord.findMany({
+      orderBy: { createdAt: 'desc' }, skip: (input.page - 1) * input.pageSize, take: input.pageSize,
+      include: { verifiedBy: { select: { publicId: true, displayName: true } }, ledgerTransaction: { select: { id: true, createdAt: true } } },
+    }),
+    db.rewardFundFundingRecord.count(),
+  ]);
+  res.json({ records: records.map(rewardFundRecordForApi), total, page: input.page, pageSize: input.pageSize });
+}));
+
+adminRouter.post('/reward-fund/fundings', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
+  const input = z.object({
+    amountPaise: z.number().int().positive().max(100_000_000_000),
+    sourceAccountLabel: z.string().trim().min(3).max(100).refine((value) => !/\d{5,}/.test(value), 'Use a short account label, never a complete account number.'),
+    externalReference: z.string().trim().min(6).max(200),
+    evidenceReference: z.string().trim().min(3).max(160),
+    evidenceSha256: z.string().regex(/^[a-fA-F0-9]{64}$/),
+    statementDate: z.string().date(),
+    reason: z.string().trim().min(8).max(500),
+    clearedFundsVerified: z.literal(true),
+  }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => recordRewardFundFunding(tx, {
+    verifiedByUserId: req.auth!.userId, idempotencyKey, ...input,
+    evidenceSha256: input.evidenceSha256.toLowerCase(), statementDate: new Date(`${input.statementDate}T00:00:00.000Z`),
+  }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(result.replayed ? 200 : 201).json({
+    record: rewardFundRecordForApi(result.record),
+    replayed: result.replayed,
+    message: result.replayed ? 'This verified funding was already recorded; no duplicate ledger entry was created.' : 'Admin-attested cleared funding was recorded as a balanced cash-to-reward-reserve ledger journal.',
+  });
 }));
 
 adminRouter.post('/wallet/funding/requests', adminMutationLimit, asyncRoute(async (req, res) => {

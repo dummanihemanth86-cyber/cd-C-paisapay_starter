@@ -46,5 +46,17 @@ services:
         sync: false
       - key: UPI_DEPOSIT_REWARD_ENABLED
         value: "false"
+      - key: P2P_ORDER_REWARD_ENABLED
+        value: "false"
+      - key: P2P_ORDER_REWARD_FUND_ACCOUNT_ID
+        value: "00000000-0000-4000-8000-000000000103"
+      - key: P2P_ORDER_REWARD_FUNDING_SOURCE
+        value: DEDICATED_REWARD_FUND
+      - key: P2P_ORDER_REWARD_PRODUCTION_APPROVED
+        value: "false"
+      - key: P2P_ORDER_REWARD_EXTERNAL_RECONCILIATION_VERIFIED
+        value: "false"
+      - key: REWARD_FUND_FUNDING_ENABLED
+        value: "false"
       - key: WELCOME_BONUS_ENABLED
         value: "false"

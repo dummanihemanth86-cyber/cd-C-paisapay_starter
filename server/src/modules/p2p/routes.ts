@@ -214,11 +214,11 @@ function p2pRewardPreview(amountPaise: bigint) {
   return {
     percentBps: P2P_ORDER_REWARD_PERCENT_BPS,
     estimatedPaise: Number(amountPaise * BigInt(P2P_ORDER_REWARD_PERCENT_BPS) / 10_000n),
-    enabled: env.upiDepositRewardEnabled,
-    status: env.upiDepositRewardEnabled ? 'PENDING_PAYMENT_VERIFICATION' : 'PENDING_VERIFICATION_AND_FUNDED_PROGRAM',
-    message: env.upiDepositRewardEnabled
-      ? 'Estimated 6.2% order reward; credited after independent payment verification if the funded reward pool has enough balance.'
-      : 'Estimated 6.2% order reward; no reward program is funded/enabled, so this is not guaranteed wallet credit.',
+    enabled: env.p2pOrderRewardEnabled,
+    status: env.p2pOrderRewardEnabled ? 'PENDING_PAYMENT_VERIFICATION_AND_FUND_CHECK' : 'DISABLED',
+    message: env.p2pOrderRewardEnabled
+      ? 'Estimated 6.2% verified-deposit reward; credited only after independent payment verification and a sufficient balance in the mapped dedicated INR REWARD_FUND ledger account.'
+      : 'Estimated 6.2% reward; the verified-deposit reward program is disabled, so no additional wallet credit is promised.',
   };
 }
 

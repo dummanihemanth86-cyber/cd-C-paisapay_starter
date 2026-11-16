@@ -130,6 +130,7 @@ model User {
   adminWalletCreditTargets      AdminWalletCreditRequest[] @relation("AdminWalletCreditRequestTarget")
   adminWalletFundingRequestsMade AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestMaker")
   adminWalletFundingRequestsChecked AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestChecker")
+  rewardFundFundingRecords      RewardFundFundingRecord[] @relation("RewardFundFundingVerifier")
   adminPhonePeCreditRequestsMade AdminPhonePeCreditRequest[] @relation("AdminPhonePeCreditRequestMaker")
   adminPhonePeCreditTargets AdminPhonePeCreditRequest[] @relation("AdminPhonePeCreditRequestTarget")
   submittedManualPaymentClaims ManualPaymentClaim[] @relation("ManualPaymentClaimSubmitter")
@@ -207,6 +208,7 @@ model LedgerTransaction {
   adminWalletFundingRequest AdminWalletFundingRequest?
   adminPhonePeCreditFundingRequest AdminPhonePeCreditRequest? @relation("AdminPhonePeCreditFundingTransaction")
   adminPhonePeCreditLedgerRequest AdminPhonePeCreditRequest? @relation("AdminPhonePeCreditLedgerTransaction")
+  rewardFundFundingRecord RewardFundFundingRecord?
   createdAt      DateTime      @default(now()) @map("created_at")
 
   @@index([referenceType, referenceId])
@@ -700,6 +702,26 @@ model AdminWalletFundingRequest {
 
   @@index([status, createdAt])
   @@map("admin_wallet_funding_requests")
+}
+
+model RewardFundFundingRecord {
+  id                    String            @id @default(uuid()) @db.Uuid
+  verifiedByUserId      String            @map("verified_by_user_id") @db.Uuid
+  verifiedBy            User              @relation("RewardFundFundingVerifier", fields: [verifiedByUserId], references: [id], onDelete: Restrict)
+  amountPaise           BigInt            @map("amount_paise")
+  sourceAccountLabel    String            @map("source_account_label") @db.VarChar(100)
+  externalReferenceHash String            @unique @map("external_reference_hash") @db.Char(64)
+  evidenceReference     String            @map("evidence_reference") @db.VarChar(160)
+  evidenceSha256        String            @map("evidence_sha256") @db.Char(64)
+  statementDate         DateTime          @map("statement_date") @db.Date
+  reason                String            @db.VarChar(500)
+  idempotencyKey        String            @unique @map("idempotency_key") @db.VarChar(120)
+  ledgerTransactionId   String            @unique @map("ledger_transaction_id") @db.Uuid
+  ledgerTransaction     LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("reward_fund_funding_records")
 }
 
 model AdminPhonePeCreditRequest {
