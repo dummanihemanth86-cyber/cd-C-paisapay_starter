@@ -22,7 +22,7 @@ import { getPaymentMethodAvailability } from './modules/payments/availability.js
 import { openapi } from './openapi.js';
 import { adminAuthRouter, adminRouter } from './modules/admin/routes.js';
 import { financialOperationsGate } from './middleware/financialOperations.js';
-import { getConfiguredUserAppRelease } from './modules/appRelease/release.js';
+import { getLatestUserAppRelease } from './modules/appRelease/release.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -60,7 +60,7 @@ app.get('/api/v2/availability', asyncRoute(async (_req, res) => {
 }));
 app.get('/api/v1/app-version', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0');
-  const release = getConfiguredUserAppRelease({
+  const release = getLatestUserAppRelease({
     version: env.userAppReleaseVersion,
     buildCode: env.userAppReleaseBuildCode,
     minSupportedBuildCode: env.userAppReleaseMinSupportedBuildCode,

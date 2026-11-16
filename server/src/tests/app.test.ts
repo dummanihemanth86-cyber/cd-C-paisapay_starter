@@ -290,10 +290,17 @@ describe('PaisaPay API foundation', () => {
     expect(legacy.body).not.toHaveProperty('financialOperations');
   });
 
-  it('fails closed for app updates until complete HTTPS release metadata is configured', async () => {
-    const response = await request(app).get('/api/v1/app-version').expect(503);
+  it('serves the latest signed production app release even when Render retains older release metadata', async () => {
+    const response = await request(app).get('/api/v1/app-version').expect(200);
     expect(response.headers['cache-control']).toContain('no-store');
-    expect(response.body.error.code).toBe('APP_RELEASE_NOT_CONFIGURED');
+    expect(response.body).toMatchObject({
+      appId: 'com.paisapay.app',
+      version: '1.1.29',
+      buildCode: 40,
+      minSupportedBuildCode: 0,
+      apkUrl: 'https://github.com/dummanihemanth86-cyber/cd-C-paisapay_starter/releases/download/paisapay-user-v1.1.29/app-release.apk',
+      sha256: '0ed3201ce0fec0b042ea35728e715aaef9aa629e84f9e86b4e48d639978ea4ed',
+    });
     assertOpenApiResponse(openapi, 'GET', '/app-version', response);
   });
 

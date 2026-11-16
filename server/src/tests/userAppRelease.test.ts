@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getConfiguredUserAppRelease, USER_APP_PACKAGE_ID } from '../modules/appRelease/release.js';
+import { getConfiguredUserAppRelease, getLatestUserAppRelease, LATEST_USER_APP_RELEASE, USER_APP_PACKAGE_ID } from '../modules/appRelease/release.js';
 
 describe('User App release metadata', () => {
   const valid = {
@@ -32,5 +32,17 @@ describe('User App release metadata', () => {
     { ...valid, minSupportedBuildCode: 40 },
   ])('fails closed for incomplete or unsafe release metadata', (config) => {
     expect(getConfiguredUserAppRelease(config)).toBeNull();
+  });
+
+  it('prefers the built-in release over stale or missing Render metadata', () => {
+    expect(getLatestUserAppRelease({ ...valid, version: '1.1.28', buildCode: 39 })).toMatchObject(LATEST_USER_APP_RELEASE);
+    expect(getLatestUserAppRelease({})).toMatchObject(LATEST_USER_APP_RELEASE);
+  });
+
+  it('prefers a newer configured release', () => {
+    expect(getLatestUserAppRelease({ ...valid, version: '1.1.30', buildCode: 41 })).toMatchObject({
+      version: '1.1.30',
+      buildCode: 41,
+    });
   });
 });
