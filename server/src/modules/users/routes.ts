@@ -1,10 +1,12 @@
 import { Router } from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { createCipheriv, createHmac, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { databaseRequired } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { paiseJson } from '../../lib/money.js';
+import { verifyPassword } from '../../lib/password.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { VIP_LEVEL_CONFIGURATION } from './vipConfig.js';
 import { buildVipProgress } from './vipProgress.js';
@@ -100,6 +102,14 @@ usersRouter.patch('/me', asyncRoute(async (req, res) => {
 // verification provider is added.
 const upiIdSchema = z.string().trim().min(3).max(100)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$/, 'Enter a UPI ID in name@provider format.');
+const upiPasswordConfirmationLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 8,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  keyGenerator: (req) => req.auth!.userId,
+  message: { error: { code: 'UPI_PASSWORD_CONFIRMATION_RATE_LIMITED', message: 'Too many password confirmation attempts. Wait before trying again.' } },
+});
 
 usersRouter.get('/me/upi', asyncRoute(async (req, res) => {
   const user = await databaseRequired().user.findUniqueOrThrow({
@@ -108,28 +118,54 @@ usersRouter.get('/me/upi', asyncRoute(async (req, res) => {
   res.json({
     upiId: user.upiId,
     displayName: user.upiDisplayName,
+    passwordConfirmationRequired: true,
     detailsStatus: user.upiId && user.upiDisplayName ? 'USER_CONFIRMED' : 'NOT_SET',
     verificationStatus: user.upiIdVerifiedAt ? 'VERIFIED' : user.upiId ? 'UNVERIFIED_FORMAT_ONLY' : 'NOT_SET',
     message: user.upiIdVerifiedAt ? 'Ownership was confirmed by an authorized verification flow.' : 'Saved details are user-provided; PaisaPay has not verified UPI ownership.',
   });
 }));
 
-usersRouter.patch('/me/upi', asyncRoute(async (req, res) => {
+usersRouter.patch('/me/upi', upiPasswordConfirmationLimit, asyncRoute(async (req, res) => {
   const input = z.object({
     upiId: upiIdSchema,
+    password: z.string().min(1).max(128),
     displayName: z.string().trim().min(2).max(100).optional(),
     // Accept common account-name field names from older mobile builds while
     // keeping displayName as the canonical API field.
     name: z.string().trim().min(2).max(100).optional(),
     accountName: z.string().trim().min(2).max(100).optional(),
-  }).parse(req.body);
+  }).strict().parse(req.body);
   const displayName = input.displayName ?? input.name ?? input.accountName;
   if (!displayName) throw new HttpError(400, 'UPI_NAME_REQUIRED', 'Enter the account name shown in your UPI app.');
-  const updated = await databaseRequired().user.update({
-    where: { id: req.auth!.userId }, data: { upiId: input.upiId, upiDisplayName: displayName, upiIdVerifiedAt: null },
-    select: { upiId: true, upiDisplayName: true, upiIdVerifiedAt: true },
+  const db = databaseRequired();
+  const outcome = await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${req.auth!.userId}::uuid FOR UPDATE`;
+    const current = await tx.user.findUniqueOrThrow({
+      where: { id: req.auth!.userId },
+      select: { passwordHash: true, loginFailedAttempts: true, loginLockedUntil: true },
+    });
+    const now = new Date();
+    if (current.loginLockedUntil && current.loginLockedUntil > now) return { kind: 'locked' as const };
+    if (!current.passwordHash || !(await verifyPassword(input.password, current.passwordHash))) {
+      const attempts = current.loginLockedUntil && current.loginLockedUntil <= now ? 1 : current.loginFailedAttempts + 1;
+      const locked = attempts >= 5;
+      await tx.user.update({
+        where: { id: req.auth!.userId },
+        data: { loginFailedAttempts: attempts, loginLockedUntil: locked ? new Date(now.getTime() + 15 * 60 * 1000) : null },
+      });
+      return { kind: locked ? 'locked' as const : 'invalid' as const };
+    }
+    const updated = await tx.user.update({
+      where: { id: req.auth!.userId },
+      data: { upiId: input.upiId, upiDisplayName: displayName, upiIdVerifiedAt: null, loginFailedAttempts: 0, loginLockedUntil: null },
+      select: { upiId: true, upiDisplayName: true, upiIdVerifiedAt: true },
+    });
+    return { kind: 'saved' as const, updated };
   });
-  res.json({ upiId: updated.upiId, displayName: updated.upiDisplayName, detailsStatus: 'USER_CONFIRMED', verificationStatus: 'UNVERIFIED_FORMAT_ONLY', message: 'UPI name and ID saved and confirmed by you. PaisaPay has not verified ownership.' });
+  if (outcome.kind === 'locked') throw new HttpError(429, 'PASSWORD_CONFIRMATION_LOCKED', 'Too many password attempts. Wait 15 minutes before trying again.');
+  if (outcome.kind !== 'saved') throw new HttpError(403, 'PASSWORD_CONFIRMATION_FAILED', 'The login password is incorrect. UPI details were not changed.');
+  const { updated } = outcome;
+  res.json({ upiId: updated.upiId, displayName: updated.upiDisplayName, passwordConfirmationRequired: true, detailsStatus: 'USER_CONFIRMED', verificationStatus: 'UNVERIFIED_FORMAT_ONLY', message: 'UPI name and ID saved and confirmed by you. PaisaPay has not verified ownership.' });
 }));
 
 usersRouter.delete('/me/upi', asyncRoute(async (req, res) => {

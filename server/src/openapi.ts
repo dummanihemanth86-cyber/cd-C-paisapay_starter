@@ -178,18 +178,19 @@ const openapiBase = {
       },
     },
     '/users/me/upi': {
-      get: { security: [{ bearerAuth: [] }], summary: 'Read the signed-in user UPI ID and verification state', responses: { '200': { description: 'Saved UPI ID; format validation is not ownership verification' } } },
+      get: { security: [{ bearerAuth: [] }], summary: 'Read the signed-in user UPI ID and verification state', responses: { '200': { description: 'Saved UPI ID and indicates password confirmation is required for changes; format validation is not ownership verification' } } },
       patch: {
         security: [{ bearerAuth: [] }],
-        summary: 'Save a format-checked UPI ID and account name; UPI ownership remains unverified',
+        summary: 'Confirm the signed-in user password, then save a format-checked UPI ID and account name; UPI ownership remains unverified',
         requestBody: {
           required: true,
           content: { 'application/json': {
             schema: {
               type: 'object',
-              required: ['upiId'],
+              required: ['upiId', 'password'],
               properties: {
                 upiId: { type: 'string', minLength: 3, maxLength: 100, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{1,48}@[A-Za-z0-9][A-Za-z0-9.-]{1,48}$', description: 'UPI ID in name@provider format.' },
+                password: { type: 'string', minLength: 1, maxLength: 128, format: 'password', writeOnly: true, description: 'Current PaisaPay login password; verified server-side and never stored or returned.' },
                 displayName: { type: 'string', minLength: 2, maxLength: 100, description: 'Preferred account-name field. Supply this or one of the legacy name fields below.' },
                 name: { type: 'string', minLength: 2, maxLength: 100, description: 'Legacy alias for the account name.' },
                 accountName: { type: 'string', minLength: 2, maxLength: 100, description: 'Legacy alias for the account name.' },
@@ -200,9 +201,11 @@ const openapiBase = {
           } },
         },
         responses: {
-          '200': { description: 'Saved UPI ID and user-provided account name; verification status remains UNVERIFIED_FORMAT_ONLY' },
+          '200': { description: 'Password confirmed and UPI ID saved; verification status remains UNVERIFIED_FORMAT_ONLY' },
           '400': { description: 'Invalid UPI ID or account name, or no account name supplied' },
           '401': { description: 'Authentication required' },
+          '403': { description: 'Login password did not match; UPI details were not changed' },
+          '429': { description: 'Password confirmation rate limit or temporary password lockout' },
         },
       },
       delete: { security: [{ bearerAuth: [] }], summary: 'Remove the signed-in user UPI ID', responses: { '200': { description: 'UPI ID removed' } } },
@@ -405,8 +408,8 @@ const responseFields: Record<string, string[]> = {
   'post /admin/auth/password/reset': ['ok', 'message'],
   'get /users/me': ['user'],
   'patch /users/me': ['user'],
-  'get /users/me/upi': ['upiId', 'displayName', 'detailsStatus', 'verificationStatus', 'message'],
-  'patch /users/me/upi': ['upiId', 'displayName', 'detailsStatus', 'verificationStatus', 'message'],
+  'get /users/me/upi': ['upiId', 'displayName', 'passwordConfirmationRequired', 'detailsStatus', 'verificationStatus', 'message'],
+  'patch /users/me/upi': ['upiId', 'displayName', 'passwordConfirmationRequired', 'detailsStatus', 'verificationStatus', 'message'],
   'delete /users/me/upi': ['upiId', 'displayName', 'detailsStatus', 'verificationStatus'],
   'get /users/me/bank-accounts': ['bankAccounts', 'ownershipVerificationAvailable', 'message'],
   'post /users/me/bank-accounts': ['bankAccount', 'message'],
@@ -510,7 +513,7 @@ const responseFields: Record<string, string[]> = {
 };
 
 const stringResponseFields = new Set(['id', 'challengeId', 'currency', 'availabilityMessage', 'message', 'status', 'statusFilter', 'detailsStatus', 'verificationStatus', 'deliveryState', 'gatewayStatus', 'rewardPolicy', 'period', 'reference', 'displayDescription', 'paymentMethod', 'ownershipStatus', 'payoutIntegration', 'delivery', 'management', 'actions', 'api', 'database', 'payoutProvider', 'backgroundWorkers', 'referralLink', 'orderStatus', 'offerStatus', 'referralCommissionStatus', 'role', 'accessToken', 'refreshToken', 'receiverVpa', 'phoneMasked', 'displayName', 'phoneE164', 'upiId', 'evidenceMimeType', 'transactionReference', 'method', 'name', 'reason', 'type', 'referenceId', 'environment', 'referralCode', 'commissionBasis', 'rewardFundingMessage', 'report', 'from', 'to', 'otpProvider', 'paymentProvider', 'totalAmountPaise', 'totalDebitsPaise', 'totalCreditsPaise']);
-const booleanResponseFields = new Set(['livePaymentsEnabled', 'sandboxPaymentsEnabled', 'paymentVerificationAvailable', 'authoritative', 'ok', 'paymentStarted', 'demoOnly', 'paymentConfirmed', 'received', 'revoked', 'credited', 'payoutFundingConfigured', 'statusAvailable', 'ownershipVerificationAvailable', 'commissionRuleConfigured', 'fundedProgram', 'payoutRulesConfigured', 'financialOperationsEnabled', 'walletAdjustmentAllowed', 'walletAdjustmentsEnabled', 'walletCreditsAllowed', 'adminWalletFundingEnabled', 'rewardFundFundingEnabled', 'depositRewardEnabled', 'adminWalletCreditsEnabled', 'adminWalletProductionApproved', 'adminWalletExternalReconciliationVerified', 'walletCreditsEnabled', 'walletCreditRequestsEnabled', 'walletFundingRequestsEnabled', 'databaseConfigured', 'ledgerBalanced', 'operationsEnabled', 'replayed', 'requestLedgerLinksReconciled', 'fundingWorkflowEnabled', 'rewardEnabled', 'activationReady']);
+const booleanResponseFields = new Set(['livePaymentsEnabled', 'sandboxPaymentsEnabled', 'paymentVerificationAvailable', 'passwordConfirmationRequired', 'authoritative', 'ok', 'paymentStarted', 'demoOnly', 'paymentConfirmed', 'received', 'revoked', 'credited', 'payoutFundingConfigured', 'statusAvailable', 'ownershipVerificationAvailable', 'commissionRuleConfigured', 'fundedProgram', 'payoutRulesConfigured', 'financialOperationsEnabled', 'walletAdjustmentAllowed', 'walletAdjustmentsEnabled', 'walletCreditsAllowed', 'adminWalletFundingEnabled', 'rewardFundFundingEnabled', 'depositRewardEnabled', 'adminWalletCreditsEnabled', 'adminWalletProductionApproved', 'adminWalletExternalReconciliationVerified', 'walletCreditsEnabled', 'walletCreditRequestsEnabled', 'walletFundingRequestsEnabled', 'databaseConfigured', 'ledgerBalanced', 'operationsEnabled', 'replayed', 'requestLedgerLinksReconciled', 'fundingWorkflowEnabled', 'rewardEnabled', 'activationReady']);
 const arrayResponseFields = new Set(['methods', 'wallets', 'bankAccounts', 'transactions', 'deposits', 'orders', 'withdrawals', 'offers', 'tickets', 'messages', 'notifications', 'claims', 'rules', 'events', 'users', 'entries', 'referrals', 'milestones', 'commissions', 'payments', 'disputes', 'allowedSections', 'levels', 'recentTransactions', 'recentUsers', 'members', 'commissionHistory', 'auditLogs', 'admins', 'credits', 'recentLedgerEntries', 'daily', 'statusBreakdown', 'editableSettings', 'requests', 'accounts', 'walletCreditBlockers', 'walletFundingBlockers', 'records', 'blockers']);
 const numericArrayResponseFields = new Set<string>();
 const dateResponseFields = new Set(['serverTime', 'checkedAt']);
