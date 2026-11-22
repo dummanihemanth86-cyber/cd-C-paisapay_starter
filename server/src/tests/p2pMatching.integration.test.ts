@@ -164,14 +164,9 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     const evidence = { decision: 'APPROVE', reason: 'Verified seller receipt in authorized bank records.', evidenceReference: `P2P-BANK-REVIEW-${randomUUID()}`, verifiedTransactionReference: financeReference, verifiedAmountPaise: 50000, verifiedCurrency: 'INR', verifiedPayeeVpa: 'other@testbank', receiverConfirmed: true };
     await request(app).post(reviewPath).set(adminAuth).send(evidence).expect(409);
     const validEvidence = { ...evidence, verifiedPayeeVpa: 'seller@testbank' };
-    const missingSellerReceipt = await request(app).post(reviewPath).set(adminAuth).send(validEvidence).expect(409);
-    expect(missingSellerReceipt.body.error.code).toBe('SELLER_RECEIPT_CONFIRMATION_REQUIRED');
     await request(app).post(`/api/v1/deposits/orders/${order.id}/seller-received`).set(buyerAuth).send({ transactionReference: financeReference }).expect(404);
-    const receiptAck = await request(app).post(`/api/v1/deposits/orders/${order.id}/seller-received`).set(sellerAuth).send({ transactionReference: financeReference }).expect(202);
-    expect(receiptAck.body).toMatchObject({ paymentVerified: false, ledgerSettled: false, confirmation: { status: 'SELLER_ACKNOWLEDGED' } });
-    await request(app).post(reviewPath).set(adminAuth).send({ ...validEvidence, decision: 'REJECT', paymentNotReceivedConfirmed: true }).expect(409);
-    const replayedAck = await request(app).post(`/api/v1/deposits/orders/${order.id}/seller-received`).set(sellerAuth).send({ transactionReference: financeReference }).expect(200);
-    expect(replayedAck.body.ledgerSettled).toBe(false);
+    // Finance can settle directly from its independent receiver-side checks;
+    // no seller-side acknowledgement is required.
     const approved = await request(app).post(reviewPath).set(adminAuth).send(validEvidence).expect(200);
     expect(approved.body.orderStatus).toBe('COMPLETED');
     expect(approved.body.credited).toBe(true);
@@ -510,7 +505,6 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     const reference = `CANCELLED-OFFER-${randomUUID()}`;
     const claim = await request(app).post(`/api/v1/deposits/orders/${order.id}/payment-reference`).set(auth(tokens[1])).send(paymentProof(reference, 10000)).expect(202);
     claimIds.push(claim.body.claim.id); transactionReferences.push(reference);
-    await request(app).post(`/api/v1/deposits/orders/${order.id}/seller-received`).set(auth(tokens[0])).send({ transactionReference: reference }).expect(202);
     const review = await request(app).post(`/api/v1/admin/p2p/claims/${claim.body.claim.id}/review`).set(auth(tokens[2])).send({ decision: 'APPROVE', reason: 'Receipt independently checked against bank records.', evidenceReference: `FIN-${randomUUID()}`, verifiedTransactionReference: reference, verifiedAmountPaise: 10000, verifiedCurrency: 'INR', verifiedPayeeVpa: 'seller@testbank', receiverConfirmed: true }).expect(200);
     expect(review.body).toMatchObject({ orderStatus: 'COMPLETED', credited: true, offerStatus: 'CANCELLED' });
   });

@@ -620,9 +620,8 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     const evidenceError = validateP2pEvidence({ claimedReference: claim.transactionReference, verifiedReference: input.verifiedTransactionReference!, expectedAmountPaise: claim.order.amountPaise, verifiedAmountPaise: BigInt(input.verifiedAmountPaise!), currency: input.verifiedCurrency!, receiverConfirmed: input.receiverConfirmed! });
     if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires independently verified exact transaction reference, INR amount, and recipient receipt.');
     if (input.verifiedPayeeVpa !== claim.order.withdrawalOffer.payeeVpa) throw new HttpError(409, 'PAYEE_MISMATCH', 'Verified recipient UPI ID does not match the payee on this matched offer.');
-    const sellerConfirmation = await tx.p2pSellerPaymentConfirmation.findUnique({ where: { orderId: claim.orderId } });
-    if (!sellerConfirmation) throw new HttpError(409, 'SELLER_RECEIPT_CONFIRMATION_REQUIRED', 'The seller must acknowledge receipt against the buyer claim before Finance can settle this P2P order.');
-    if (sellerConfirmation.transactionReference.trim().toUpperCase() !== input.verifiedTransactionReference) throw new HttpError(409, 'SELLER_RECEIPT_REFERENCE_MISMATCH', 'The seller receipt reference does not match the independently verified transaction reference. Resolve the discrepancy before settlement.');
+    // The Admin's independent receiver-side verification is the settlement
+    // authority. Seller acknowledgement remains optional and must not block it.
     if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status) || !['MATCHED', 'PARTIALLY_MATCHED', 'CANCELLED'].includes(claim.order.withdrawalOffer.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting independent payment review.');
     const [usedDeposit, usedP2pOrder, usedManualClaim, usedP2pClaim, usedOtherSellerReceipt] = await Promise.all([
       tx.deposit.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
