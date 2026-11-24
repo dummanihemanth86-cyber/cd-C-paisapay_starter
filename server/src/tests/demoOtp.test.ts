@@ -13,6 +13,7 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
   const db = prisma!;
   const previousProvider = env.otpProvider;
   const previousBonusEnabled = env.welcomeBonusEnabled;
+  const previousManualUpiOperationsEnabled = env.manualUpiOperationsEnabled;
   const previousDemoPhone = env.demoLoginPhoneE164;
   const previousDemoPassword = env.demoLoginPassword;
   const fundingKey = `TEST_WELCOME_BONUS_FUNDING:${randomUUID()}`;
@@ -23,6 +24,7 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
     await db.$connect();
     env.otpProvider = 'demo';
     env.welcomeBonusEnabled = true;
+    env.manualUpiOperationsEnabled = true;
     await db.ledgerAccount.upsert({ where: { id: DEVELOPMENT_REWARD_FUND_ACCOUNT_ID }, create: { id: DEVELOPMENT_REWARD_FUND_ACCOUNT_ID, type: 'REWARD_FUND', currency: 'INR' }, update: {} });
     await db.ledgerAccount.upsert({ where: { id: DEVELOPMENT_SETTLEMENT_ACCOUNT_ID }, create: { id: DEVELOPMENT_SETTLEMENT_ACCOUNT_ID, type: 'SETTLEMENT_CASH', currency: 'INR' }, update: {} });
     if (!(await db.ledgerTransaction.findUnique({ where: { idempotencyKey: fundingKey } }))) {
@@ -47,6 +49,7 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
     vi.unstubAllGlobals();
     env.otpProvider = previousProvider;
     env.welcomeBonusEnabled = previousBonusEnabled;
+    env.manualUpiOperationsEnabled = previousManualUpiOperationsEnabled;
     env.demoLoginPhoneE164 = previousDemoPhone;
     env.demoLoginPassword = previousDemoPassword;
     const users = await db.user.findMany({ where: { phoneE164: { in: testPhones } }, select: { id: true } });
@@ -267,10 +270,11 @@ integration('development demo OTP mode (PostgreSQL integration)', () => {
       .set('Authorization', `Bearer ${session.body.accessToken}`)
       .set('Idempotency-Key', `removed-mobikwik-${randomInt(1, 1_000_000)}`)
       .send({ amountPaise: 10000, method: 'MobiKwik' }).expect(400);
-    await request(app).post('/api/v1/orders')
+    const legacyOrderResponse = await request(app).post('/api/v1/orders')
       .set('Authorization', `Bearer ${session.body.accessToken}`)
       .set('Idempotency-Key', `removed-mobikwik-order-${randomInt(1, 1_000_000)}`)
-      .send({ kind: 'SELL', amountPaise: 10000, method: 'MobiKwik' }).expect(400);
+      .send({ kind: 'SELL', amountPaise: 10000, method: 'MobiKwik' }).expect(503);
+    expect(legacyOrderResponse.body.error.code).toBe('FINANCIAL_OPERATIONS_DISABLED');
   });
 
   it('serializes two simultaneous new-login bonus attempts and credits exactly once', async () => {

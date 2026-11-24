@@ -16,7 +16,7 @@ import { MAX_ADMIN_ADJUSTMENT_PAISE, MIN_SUPER_ADMIN_WALLET_CREDIT_PAISE } from 
 import { createCreditRequest, decideCreditRequest, createFundingRequest, decideFundingRequest, ADMIN_ADJUSTMENT_FUND_ID, ADMIN_SETTLEMENT_CASH_ID } from './walletCreditWorkflow.js';
 import { assertPhonePeCreditsAdmin, createPhonePeWalletCreditRequest, decidePhonePeWalletCredit, readPhonePeWalletCreditReadiness } from './phonePeWalletCredit.js';
 import { readWalletCreditReadiness } from './walletCreditReadiness.js';
-import { readRewardFundReadiness, recordRewardFundFunding } from './rewardFundFunding.js';
+import { createRewardFundFundingRequest, decideRewardFundFundingRequest, readRewardFundDashboard, readRewardFundReadiness, submitRewardFundFundingPayment } from './rewardFundFunding.js';
 import { createOtpChallenge } from '../auth/routes.js';
 import { buildUserLookupConditions } from './userLookup.js';
 
@@ -220,7 +220,7 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
     OPERATIONS: [...common, 'users', 'deposits', 'withdrawals', 'p2p', 'providers', 'referrals', 'support', 'audit'],
     FINANCE: [...common, 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'commissions', 'rewardRules', 'disputes', 'reconciliation'],
     ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'audit', 'health', 'reports', 'notifications', 'settings'],
-    SUPER_ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'rewardFund', 'admins', 'audit', 'health', 'reports', 'notifications', 'settings'],
+    SUPER_ADMIN: ['overview', 'users', 'deposits', 'withdrawals', 'p2p', 'alerts', 'transactions', 'ledger', 'providers', 'commissions', 'referrals', 'rewardRules', 'disputes', 'support', 'reconciliation', 'rewardFunding', 'admins', 'audit', 'health', 'reports', 'notifications', 'settings'],
   };
   const walletAdjustmentAllowed = role === 'ADMIN' && env.walletAdjustmentAdminUserId === req.auth!.userId;
   const walletCreditsAllowed = role === 'SUPER_ADMIN';
@@ -240,7 +240,7 @@ adminRouter.get('/me', asyncRoute(async (req, res) => {
   const phonePeCreditsAllowed = walletCreditsAllowed && phonePeAdmin?.phoneE164 === env.adminPhonePeCreditsAdminPhoneE164;
   const allowedSections = [...(roleViews[role] || common)];
   if (walletCreditsAllowed) for (const section of ['walletCredits', 'walletCreditApprovals', 'walletCreditRejections', 'walletFunding', 'walletFundingApprovals', 'walletFundingRejections', 'walletReconciliation']) if (!allowedSections.includes(section)) allowedSections.push(section);
-  if (walletCreditsAllowed && !allowedSections.includes('rewardFund')) allowedSections.push('rewardFund');
+  if (walletCreditsAllowed && !allowedSections.includes('rewardFunding')) allowedSections.push('rewardFunding');
   if (phonePeCreditsAllowed && !allowedSections.includes('phonePeCredits')) allowedSections.push('phonePeCredits');
   res.json({
     userId: req.auth!.userId,
@@ -612,7 +612,7 @@ type RewardFundRecordForApi = {
   sourceAccountLabel: string;
   externalReferenceHash: string;
   evidenceReference: string;
-  evidenceSha256: string;
+  evidenceSha256: string | null;
   statementDate: Date;
   reason: string;
   ledgerTransactionId: string;
@@ -644,6 +644,11 @@ adminRouter.get('/reward-fund/readiness', asyncRoute(async (req, res) => {
   res.json(await readRewardFundReadiness(databaseRequired()));
 }));
 
+adminRouter.get('/reward-fund/dashboard', asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  res.json(await readRewardFundDashboard(databaseRequired()));
+}));
+
 adminRouter.get('/reward-fund/fundings', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
   const input = pageInput.parse(req.query);
@@ -660,27 +665,34 @@ adminRouter.get('/reward-fund/fundings', asyncRoute(async (req, res) => {
 
 adminRouter.post('/reward-fund/fundings', adminMutationLimit, asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  res.status(409).json({ error: { code: 'REWARD_FUNDING_REQUEST_REQUIRED', message: 'Use the reward funding request, payment-reference, and receiver-side verification workflow. No reserve balance was changed.' } });
+}));
+
+adminRouter.post('/reward-fund/funding-requests', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
   const idempotencyKey = z.string().uuid().parse(req.get('Idempotency-Key'));
-  const input = z.object({
-    amountPaise: z.number().int().positive().max(100_000_000_000),
-    sourceAccountLabel: z.string().trim().min(3).max(100).refine((value) => !/\d{5,}/.test(value), 'Use a short account label, never a complete account number.'),
-    externalReference: z.string().trim().min(6).max(200),
-    evidenceReference: z.string().trim().min(3).max(160),
-    evidenceSha256: z.string().regex(/^[a-fA-F0-9]{64}$/),
-    statementDate: z.string().date(),
-    reason: z.string().trim().min(8).max(500),
-    clearedFundsVerified: z.literal(true),
-  }).strict().parse(req.body);
+  const input = z.object({ amountPaise: z.number().int().positive().max(100_000_000_000), reason: z.string().trim().min(8).max(500) }).strict().parse(req.body);
   const db = databaseRequired();
-  const result = await db.$transaction((tx) => recordRewardFundFunding(tx, {
-    verifiedByUserId: req.auth!.userId, idempotencyKey, ...input,
-    evidenceSha256: input.evidenceSha256.toLowerCase(), statementDate: new Date(`${input.statementDate}T00:00:00.000Z`),
-  }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  res.status(result.replayed ? 200 : 201).json({
-    record: rewardFundRecordForApi(result.record),
-    replayed: result.replayed,
-    message: result.replayed ? 'This verified funding was already recorded; no duplicate ledger entry was created.' : 'Admin-attested cleared funding was recorded as a balanced cash-to-reward-reserve ledger journal.',
-  });
+  const result = await db.$transaction((tx) => createRewardFundFundingRequest(tx, { makerUserId: req.auth!.userId, idempotencyKey, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  const item = result.request;
+  res.status(result.replayed ? 200 : 201).json({ request: { id: item.id, amountPaise: Number(item.amountPaise), recipientVpa: item.recipientVpa, status: item.status, reason: item.reason, createdAt: item.createdAt }, replayed: result.replayed, paymentIntent: { scheme: 'upi', recipientVpa: item.recipientVpa, amountPaise: Number(item.amountPaise), transactionNote: `PaisaPay reward fund ${item.id}` }, message: result.replayed ? 'Existing funding request returned. No payment or ledger credit was repeated.' : 'UPI payment request created. This is not proof of payment; verify the cleared receipt from receiver-side history before adding reserve funds.' });
+}));
+
+adminRouter.post('/reward-fund/funding-requests/:id/submit', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const input = z.object({ paymentReference: z.string().trim().min(6).max(200), statementDate: z.string().date() }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => submitRewardFundFundingPayment(tx, { requestId: req.params.id, makerUserId: req.auth!.userId, paymentReference: input.paymentReference, statementDate: new Date(`${input.statementDate}T00:00:00.000Z`) }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  res.status(result.replayed ? 200 : 202).json({ request: { id: result.request.id, amountPaise: Number(result.request.amountPaise), recipientVpa: result.request.recipientVpa, status: result.request.status, paymentReferenceMasked: result.request.paymentReferenceMasked, statementDate: result.request.statementDate }, replayed: result.replayed, message: 'Reference submitted as a claim only. No funding was posted until receiver-side verification.' });
+}));
+
+adminRouter.post('/reward-fund/funding-requests/:id/decision', adminMutationLimit, asyncRoute(async (req, res) => {
+  requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
+  const input = z.object({ decision: z.enum(['VERIFY', 'REJECT']), reason: z.string().trim().min(8).max(500), paymentReference: z.string().trim().min(6).max(200).optional(), receivedAmountPaise: z.number().int().positive().optional(), receivedVpa: z.string().trim().max(100).optional(), receiverConfirmed: z.literal(true).optional() }).strict().parse(req.body);
+  const db = databaseRequired();
+  const result = await db.$transaction((tx) => decideRewardFundFundingRequest(tx, { requestId: req.params.id, verifierUserId: req.auth!.userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  const record = result.record;
+  res.json({ request: { id: result.request.id, amountPaise: Number(result.request.amountPaise), status: result.request.status, paymentReferenceMasked: result.request.paymentReferenceMasked, ledgerTransactionId: result.request.ledgerTransactionId }, fundingRecord: record ? { id: record.id, amountPaise: Number(record.amountPaise), sourceAccountLabel: record.sourceAccountLabel, evidenceReference: record.evidenceReference, statementDate: record.statementDate, reason: record.reason, ledgerTransactionId: record.ledgerTransactionId, fundingRequestId: record.fundingRequestId, createdAt: record.createdAt } : null, pendingRewardsProcessed: result.pendingRewardsProcessed, pendingRewardPaise: Number(result.pendingRewardPaise), replayed: result.replayed, message: input.decision === 'REJECT' ? 'Funding request rejected. No reserve or user wallet balance was changed.' : `Receiver-side receipt attested and booked. ${result.pendingRewardsProcessed} pending reward(s) were released only from verified reserve funds.` });
 }));
 
 adminRouter.post('/wallet/funding/requests', adminMutationLimit, asyncRoute(async (req, res) => {

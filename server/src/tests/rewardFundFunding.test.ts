@@ -26,19 +26,17 @@ function fundingTx(overrides: Record<string, unknown> = {}) {
   };
   const tx = {
     $executeRaw: vi.fn(async () => 1),
-    $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
-      const query = parts.join('');
-      if (query.includes('SELECT EXISTS')) return [{ reused: false }];
-      if (query.includes('SUM(debit_paise - credit_paise)')) return [{ balance: 1_000_000n }];
-      return [];
-    }),
+    $queryRaw: vi.fn(async (parts: TemplateStringsArray) => parts.join('').includes('SELECT EXISTS') ? [{ reused: false }] : []),
     user: { findUnique: vi.fn(async () => ({ id: adminId, status: 'ACTIVE', adminRole: { role: 'SUPER_ADMIN' } })) },
     rewardFundFundingRecord: { findUnique: vi.fn(async () => null), create: calls.fundingCreate, count: vi.fn(async () => 1), aggregate: vi.fn(async () => ({ _sum: { amountPaise: 500_000n } })) },
     adminWalletFundingRequest: { findUnique: vi.fn(async () => null) },
     ledgerAccount: { upsert: vi.fn(async ({ where }: any) => where.id === ADMIN_SETTLEMENT_CASH_ID
       ? { id: ADMIN_SETTLEMENT_CASH_ID, type: 'SETTLEMENT_CASH', currency: 'INR' }
       : { id: REWARD_FUND_ACCOUNT_ID, type: 'REWARD_FUND', currency: 'INR' }) },
-    ledgerTransaction: { create: calls.ledgerCreate },
+    ledgerTransaction: {
+      create: calls.ledgerCreate,
+      findUnique: vi.fn(async ({ where }: any) => where.id === 'ledger-record-id' ? { id: 'ledger-record-id', createdAt: new Date('2026-11-16T01:00:00Z') } : null),
+    },
     auditLog: { create: calls.auditCreate },
     ...overrides,
   } as unknown as Prisma.TransactionClient;
@@ -108,22 +106,6 @@ describe('reward reserve manual funding', () => {
       await expect(recordRewardFundFunding(badAccounts.tx, input)).rejects.toMatchObject({ code: 'REWARD_FUND_ACCOUNTS_INVALID' });
       expect(duplicate.calls.ledgerCreate).not.toHaveBeenCalled();
       expect(badAccounts.calls.ledgerCreate).not.toHaveBeenCalled();
-    } finally { env.rewardFundFundingEnabled = previous; }
-  });
-
-  it('refuses funding when the cleared settlement cash ledger cannot cover it', async () => {
-    const previous = env.rewardFundFundingEnabled;
-    const underfunded = fundingTx({ $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
-      const query = parts.join('');
-      if (query.includes('SELECT EXISTS')) return [{ reused: false }];
-      if (query.includes('SUM(debit_paise - credit_paise)')) return [{ balance: 499_999n }];
-      return [];
-    }) });
-    try {
-      env.rewardFundFundingEnabled = true;
-      await expect(recordRewardFundFunding(underfunded.tx, input)).rejects.toMatchObject({ code: 'REWARD_FUND_SOURCE_INSUFFICIENT' });
-      expect(underfunded.calls.ledgerCreate).not.toHaveBeenCalled();
-      expect(underfunded.calls.fundingCreate).not.toHaveBeenCalled();
     } finally { env.rewardFundFundingEnabled = previous; }
   });
 });

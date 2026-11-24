@@ -43,7 +43,7 @@ describe('PaisaPay API foundation', () => {
 
     const protectedRoutes: Array<[string, string]> = [
       ['GET', '/users/me'], ['GET', '/users/me/upi'], ['GET', '/users/me/bank-accounts'],
-      ['GET', '/users/me/balance'], ['GET', '/users/me/transactions'], ['GET', '/users/me/referrals'],
+      ['GET', '/users/me/balance'], ['GET', '/users/me/reward-wallet'], ['GET', '/users/me/transactions'], ['GET', '/users/me/referrals'],
       ['GET', '/wallet-methods'], ['GET', '/wallet-references'], ['GET', '/deposits'],
       ['GET', '/orders'], ['GET', '/withdrawals'], ['GET', '/deposits/orders/my'],
       ['GET', '/support/tickets'], ['GET', '/notifications'], ['GET', '/admin/overview'],
@@ -52,7 +52,10 @@ describe('PaisaPay API foundation', () => {
       ['GET', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credits'],
       ['POST', '/admin/users/00000000-0000-4000-8000-000000000001/wallet/credit'],
       ['GET', '/admin/wallet/credits/requests'], ['GET', '/admin/wallet/funding/requests'], ['GET', '/admin/wallet/reconciliation'],
-      ['GET', '/admin/reward-fund/readiness'], ['GET', '/admin/reward-fund/fundings'], ['POST', '/admin/reward-fund/fundings'],
+      ['GET', '/admin/reward-fund/readiness'], ['GET', '/admin/reward-fund/dashboard'], ['GET', '/admin/reward-fund/fundings'],
+      ['POST', '/admin/reward-fund/fundings'], ['POST', '/admin/reward-fund/funding-requests'],
+      ['POST', '/admin/reward-fund/funding-requests/00000000-0000-4000-8000-000000000001/submit'],
+      ['POST', '/admin/reward-fund/funding-requests/00000000-0000-4000-8000-000000000001/decision'],
     ];
     for (const [method, path] of protectedRoutes) {
       const response = await request(app)[method.toLowerCase() as 'get' | 'post'](`/api/v1${path}`);
@@ -110,9 +113,10 @@ describe('PaisaPay API foundation', () => {
       'post /admin/wallet/credits/requests', 'post /admin/wallet/credits/requests/{id}/decision',
       'post /admin/wallet/funding/requests', 'post /admin/wallet/funding/requests/{id}/decision',
       'patch /admin/referrals/config', 'patch /admin/referrals/milestones/{key}', 'post /admin/support/tickets/{id}/reply',
-      'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}', 'post /admin/reward-fund/fundings',
+      'patch /admin/support/tickets/{id}/status', 'post /admin/notifications', 'patch /admin/reward-rules/{id}',
+      'post /admin/reward-fund/funding-requests', 'post /admin/reward-fund/funding-requests/{id}/submit', 'post /admin/reward-fund/funding-requests/{id}/decision',
     ];
-    expect(new Set(documentedJsonHandlers).size).toBe(43);
+    expect(new Set(documentedJsonHandlers).size).toBe(45);
     for (const entry of documentedJsonHandlers) {
       const separator = entry.indexOf(' ');
       const method = entry.slice(0, separator);
@@ -251,7 +255,7 @@ describe('PaisaPay API foundation', () => {
     expect(response.body.currency).toBe('INR');
     expect(response.body.livePaymentsEnabled).toBe(false);
     expect(response.body.upiDeposit.receiverVpa).toBe(env.depositReceiverUpiId ?? null);
-    expect(response.body.upiDeposit.paymentInitiation).toBe(env.depositReceiverUpiId ? 'UPI_INTENT' : 'UNAVAILABLE');
+    expect(response.body.upiDeposit.paymentInitiation).toBe(env.depositReceiverUpiId && env.manualUpiOperationsEnabled ? 'UPI_INTENT' : 'UNAVAILABLE');
     if (!env.depositReceiverUpiId) expect(response.body.upiDeposit.message).toMatch(/unavailable because no recipient is configured/i);
     expect(response.body.upiDeposit.rewardPercentBps).toBe(620);
     expect(response.body.verifiedDepositReward).toMatchObject({ percentBps: 620, enabled: false });
@@ -259,7 +263,7 @@ describe('PaisaPay API foundation', () => {
     expect(response.body.upiDeposit.rewardEnabled).toBe(env.p2pOrderRewardEnabled);
     expect(response.body.methods.find((item: { name: string }) => item.name === 'PhonePe').buyEnabled).toBe(false);
     expect(response.body.methods.every((item: { available: boolean }) => item.available === false)).toBe(true);
-    expect(response.body.availabilityMessage).toMatch(/unavailable/);
+    expect(response.body.availabilityMessage).toMatch(/unavailable|disabled/i);
   });
 
   it('serves a versioned availability contract and keeps P2P blockers separate from provider setup', async () => {

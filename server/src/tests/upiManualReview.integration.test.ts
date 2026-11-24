@@ -23,6 +23,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
   const adminToken = randomUUID();
   const referrerToken = randomUUID();
   const ancestorToken = randomUUID();
+  const customerPassword = `Test-${randomUUID()}-Customer!`;
   const adminPassword = `Test-${randomUUID()}-Admin!`;
   let customerId = '';
   let adminId = '';
@@ -43,7 +44,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     env.p2pOrderRewardEnabled = false;
     env.depositReceiverUpiId = 'test-only@okaxis';
     const [customer, admin, referrer, ancestor] = await Promise.all([
-      db.user.create({ data: { phoneE164: customerPhone, displayName: 'UPI Test Customer' } }),
+      db.user.create({ data: { phoneE164: customerPhone, displayName: 'UPI Test Customer', passwordHash: await hashPassword(customerPassword) } }),
       db.user.create({ data: { phoneE164: adminPhone, displayName: 'Finance Test Reviewer', status: 'ACTIVE' } }),
       db.user.create({ data: { phoneE164: referrerPhone, displayName: 'Referral Direct', status: 'ACTIVE' } }),
       db.user.create({ data: { phoneE164: ancestorPhone, displayName: 'Referral Indirect', status: 'ACTIVE' } }),
@@ -153,7 +154,7 @@ integration('UPI profile and manual deposit reconciliation (PostgreSQL integrati
     expect(receiverVpa).toBe('test-only@okaxis');
     expect((await request(app).get('/api/v1/users/me/balance').set(customerAuth).expect(200)).body.availablePaise).toBe(0);
 
-    const savedUpi = await request(app).patch('/api/v1/users/me/upi').set(customerAuth).send({ displayName: 'Customer Name', upiId: 'customer@bank' }).expect(200);
+    const savedUpi = await request(app).patch('/api/v1/users/me/upi').set(customerAuth).send({ displayName: 'Customer Name', upiId: 'customer@bank', password: customerPassword }).expect(200);
     expect(savedUpi.body.detailsStatus).toBe('USER_CONFIRMED');
     expect(savedUpi.body.verificationStatus).toBe('UNVERIFIED_FORMAT_ONLY');
     expect(savedUpi.body.displayName).toBe('Customer Name');

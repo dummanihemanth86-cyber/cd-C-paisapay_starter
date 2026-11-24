@@ -75,6 +75,7 @@ enum LedgerAccountType {
   SETTLEMENT_CASH
   PAYMENT_SUSPENSE
   REWARD_FUND
+  REWARD_LIABILITY
   ADMIN_ADJUSTMENT_FUND
 }
 
@@ -131,6 +132,9 @@ model User {
   adminWalletFundingRequestsMade AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestMaker")
   adminWalletFundingRequestsChecked AdminWalletFundingRequest[] @relation("AdminWalletFundingRequestChecker")
   rewardFundFundingRecords      RewardFundFundingRecord[] @relation("RewardFundFundingVerifier")
+  rewardFundFundingRequestsMade RewardFundFundingRequest[] @relation("RewardFundFundingRequestMaker")
+  rewardFundFundingRequestsVerified RewardFundFundingRequest[] @relation("RewardFundFundingRequestVerifier")
+  rewardWallet                 RewardWallet?
   adminPhonePeCreditRequestsMade AdminPhonePeCreditRequest[] @relation("AdminPhonePeCreditRequestMaker")
   adminPhonePeCreditTargets AdminPhonePeCreditRequest[] @relation("AdminPhonePeCreditRequestTarget")
   submittedManualPaymentClaims ManualPaymentClaim[] @relation("ManualPaymentClaimSubmitter")
@@ -209,6 +213,7 @@ model LedgerTransaction {
   adminPhonePeCreditFundingRequest AdminPhonePeCreditRequest? @relation("AdminPhonePeCreditFundingTransaction")
   adminPhonePeCreditLedgerRequest AdminPhonePeCreditRequest? @relation("AdminPhonePeCreditLedgerTransaction")
   rewardFundFundingRecord RewardFundFundingRecord?
+  rewardFundFundingRequest RewardFundFundingRequest?
   createdAt      DateTime      @default(now()) @map("created_at")
 
   @@index([referenceType, referenceId])
@@ -353,6 +358,7 @@ model P2pWithdrawalOffer {
   amountPaise    BigInt           @map("amount_paise")
   currency       String           @default("INR") @db.Char(3)
   paymentMethod  String           @default("UPI") @map("payment_method")
+  fundingSource  String           @default("CASH") @map("funding_source") @db.VarChar(16)
   payeeVpa       String           @map("payee_vpa")
   payeeName      String?          @map("payee_name") @db.VarChar(100)
   status         String           @default("OPEN")
@@ -704,6 +710,43 @@ model AdminWalletFundingRequest {
   @@map("admin_wallet_funding_requests")
 }
 
+model RewardWallet {
+  id               String              @id @default(uuid()) @db.Uuid
+  userId           String              @unique @map("user_id") @db.Uuid
+  user             User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  availablePaise   BigInt              @default(0) @map("available_paise")
+  pendingPaise     BigInt              @default(0) @map("pending_paise")
+  reservedPaise    BigInt              @default(0) @map("reserved_paise")
+  totalEarnedPaise BigInt              @default(0) @map("total_earned_paise")
+  entries          RewardLedgerEntry[]
+  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("reward_wallets")
+}
+
+/// Append-only non-cash reward ledger. Delta fields reconcile to the cached
+/// wallet balances and each event is idempotent by its unique key.
+model RewardLedgerEntry {
+  id                  String       @id @default(uuid()) @db.Uuid
+  walletId            String       @map("wallet_id") @db.Uuid
+  wallet              RewardWallet @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  eventType           String       @map("event_type") @db.VarChar(64)
+  referenceType       String       @map("reference_type") @db.VarChar(64)
+  referenceId         String       @map("reference_id") @db.VarChar(120)
+  amountPaise         BigInt       @map("amount_paise")
+  availableDeltaPaise BigInt       @default(0) @map("available_delta_paise")
+  pendingDeltaPaise   BigInt       @default(0) @map("pending_delta_paise")
+  reservedDeltaPaise  BigInt       @default(0) @map("reserved_delta_paise")
+  idempotencyKey      String       @unique @map("idempotency_key") @db.VarChar(180)
+  metadata            Json         @default("{}")
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([walletId, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("reward_ledger_entries")
+}
+
 model RewardFundFundingRecord {
   id                    String            @id @default(uuid()) @db.Uuid
   verifiedByUserId      String            @map("verified_by_user_id") @db.Uuid
@@ -712,16 +755,46 @@ model RewardFundFundingRecord {
   sourceAccountLabel    String            @map("source_account_label") @db.VarChar(100)
   externalReferenceHash String            @unique @map("external_reference_hash") @db.Char(64)
   evidenceReference     String            @map("evidence_reference") @db.VarChar(160)
-  evidenceSha256        String            @map("evidence_sha256") @db.Char(64)
+  evidenceSha256        String?           @map("evidence_sha256") @db.Char(64)
   statementDate         DateTime          @map("statement_date") @db.Date
   reason                String            @db.VarChar(500)
   idempotencyKey        String            @unique @map("idempotency_key") @db.VarChar(120)
   ledgerTransactionId   String            @unique @map("ledger_transaction_id") @db.Uuid
   ledgerTransaction     LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  fundingRequestId      String?           @unique @map("funding_request_id") @db.Uuid
+  fundingRequest        RewardFundFundingRequest? @relation(fields: [fundingRequestId], references: [id], onDelete: Restrict)
   createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([createdAt])
   @@map("reward_fund_funding_records")
+}
+
+model RewardFundFundingRequest {
+  id                     String            @id @default(uuid()) @db.Uuid
+  makerUserId            String            @map("maker_user_id") @db.Uuid
+  maker                  User              @relation("RewardFundFundingRequestMaker", fields: [makerUserId], references: [id], onDelete: Restrict)
+  amountPaise            BigInt            @map("amount_paise")
+  recipientVpa           String            @map("recipient_vpa") @db.VarChar(100)
+  reason                 String            @db.VarChar(500)
+  status                 String            @default("PENDING_PAYMENT") @db.VarChar(32)
+  idempotencyKey         String            @unique @map("idempotency_key") @db.VarChar(120)
+  paymentReferenceHash   String?           @unique @map("payment_reference_hash") @db.Char(64)
+  paymentReferenceMasked String?           @map("payment_reference_masked") @db.VarChar(24)
+  statementDate          DateTime?         @map("statement_date") @db.Date
+  evidenceReference      String?           @map("evidence_reference") @db.VarChar(160)
+  verifiedByUserId       String?           @map("verified_by_user_id") @db.Uuid
+  verifiedBy             User?             @relation("RewardFundFundingRequestVerifier", fields: [verifiedByUserId], references: [id], onDelete: Restrict)
+  decisionReason         String?           @map("decision_reason") @db.VarChar(500)
+  ledgerTransactionId    String?           @unique @map("ledger_transaction_id") @db.Uuid
+  ledgerTransaction      LedgerTransaction? @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  fundingRecord          RewardFundFundingRecord?
+  createdAt              DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  submittedAt            DateTime?         @map("submitted_at") @db.Timestamptz(3)
+  decidedAt              DateTime?         @map("decided_at") @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@index([makerUserId, createdAt])
+  @@map("reward_fund_funding_requests")
 }
 
 model AdminPhonePeCreditRequest {

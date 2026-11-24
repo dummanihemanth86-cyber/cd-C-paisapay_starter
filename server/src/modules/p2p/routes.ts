@@ -8,7 +8,7 @@ import { uuidRef } from '../../lib/security.js';
 import { requireAdmin, requireAuth } from '../../middleware/auth.js';
 import { assertManualUpiOperationsEnabled, manualUpiOperationsGate } from '../../middleware/financialOperations.js';
 import { env } from '../../config/env.js';
-import { grantVerifiedP2pOrderReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../payments/depositReward.js';
+import { grantVerifiedP2pOrderRewardResult, P2P_ORDER_REWARD_PERCENT_BPS } from '../payments/depositReward.js';
 import { lockPaymentReference } from '../payments/paymentReferenceLock.js';
 import { grantVerifiedReferralCommission } from '../users/referralCommission.js';
 import { committedP2pAmount, createWithdrawalOffer, deriveP2pOfferStatus, ensureOpenP2pOffersReserved, expireP2pOffers, expireUnconfirmedP2pMatches, p2pPaymentHandoffUnresolved, P2P_ACTIVE_ORDER_STATUSES, P2P_COMMITTED_ORDER_STATUSES, P2P_HELD_ORDER_STATUSES, P2P_MATCH_CONFIRM_TTL_MS, releaseOfferFunds, reserveOfferFunds, validateP2pEvidence } from './service.js';
@@ -211,14 +211,19 @@ p2pRouter.post('/deposits/quick-match', p2pLimit, asyncRoute(async (req, res) =>
 }));
 
 function p2pRewardPreview(amountPaise: bigint) {
+  const enabled = env.p2pOrderRewardEnabled;
   return {
     percentBps: P2P_ORDER_REWARD_PERCENT_BPS,
     estimatedPaise: Number(amountPaise * BigInt(P2P_ORDER_REWARD_PERCENT_BPS) / 10_000n),
-    enabled: env.p2pOrderRewardEnabled,
-    status: env.p2pOrderRewardEnabled ? 'PENDING_PAYMENT_VERIFICATION_AND_FUND_CHECK' : 'DISABLED',
-    message: env.p2pOrderRewardEnabled
-      ? 'Estimated 6.2% verified-deposit reward; credited only after independent payment verification and a sufficient balance in the mapped dedicated INR REWARD_FUND ledger account.'
-      : 'Estimated 6.2% reward; the verified-deposit reward program is disabled, so no additional wallet credit is promised.',
+    enabled,
+    rewardWallet: true,
+    cashEquivalent: false,
+    withdrawalEnabled: false,
+    withdrawalMode: 'UNAVAILABLE_PENDING_VERIFIED_PAYOUT_PATH',
+    status: enabled ? 'PENDING_PAYMENT_VERIFICATION_AND_FUND_CHECK' : 'DISABLED',
+    message: enabled
+      ? 'Estimated reward is separate from cash and is posted only after payment verification and available verified reward funding.'
+      : 'Reward program is disabled; no reward is promised. Reward balances are separate from cash.',
   };
 }
 
@@ -421,12 +426,19 @@ p2pRouter.get('/deposits/orders/my', asyncRoute(async (req, res) => {
   if (env.manualUpiOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
   const rows = await db.p2pDepositOrder.findMany({ where: { OR: [{ buyerUserId: req.auth!.userId }, { sellerUserId: req.auth!.userId }] }, include: { sellerPaymentConfirmation: { select: { confirmedAt: true } }, withdrawalOffer: { select: { id: true, referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, reviewReason: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } }, orderBy: { createdAt: 'desc' }, take: 100 });
   const orderEvents = await p2pOrderEvents(db, rows.map((row) => row.id));
-  const rewards = await db.ledgerTransaction.findMany({ where: { idempotencyKey: { in: rows.map((row) => `P2P_ORDER_REWARD:${row.id}`) } }, select: { idempotencyKey: true, metadata: true } });
-  const rewardByOrder = new Map(rewards.map((reward) => [reward.idempotencyKey.slice('P2P_ORDER_REWARD:'.length), reward.metadata]));
+  const rewardKeys = rows.map((row) => `P2P_ORDER_REWARD:${row.id}`);
+  const [rewards, legacyCashRewards] = await Promise.all([
+    db.rewardLedgerEntry.findMany({ where: { idempotencyKey: { in: rewardKeys } }, select: { idempotencyKey: true, metadata: true, amountPaise: true, eventType: true } }),
+    db.ledgerTransaction.findMany({ where: { idempotencyKey: { in: rewardKeys } }, select: { idempotencyKey: true, metadata: true } }),
+  ]);
+  const rewardByOrder = new Map(rewards.map((reward) => [reward.idempotencyKey.slice('P2P_ORDER_REWARD:'.length), reward]));
+  const legacyCashRewardByOrder = new Map(legacyCashRewards.map((reward) => [reward.idempotencyKey.slice('P2P_ORDER_REWARD:'.length), reward.metadata]));
   res.json({ serverTime: new Date(), orders: rows.map((row) => {
-    const metadata = rewardByOrder.get(row.id) as Record<string, unknown> | undefined;
+    const metadata = rewardByOrder.get(row.id);
+    const legacyMetadata = legacyCashRewardByOrder.get(row.id) as Record<string, unknown> | undefined;
     const preview = row.buyerUserId === req.auth!.userId ? p2pRewardPreview(row.amountPaise) : undefined;
-    return { ...row, viewerRole: row.buyerUserId === req.auth!.userId ? 'BUYER' : 'SELLER', sellerPaymentConfirmation: row.sellerPaymentConfirmation ? { confirmedAt: row.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(row.amountPaise), withdrawalOffer: row.withdrawalOffer, timestamps: p2pOrderTimestamps(row, orderEvents.get(row.id) ?? []), reward: preview ? { ...preview, creditedPaise: Number(metadata?.amountPaise ?? 0) } : undefined, claims: row.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: row.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) };
+    const pending = metadata?.eventType === 'P2P_ORDER_REWARD_PENDING';
+    return { ...row, viewerRole: row.buyerUserId === req.auth!.userId ? 'BUYER' : 'SELLER', sellerPaymentConfirmation: row.sellerPaymentConfirmation ? { confirmedAt: row.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(row.amountPaise), withdrawalOffer: row.withdrawalOffer, timestamps: p2pOrderTimestamps(row, orderEvents.get(row.id) ?? []), reward: preview ? { ...preview, creditedPaise: pending ? 0 : Number(metadata?.amountPaise ?? 0n), pendingPaise: pending ? Number(metadata?.amountPaise ?? 0n) : 0, status: pending ? 'PENDING_FUNDING' : metadata ? 'CREDITED' : legacyMetadata ? 'LEGACY_RECORDED' : preview.status, legacyCashRewardPaise: Number(legacyMetadata?.amountPaise ?? 0) } : undefined, claims: row.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: row.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) };
   }) });
 }));
 
@@ -435,10 +447,15 @@ p2pRouter.get('/deposits/orders/:id', asyncRoute(async (req, res) => {
   if (env.manualUpiOperationsEnabled) await db.$transaction((tx) => expireUnconfirmedP2pMatches(tx));
   const order = await db.p2pDepositOrder.findUnique({ where: { id: req.params.id }, include: { sellerPaymentConfirmation: { select: { confirmedAt: true } }, withdrawalOffer: { select: { referenceId: true } }, claims: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true, transactionReference: true, createdAt: true, claimedAmountPaise: true, claimedPaidAt: true, evidenceMimeType: true } } } });
   if (!order || (order.buyerUserId !== req.auth!.userId && order.sellerUserId !== req.auth!.userId)) throw new HttpError(404, 'P2P_ORDER_NOT_FOUND', 'Matched deposit order was not found.');
-  const reward = order.buyerUserId === req.auth!.userId ? await db.ledgerTransaction.findUnique({ where: { idempotencyKey: `P2P_ORDER_REWARD:${order.id}` }, select: { metadata: true } }) : null;
+  const [reward, legacyCashReward] = order.buyerUserId === req.auth!.userId ? await Promise.all([
+    db.rewardLedgerEntry.findUnique({ where: { idempotencyKey: `P2P_ORDER_REWARD:${order.id}` }, select: { metadata: true, amountPaise: true, eventType: true } }),
+    db.ledgerTransaction.findUnique({ where: { idempotencyKey: `P2P_ORDER_REWARD:${order.id}` }, select: { metadata: true } }),
+  ]) : [null, null];
   const orderEvents = await p2pOrderEvents(db, [order.id]);
   const rewardMetadata = reward?.metadata as Record<string, unknown> | undefined;
-  res.json({ serverTime: new Date(), order: { ...order, sellerPaymentConfirmation: order.sellerPaymentConfirmation ? { confirmedAt: order.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(order.amountPaise), timestamps: p2pOrderTimestamps(order, orderEvents.get(order.id) ?? []), reward: order.buyerUserId === req.auth!.userId ? { ...p2pRewardPreview(order.amountPaise), creditedPaise: Number(rewardMetadata?.amountPaise ?? 0) } : undefined, claims: order.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: order.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) } });
+  const legacyRewardMetadata = legacyCashReward?.metadata as Record<string, unknown> | undefined;
+  const pending = reward?.eventType === 'P2P_ORDER_REWARD_PENDING';
+  res.json({ serverTime: new Date(), order: { ...order, sellerPaymentConfirmation: order.sellerPaymentConfirmation ? { confirmedAt: order.sellerPaymentConfirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' } : null, amountPaise: Number(order.amountPaise), timestamps: p2pOrderTimestamps(order, orderEvents.get(order.id) ?? []), reward: order.buyerUserId === req.auth!.userId ? { ...p2pRewardPreview(order.amountPaise), status: pending ? 'PENDING_FUNDING' : reward ? 'CREDITED' : legacyCashReward ? 'LEGACY_RECORDED' : p2pRewardPreview(order.amountPaise).status, creditedPaise: pending ? 0 : Number(reward?.amountPaise ?? 0n), pendingPaise: pending ? Number(reward?.amountPaise ?? 0n) : 0, legacyCashRewardPaise: Number(legacyRewardMetadata?.amountPaise ?? 0) } : undefined, claims: order.claims.map((claim) => ({ ...claim, claimedAmountPaise: claim.claimedAmountPaise === null ? null : Number(claim.claimedAmountPaise), evidenceAttached: Boolean(claim.evidenceMimeType), evidenceMimeType: undefined, transactionReference: order.buyerUserId === req.auth!.userId ? claim.transactionReference : undefined })) } });
 }));
 
 p2pRouter.post('/orders/:id/dispute', p2pLimit, asyncRoute(async (req, res) => {
@@ -644,7 +661,7 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     } });
     const updatedClaim = await tx.p2pPaymentClaim.update({ where: { id: claim.id }, data: { status: 'APPROVED', reviewedByUserId: req.auth!.userId, reviewedAt: new Date(), reviewReason: input.reason, evidenceReference: input.evidenceReference, verifiedAmountPaise: BigInt(input.verifiedAmountPaise!), verifiedCurrency: 'INR', receiverConfirmed: true } });
     await tx.p2pDepositOrder.update({ where: { id: claim.orderId }, data: { status: 'COMPLETED', providerReference: input.verifiedTransactionReference! } });
-    const rewardPaise = await grantVerifiedP2pOrderReward(tx, { orderId: claim.orderId, userId: claim.order.buyerUserId, actorUserId: req.auth!.userId, amountPaise: claim.order.amountPaise });
+    const reward = await grantVerifiedP2pOrderRewardResult(tx, { orderId: claim.orderId, userId: claim.order.buyerUserId, actorUserId: req.auth!.userId, amountPaise: claim.order.amountPaise });
     const referralCommission = await grantVerifiedReferralCommission(tx, { orderId: claim.orderId, buyerUserId: claim.order.buyerUserId, actorUserId: req.auth!.userId, amountPaise: claim.order.amountPaise });
     const completed = await tx.p2pDepositOrder.aggregate({ where: { withdrawalOfferId: claim.order.withdrawalOfferId, status: 'COMPLETED' }, _sum: { amountPaise: true } });
     const committed = await committedP2pAmount(tx, claim.order.withdrawalOfferId);
@@ -659,12 +676,13 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     await tx.reconciliationRecord.create({ data: { provider: 'MANUAL_P2P_UPI', providerReference: input.verifiedTransactionReference!, internalReference: claim.order.referenceId, amountPaise: claim.order.amountPaise, currency: 'INR', status: 'APPROVED' } });
     await tx.auditLog.create({ data: { actorId: req.auth!.userId, action: 'P2P_PAYMENT_CLAIM_APPROVED', target: `P2P_DEPOSIT_ORDER:${claim.orderId}`, reason: input.reason, metadata: { claimId: claim.id, evidenceReference: input.evidenceReference, amountPaise: claim.order.amountPaise.toString(), currency: 'INR', receiverConfirmed: true, ledgerTransactionId: ledger.id } } });
     await tx.notification.createMany({ data: [
-      { userId: claim.order.buyerUserId, title: 'Congratulations! Your deposit was successful.', body: `Order ${claim.order.referenceId}: ₹${(Number(claim.order.amountPaise) / 100).toFixed(2)} deposit${rewardPaise > 0n ? ` + ₹${(Number(rewardPaise) / 100).toFixed(2)} eligible reward = ₹${(Number(claim.order.amountPaise + rewardPaise) / 100).toFixed(2)} credited` : ' credited. No funded reward was available for this order'}. View your receipt in Quick Deposit.` },
+      { userId: claim.order.buyerUserId, title: 'P2P payment verified', body: `Order ${claim.order.referenceId}: ₹${(Number(claim.order.amountPaise) / 100).toFixed(2)} cash principal was credited. ${reward.status === 'CREDITED' ? `A separate non-cash reward of ₹${(Number(reward.rewardPaise) / 100).toFixed(2)} was added to the reward wallet.` : reward.status === 'PENDING_FUNDING' ? `Reward ₹${(Number(reward.pendingPaise) / 100).toFixed(2)} is pending verified reward-pool funds and is not spendable.` : reward.status === 'LEGACY_RECORDED' ? 'An older reward record exists; no additional reward was issued.' : 'The reward program is disabled.'} View your receipt and reward wallet in the app.` },
       { userId: claim.order.sellerUserId, title: offerStatus === 'SETTLED' ? 'P2P withdrawal settled' : 'P2P payment verified', body: offerStatus === 'SETTLED' ? `Offer ${claim.order.withdrawalOffer.referenceId} was fully settled after Finance verified receipt.` : offerStatus === 'CANCELLED' || offerStatus === 'EXPIRED' ? `A matched order for offer ${claim.order.withdrawalOffer.referenceId} was verified and settled. The offer remains ${offerStatus.toLowerCase()}; its unmatched amount is not available to new buyers.` : `A partial payment was verified for offer ${claim.order.withdrawalOffer.referenceId}. Other buyers may still match its remaining amount.` },
     ] });
-    return { claim: updatedClaim, orderStatus: 'COMPLETED', offerStatus, credited: true, rewardPaise, referralCommission };
+    return { claim: updatedClaim, orderStatus: 'COMPLETED', offerStatus, credited: true, reward, referralCommission };
   }, { isolationLevel: 'Serializable' });
-  res.json({ claim: { id: result.claim.id, status: result.claim.status }, orderStatus: result.orderStatus, offerStatus: result.offerStatus, rematchableAmountPaise: result.rematchableAmountPaise === undefined ? undefined : Number(result.rematchableAmountPaise), credited: result.credited, rewardPaise: Number(result.rewardPaise ?? 0n), referralCommissionPaise: Number(result.referralCommission?.amountPaise ?? 0n), referralCommissionStatus: result.referralCommission?.status ?? 'NONE', message: result.credited ? `Finance verified the exact receipt. The buyer was credited once; reward credited ₹${(Number(result.rewardPaise) / 100).toFixed(2)}; offer status is ${result.offerStatus}.` : 'Claim rejected, buyer order cancelled and its amount released for another match. No wallet credit was made.' });
+  const reward = result.reward;
+  res.json({ claim: { id: result.claim.id, status: result.claim.status }, orderStatus: result.orderStatus, offerStatus: result.offerStatus, rematchableAmountPaise: result.rematchableAmountPaise === undefined ? undefined : Number(result.rematchableAmountPaise), credited: result.credited, rewardStatus: reward?.status ?? 'NONE', rewardPaise: Number(reward?.rewardPaise ?? 0n), rewardPendingPaise: Number(reward?.pendingPaise ?? 0n), rewardRateBps: reward?.percentageBps ?? P2P_ORDER_REWARD_PERCENT_BPS, rewardCashEquivalent: false, rewardWithdrawalEnabled: false, referralCommissionPaise: Number(result.referralCommission?.amountPaise ?? 0n), referralCommissionStatus: result.referralCommission?.status ?? 'NONE', message: result.credited ? `Finance verified the exact receipt. The buyer cash principal was credited once. ${reward?.status === 'CREDITED' ? `Separate funded reward ₹${(Number(reward.rewardPaise) / 100).toFixed(2)} was added to the reward wallet.` : reward?.status === 'PENDING_FUNDING' ? `Reward ₹${(Number(reward.pendingPaise) / 100).toFixed(2)} remains pending verified reserve funding.` : reward?.status === 'LEGACY_RECORDED' ? 'An older reward record exists; no additional reward was issued.' : 'The reward program is disabled.'} Offer status is ${result.offerStatus}.` : 'Claim rejected, buyer order cancelled and its amount released for another match. No wallet credit was made.' });
 }));
 
 async function getLedgerAccount(tx: import('../../generated/prisma/client.js').Prisma.TransactionClient, userId: string, type: 'AVAILABLE' | 'RESERVED') {

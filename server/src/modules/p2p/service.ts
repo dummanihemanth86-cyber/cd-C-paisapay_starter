@@ -93,7 +93,10 @@ export async function releaseOfferFunds(tx: Tx, offer: { id: string; userId: str
 }
 
 /** Move funds into RESERVED only when a buyer actually matches an offer. */
-export async function reserveOfferFunds(tx: Tx, offer: { id: string; userId: string; amountPaise: bigint }, actorUserId: string | null) {
+export async function reserveOfferFunds(tx: Tx, offer: { id: string; userId: string; amountPaise: bigint; fundingSource?: string }, actorUserId: string | null) {
+  if (offer.fundingSource === 'REWARD') {
+    throw new HttpError(503, 'REWARD_WITHDRAWAL_PAYOUT_UNAVAILABLE', 'Reward balances cannot be used to create cash P2P withdrawal offers until a verified reward payout path is available.');
+  }
   assertManualUpiOperationsEnabled();
   const idempotencyKey = `P2P_WITHDRAWAL_RESERVED:${offer.id}`;
   const existing = await tx.ledgerTransaction.findUnique({ where: { idempotencyKey }, select: { id: true } });
@@ -272,7 +275,10 @@ export async function expireP2pOffersBatch(db: PrismaClient, now = new Date()) {
   });
 }
 
-export async function createWithdrawalOffer(input: { userId: string; amountPaise: number; idempotencyKey: string }) {
+export async function createWithdrawalOffer(input: { userId: string; amountPaise: number; idempotencyKey: string; fundingSource?: string }) {
+  if (input.fundingSource === 'REWARD') {
+    throw new HttpError(503, 'REWARD_WITHDRAWAL_PAYOUT_UNAVAILABLE', 'Reward balances cannot be used to create cash P2P withdrawal offers until a verified reward payout path is available.');
+  }
   assertManualUpiOperationsEnabled();
   const db = databaseRequired();
   const amount = BigInt(input.amountPaise);

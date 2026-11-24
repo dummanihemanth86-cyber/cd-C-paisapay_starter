@@ -226,7 +226,7 @@ usersRouter.post('/me/bank-accounts/:id/verify', asyncRoute(async (req, res) => 
 
 usersRouter.get('/me/balance', asyncRoute(async (req, res) => {
   const db = databaseRequired();
-  const [accounts, rewardProfit] = await Promise.all([
+  const [accounts, rewardProfit, rewardWallet] = await Promise.all([
     db.ledgerAccount.findMany({ where: { userId: req.auth!.userId }, include: { entries: { select: { debitPaise: true, creditPaise: true } } } }),
     db.ledgerEntry.aggregate({
       where: {
@@ -235,6 +235,7 @@ usersRouter.get('/me/balance', asyncRoute(async (req, res) => {
       },
       _sum: { creditPaise: true },
     }),
+    db.rewardWallet.findUnique({ where: { userId: req.auth!.userId }, select: { availablePaise: true, pendingPaise: true, reservedPaise: true, totalEarnedPaise: true } }),
   ]);
   const balances = { availablePaise: 0n, pendingPaise: 0n, reservedPaise: 0n, withdrawalPendingPaise: 0n };
   for (const account of accounts) {
@@ -244,7 +245,32 @@ usersRouter.get('/me/balance', asyncRoute(async (req, res) => {
     if (account.type === 'RESERVED') balances.reservedPaise = total;
     if (account.type === 'WITHDRAWAL_PENDING') balances.withdrawalPendingPaise = total;
   }
-  res.json({ currency: 'INR', availablePaise: paiseJson(balances.availablePaise), pendingPaise: paiseJson(balances.pendingPaise), reservedPaise: paiseJson(balances.reservedPaise), withdrawalPendingPaise: paiseJson(balances.withdrawalPendingPaise), rewardProfitPaise: paiseJson(rewardProfit._sum.creditPaise ?? 0n), authoritative: true });
+  res.json({ currency: 'INR', availablePaise: paiseJson(balances.availablePaise), pendingPaise: paiseJson(balances.pendingPaise), reservedPaise: paiseJson(balances.reservedPaise), withdrawalPendingPaise: paiseJson(balances.withdrawalPendingPaise), rewardProfitPaise: paiseJson(rewardProfit._sum.creditPaise ?? 0n), rewardWallet: { availablePaise: paiseJson(rewardWallet?.availablePaise ?? 0n), pendingPaise: paiseJson(rewardWallet?.pendingPaise ?? 0n), reservedPaise: paiseJson(rewardWallet?.reservedPaise ?? 0n), totalEarnedPaise: paiseJson(rewardWallet?.totalEarnedPaise ?? 0n), cashEquivalent: false }, authoritative: true });
+}));
+
+usersRouter.get('/me/reward-wallet', asyncRoute(async (req, res) => {
+  const wallet = await databaseRequired().rewardWallet.findUnique({ where: { userId: req.auth!.userId }, include: { entries: { orderBy: { createdAt: 'desc' }, take: 100 } } });
+  res.json({
+    currency: 'INR',
+    cashEquivalent: false,
+    withdrawalEnabled: false,
+    withdrawalMode: 'UNAVAILABLE_PENDING_VERIFIED_PAYOUT_PATH',
+    withdrawalMessage: 'Promotional rewards are separate from cash and cannot be withdrawn until an independently verified payout path is available.',
+    wallet: {
+      availablePaise: paiseJson(wallet?.availablePaise ?? 0n),
+      pendingPaise: paiseJson(wallet?.pendingPaise ?? 0n),
+      reservedPaise: paiseJson(wallet?.reservedPaise ?? 0n),
+      totalEarnedPaise: paiseJson(wallet?.totalEarnedPaise ?? 0n),
+      withdrawableRewardPaise: 0,
+      withdrawalEnabled: false,
+      withdrawalMessage: 'Reward balance is not cash-equivalent. No verified payout path is configured.',
+    },
+    transactions: (wallet?.entries ?? []).map((entry) => ({
+      id: entry.id, eventType: entry.eventType, referenceType: entry.referenceType, referenceId: entry.referenceId,
+      amountPaise: paiseJson(entry.amountPaise), availableDeltaPaise: paiseJson(entry.availableDeltaPaise),
+      pendingDeltaPaise: paiseJson(entry.pendingDeltaPaise), reservedDeltaPaise: paiseJson(entry.reservedDeltaPaise), createdAt: entry.createdAt,
+    })),
+  });
 }));
 
 usersRouter.get('/me/transactions', asyncRoute(async (req, res) => {

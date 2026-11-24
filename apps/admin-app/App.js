@@ -5,6 +5,7 @@ import Constants from 'expo-constants';
 import { isRunningInExpoGo } from 'expo';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import responseHelpers from './responseHelpers.cjs';
+import RewardFundingSection from './RewardFundingSection';
 const { adminRecordDetailPath } = require('../../shared/adminRecordNavigation.cjs');
 const { financialActionState } = require('../../shared/adminFinancialUx.cjs');
 const { parseRupeesToPaise, walletAdjustmentUiState, newIdempotencyKey } = require('../../shared/walletAdjustmentUi.cjs');
@@ -43,6 +44,7 @@ const NAV = [
   ['ledger', 'Wallet Ledger', '/api/v1/admin/wallets/ledger'],
   ['walletAdjustments', 'Wallet Adjustment', null],
   ['phonePeCredits', 'Admin Credits', null],
+  ['rewardFunding', 'Reward Funding', null],
   ['providers', 'Payment Providers', '/api/v1/admin/providers'],
   ['commissions', 'Commissions', '/api/v1/admin/commissions'],
   ['referrals', 'Referral & Team', '/api/v1/admin/referrals'],
@@ -328,7 +330,7 @@ function AppBody() {
     const item = NAV.find(x => x[0] === key); if ((!item && key !== 'walletCredits') || !token) return;
     setBusy(true); setError(''); if (key === 'reports') setPayloadSection(null);
     if (key === 'walletAdjustments') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
-    if (key === 'phonePeCredits' || key === 'walletCredits') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
+      if (key === 'phonePeCredits' || key === 'walletCredits' || key === 'rewardFunding') { setPayload({ ready: true }); setPayloadSection(key); setBusy(false); return; }
     const queryParams = new URLSearchParams();
     if (query.trim() && key !== 'overview' && key !== 'ledger') queryParams.set('q', query.trim());
     if (statusFilter.trim() && key !== 'overview' && key !== 'ledger') queryParams.set('status', statusFilter.trim().toUpperCase());
@@ -600,6 +602,7 @@ function AppBody() {
       {section === 'ledger' && walletAdjustment.visible ? <FinancialActionNotice title="Wallet adjustments unavailable" reason={walletAdjustment.reason} /> : null}
       {section === 'walletAdjustments' ? <WalletAdjustmentAdminSection request={request} access={access} profile={profile} setInfo={setInfo} setError={setError} /> : null}
       {section === 'phonePeCredits' ? <AdminPhonePeCreditsSection request={request} token={access} /> : null}
+      {section === 'rewardFunding' ? <RewardFundingSection request={request} token={access} /> : null}
       {section === 'health' && payoutProcessing.visible ? <FinancialActionNotice title="Payout processing unavailable" reason={payoutProcessing.reason} /> : null}
       {busy ? <ActivityIndicator color={COLORS.blue} size="large" style={{ marginTop: 30 }} /> : null}
       {section === 'overview' && payloadSection === section && payload ? <><View style={styles.card}><Text style={styles.cardEyebrow}>LIVE · DATABASE</Text><Text style={styles.cardTitle}>Operations overview</Text><Text style={styles.cardNote}>Tap a metric to open its related records. Figures come from the PaisaPay backend. Gross transaction volume and ledger balances are separate measures.</Text></View><View style={styles.grid}>{Object.entries(payload.metrics || {}).filter(([, v]) => typeof v === 'number' || typeof v === 'string' || v === null).map(([k, v]) => <Pressable key={k} onPress={() => selectSection(k.toLowerCase().includes('deposit') ? 'deposits' : k.toLowerCase().includes('withdraw') ? 'withdrawals' : k.toLowerCase().includes('user') ? 'users' : 'transactions')} style={({ pressed }) => [styles.metric, pressed && styles.pressed]}><Text style={styles.metricLabel}>{k.replace(/([A-Z])/g, ' $1').replace(/Paise$/i, '')}</Text><Text style={styles.metricValue}>{v === null ? 'Not configured' : /Paise$/i.test(k) ? `₹${(Number(v) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : String(v)}</Text><Text style={styles.metricHint}>View records ›</Text></Pressable>)}</View><View style={styles.card}><Text style={styles.cardTitle}>Transaction and registration trends</Text><View style={styles.decisionRow}>{[['daily','7 days'],['weekly','4 weeks'],['monthly','12 months']].map(([key,title]) => <Button key={key} title={chartRange === key ? `✓ ${title}` : title} secondary onPress={() => setChartRange(key)}/>)}</View><View style={styles.chartLegend}><Text style={styles.rowDetail}>● Deposits</Text><Text style={[styles.rowDetail,{color:COLORS.gold}]}>● Withdrawals</Text><Text style={[styles.rowDetail,{color:COLORS.green}]}>● New users</Text></View>{(payload.charts?.[chartRange] || []).map((point, index, list) => { const max = Math.max(1, ...list.map(x => Number(x.depositsPaise) + Number(x.withdrawalsPaise))); const dep = Math.max(4, 92 * Number(point.depositsPaise) / max); const wd = Math.max(4, 92 * Number(point.withdrawalsPaise) / max); const users = Math.min(24, Number(point.registrations) * 3); return <View key={`${point.date}-${index}`} style={styles.chartRow}><Text style={styles.chartDate}>{new Date(point.date).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}</Text><View style={styles.chartTrack}><View style={[styles.chartDeposit,{width:`${dep}%`}]}/><View style={[styles.chartWithdraw,{width:`${wd}%`}]}/></View><Text style={styles.chartUsers}>{Number(point.registrations)} users</Text></View>; })}</View></> : null}

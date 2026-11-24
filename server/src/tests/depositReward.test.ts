@@ -1,84 +1,150 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '../generated/prisma/client.js';
 import { env } from '../config/env.js';
-import { grantVerifiedDepositReward } from '../modules/payments/depositReward.js';
+import { grantVerifiedP2pOrderRewardResult } from '../modules/payments/depositReward.js';
+import { REWARD_FUND_ACCOUNT_ID, REWARD_LIABILITY_ACCOUNT_ID } from '../modules/payments/rewardWallet.js';
 
-const rewardFundId = '00000000-0000-4000-8000-000000000103';
-const userId = '00000000-0000-4000-8000-000000000201';
-const actorId = '00000000-0000-4000-8000-000000000202';
-const oldEnv = {
-  financialOperationsEnabled: env.financialOperationsEnabled,
-  manualUpiOperationsEnabled: env.manualUpiOperationsEnabled,
-  p2pOrderRewardEnabled: env.p2pOrderRewardEnabled,
-  p2pOrderRewardFundAccountId: env.p2pOrderRewardFundAccountId,
-  p2pOrderRewardFundingSource: env.p2pOrderRewardFundingSource,
-};
+const userId = '00000000-0000-4000-8000-000000000301';
+const actorId = '00000000-0000-4000-8000-000000000302';
 
-afterEach(() => {
-  Object.assign(env, oldEnv);
-});
-
-function rewardTx(balancePaise: bigint, options: { fundExists?: boolean; availableExists?: boolean } = {}) {
-  const ledgerCreate = vi.fn(async () => ({ id: 'reward-ledger-id' }));
-  const auditCreate = vi.fn(async () => ({ id: 'audit-id' }));
-  let balanceQuerySeen = false;
+function rewardTx(initialReservePaise: bigint, orderOverrides: Record<string, { status?: string; amountPaise?: bigint }> = {}) {
+  const wallet = { id: 'reward-wallet-id', userId, availablePaise: 0n, pendingPaise: 0n, reservedPaise: 0n, totalEarnedPaise: 0n };
+  const entries = new Map<string, any>();
+  const transactions = new Map<string, any>();
+  let reservePaise = initialReservePaise;
+  const rewardWalletUpdate = vi.fn(async ({ data }: any) => {
+    for (const field of ['availablePaise', 'pendingPaise', 'reservedPaise', 'totalEarnedPaise']) {
+      if (data[field]?.increment !== undefined) wallet[field] += data[field].increment;
+      if (data[field]?.decrement !== undefined) wallet[field] -= data[field].decrement;
+    }
+    return wallet;
+  });
+  const rewardEntryCreate = vi.fn(async ({ data }: any) => {
+    if (entries.has(data.idempotencyKey)) throw new Error('DUPLICATE_REWARD_IDEMPOTENCY_KEY');
+    const entry = { id: `reward-entry-${entries.size + 1}`, ...data };
+    entries.set(data.idempotencyKey, entry);
+    return entry;
+  });
+  const ledgerTransactionCreate = vi.fn(async ({ data }: any) => {
+    if (transactions.has(data.idempotencyKey)) throw new Error('DUPLICATE_LEDGER_IDEMPOTENCY_KEY');
+    const ledger = { id: `ledger-transaction-${transactions.size + 1}`, metadata: data.metadata, createdAt: new Date() };
+    transactions.set(data.idempotencyKey, ledger);
+    const reserveDebit = data.entries.create.find((entry: any) => entry.accountId === REWARD_FUND_ACCOUNT_ID)?.debitPaise ?? 0n;
+    reservePaise -= reserveDebit;
+    return ledger;
+  });
   const tx = {
-    ledgerTransaction: { findUnique: vi.fn(async () => null), create: ledgerCreate },
-    ledgerAccount: { findUnique: vi.fn(async ({ where }: any) => {
-      if (where.id) return options.fundExists === false ? null : { id: rewardFundId, type: 'REWARD_FUND', currency: 'INR' };
-      return options.availableExists === false ? null : { id: 'available-account-id' };
-    }) },
-    $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
-      if (parts.join('').includes('SELECT COALESCE(SUM(credit_paise - debit_paise)')) {
-        balanceQuerySeen = true;
-        return [{ balance: balancePaise }];
-      }
-      return [];
-    }),
-    auditLog: { create: auditCreate },
+    p2pDepositOrder: {
+      findUnique: vi.fn(async ({ where }: any) => ({
+        buyerUserId: userId,
+        status: orderOverrides[where.id]?.status ?? 'COMPLETED',
+        amountPaise: orderOverrides[where.id]?.amountPaise ?? 10_000n,
+      })),
+    },
+    ledgerAccount: { upsert: vi.fn(async ({ where }: any) => ({
+      id: where.id,
+      type: where.id === REWARD_FUND_ACCOUNT_ID ? 'REWARD_FUND' : 'REWARD_LIABILITY',
+      currency: 'INR',
+    })) },
+    ledgerTransaction: {
+      findUnique: vi.fn(async ({ where }: any) => transactions.get(where.idempotencyKey) ?? null),
+      create: ledgerTransactionCreate,
+    },
+    rewardWallet: {
+      upsert: vi.fn(async () => wallet),
+      findUniqueOrThrow: vi.fn(async () => wallet),
+      update: rewardWalletUpdate,
+    },
+    rewardLedgerEntry: {
+      findUnique: vi.fn(async ({ where }: any) => entries.get(where.idempotencyKey) ?? null),
+      create: rewardEntryCreate,
+    },
+    auditLog: { create: vi.fn(async () => ({ id: 'audit-entry' })) },
+    $queryRaw: vi.fn(async (parts: TemplateStringsArray) => parts.join('').includes('COALESCE(SUM(credit_paise - debit_paise)')
+      ? [{ balance: reservePaise }]
+      : []),
   } as unknown as Prisma.TransactionClient;
-  return { tx, ledgerCreate, auditCreate, get balanceQuerySeen() { return balanceQuerySeen; } };
+  return { tx, wallet, entries, transactions, rewardEntryCreate, ledgerTransactionCreate, get reservePaise() { return reservePaise; } };
 }
 
-describe('verified deposit reward', () => {
-  it('calculates 6.2% in paise and posts one balanced reward after reserve lock', async () => {
-    Object.assign(env, { financialOperationsEnabled: false, manualUpiOperationsEnabled: true, p2pOrderRewardEnabled: true, p2pOrderRewardFundAccountId: rewardFundId, p2pOrderRewardFundingSource: 'DEDICATED_REWARD_FUND' });
-    const fixture = rewardTx(10_000n);
-    const rewardPaise = await grantVerifiedDepositReward(fixture.tx, { source: 'UPI_DEPOSIT', referenceId: 'deposit-1', userId, actorUserId: actorId, amountPaise: 10_000n });
-
-    expect(rewardPaise).toBe(620n);
-    expect(fixture.balanceQuerySeen).toBe(true);
-    expect(fixture.ledgerCreate).toHaveBeenCalledOnce();
-    const journal = fixture.ledgerCreate.mock.calls[0][0] as any;
-    expect(journal.data).toMatchObject({ eventType: 'UPI_DEPOSIT_REWARD', idempotencyKey: 'UPI_DEPOSIT_REWARD:deposit-1' });
-    expect(journal.data.entries.create).toEqual([
-      { accountId: rewardFundId, debitPaise: 620n },
-      { accountId: 'available-account-id', creditPaise: 620n },
-    ]);
-    expect(fixture.auditCreate).toHaveBeenCalledOnce();
-  });
-
-  it('does not spend a disabled reserve and refuses approval when an enabled reserve is insufficient', async () => {
-    Object.assign(env, { financialOperationsEnabled: false, manualUpiOperationsEnabled: true, p2pOrderRewardEnabled: false, p2pOrderRewardFundAccountId: rewardFundId, p2pOrderRewardFundingSource: 'DEDICATED_REWARD_FUND' });
-    const disabled = rewardTx(10_000n);
-    await expect(grantVerifiedDepositReward(disabled.tx, { source: 'UPI_DEPOSIT', referenceId: 'deposit-disabled', userId, actorUserId: actorId, amountPaise: 10_000n })).resolves.toBe(0n);
-    expect(disabled.ledgerCreate).not.toHaveBeenCalled();
-
+async function withRewardConfiguration<T>(work: () => Promise<T>) {
+  const previous = {
+    manualUpiOperationsEnabled: env.manualUpiOperationsEnabled,
+    p2pOrderRewardEnabled: env.p2pOrderRewardEnabled,
+    p2pOrderRewardPercentBps: env.p2pOrderRewardPercentBps,
+    p2pOrderRewardFundAccountId: env.p2pOrderRewardFundAccountId,
+    p2pOrderRewardFundingSource: env.p2pOrderRewardFundingSource,
+  };
+  try {
+    env.manualUpiOperationsEnabled = true;
     env.p2pOrderRewardEnabled = true;
-    const insufficient = rewardTx(619n);
-    await expect(grantVerifiedDepositReward(insufficient.tx, { source: 'UPI_DEPOSIT', referenceId: 'deposit-insufficient', userId, actorUserId: actorId, amountPaise: 10_000n }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'REWARD_FUND_INSUFFICIENT' });
-    expect(insufficient.ledgerCreate).not.toHaveBeenCalled();
-  });
+    env.p2pOrderRewardPercentBps = 620;
+    env.p2pOrderRewardFundAccountId = REWARD_FUND_ACCOUNT_ID;
+    env.p2pOrderRewardFundingSource = 'DEDICATED_REWARD_FUND';
+    return await work();
+  } finally {
+    Object.assign(env, previous);
+  }
+}
 
-  it('refuses approval if the reserve account or destination wallet is missing', async () => {
-    Object.assign(env, { financialOperationsEnabled: false, manualUpiOperationsEnabled: true, p2pOrderRewardEnabled: true, p2pOrderRewardFundAccountId: rewardFundId, p2pOrderRewardFundingSource: 'DEDICATED_REWARD_FUND' });
-    const missingFund = rewardTx(10_000n, { fundExists: false });
-    const missingWallet = rewardTx(10_000n, { availableExists: false });
-    const input = { source: 'P2P_ORDER' as const, referenceId: 'order-1', userId, actorUserId: actorId, amountPaise: 10_000n };
-    await expect(grantVerifiedDepositReward(missingFund.tx, input)).rejects.toMatchObject({ statusCode: 503, code: 'REWARD_FUND_NOT_READY' });
-    await expect(grantVerifiedDepositReward(missingWallet.tx, input)).rejects.toMatchObject({ statusCode: 500, code: 'USER_WALLET_NOT_READY' });
-    expect(missingFund.ledgerCreate).not.toHaveBeenCalled();
-    expect(missingWallet.ledgerCreate).not.toHaveBeenCalled();
-  });
+describe('admin-funded P2P reward calculation and ledger safety', () => {
+  it('credits 6.2% from the verified reserve as a separate reward-wallet liability', async () => withRewardConfiguration(async () => {
+    const fixture = rewardTx(100_000n, { 'order-500': { amountPaise: 50_000n } });
+    const order100 = await grantVerifiedP2pOrderRewardResult(fixture.tx, { orderId: 'order-100', userId, actorUserId: actorId, amountPaise: 10_000n });
+    const order500 = await grantVerifiedP2pOrderRewardResult(fixture.tx, { orderId: 'order-500', userId, actorUserId: actorId, amountPaise: 50_000n });
+
+    expect(order100).toMatchObject({ status: 'CREDITED', rewardPaise: 620n, pendingPaise: 0n, percentageBps: 620 });
+    expect(order500).toMatchObject({ status: 'CREDITED', rewardPaise: 3_100n, pendingPaise: 0n, percentageBps: 620 });
+    expect(fixture.reservePaise).toBe(96_280n);
+    expect(fixture.wallet).toMatchObject({ availablePaise: 3_720n, pendingPaise: 0n, totalEarnedPaise: 3_720n });
+    expect(fixture.entries.get('P2P_ORDER_REWARD:order-100')).toMatchObject({ amountPaise: 620n, availableDeltaPaise: 620n });
+    const journal = fixture.ledgerTransactionCreate.mock.calls[0][0] as any;
+    expect(journal.data.entries.create).toEqual([
+      { accountId: REWARD_FUND_ACCOUNT_ID, debitPaise: 620n },
+      { accountId: REWARD_LIABILITY_ACCOUNT_ID, creditPaise: 620n },
+    ]);
+  }));
+
+  it('never awards more than the verified reserve and records shortage as non-spendable pending reward', async () => withRewardConfiguration(async () => {
+    const fixture = rewardTx(500n);
+    const result = await grantVerifiedP2pOrderRewardResult(fixture.tx, { orderId: 'underfunded-order', userId, actorUserId: actorId, amountPaise: 10_000n });
+
+    expect(result).toMatchObject({ status: 'PENDING_FUNDING', rewardPaise: 0n, pendingPaise: 620n });
+    expect(fixture.reservePaise).toBe(500n);
+    expect(fixture.wallet).toMatchObject({ availablePaise: 0n, pendingPaise: 620n, totalEarnedPaise: 0n });
+    expect(fixture.ledgerTransactionCreate).not.toHaveBeenCalled();
+    expect(fixture.entries.get('P2P_ORDER_REWARD_PENDING:underfunded-order')).toMatchObject({ amountPaise: 620n, pendingDeltaPaise: 620n });
+  }));
+
+  it('does not double debit the reserve or credit the reward wallet on duplicate settlement', async () => withRewardConfiguration(async () => {
+    const fixture = rewardTx(10_000n);
+    const input = { orderId: 'duplicate-order', userId, actorUserId: actorId, amountPaise: 10_000n };
+    const first = await grantVerifiedP2pOrderRewardResult(fixture.tx, input);
+    const replay = await grantVerifiedP2pOrderRewardResult(fixture.tx, input);
+
+    expect(first.status).toBe('CREDITED');
+    expect(replay).toMatchObject({ status: 'CREDITED', rewardPaise: 620n });
+    expect(fixture.reservePaise).toBe(9_380n);
+    expect(fixture.wallet).toMatchObject({ availablePaise: 620n, pendingPaise: 0n, totalEarnedPaise: 620n });
+    expect(fixture.ledgerTransactionCreate).toHaveBeenCalledOnce();
+    expect(fixture.rewardEntryCreate).toHaveBeenCalledTimes(2);
+  }));
+
+  it.each(['CANCELLED', 'REFUNDED', 'PAYMENT_SUBMITTED'])('rejects %s orders before writing any reward', async (status) => withRewardConfiguration(async () => {
+    const fixture = rewardTx(10_000n, { [`order-${status}`]: { status } });
+    await expect(grantVerifiedP2pOrderRewardResult(fixture.tx, {
+      orderId: `order-${status}`, userId, actorUserId: actorId, amountPaise: 10_000n,
+    })).rejects.toMatchObject({ code: 'P2P_REWARD_ORDER_NOT_SETTLED' });
+    expect(fixture.ledgerTransactionCreate).not.toHaveBeenCalled();
+    expect(fixture.rewardEntryCreate).not.toHaveBeenCalled();
+  }));
+
+  it('uses the persisted completed order amount and rejects a mismatched caller amount', async () => withRewardConfiguration(async () => {
+    const fixture = rewardTx(10_000n);
+    await expect(grantVerifiedP2pOrderRewardResult(fixture.tx, {
+      orderId: 'order-100', userId, actorUserId: actorId, amountPaise: 20_000n,
+    })).rejects.toMatchObject({ code: 'P2P_REWARD_AMOUNT_MISMATCH' });
+    expect(fixture.ledgerTransactionCreate).not.toHaveBeenCalled();
+    expect(fixture.rewardEntryCreate).not.toHaveBeenCalled();
+  }));
 });
