@@ -646,7 +646,7 @@ adminRouter.get('/reward-fund/readiness', asyncRoute(async (req, res) => {
 
 adminRouter.get('/reward-fund/dashboard', asyncRoute(async (req, res) => {
   requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
-  res.json(await readRewardFundDashboard(databaseRequired()));
+  res.json(await readRewardFundDashboard(databaseRequired(), req.auth!.userId));
 }));
 
 adminRouter.get('/reward-fund/fundings', asyncRoute(async (req, res) => {
@@ -690,7 +690,11 @@ adminRouter.post('/reward-fund/funding-requests/:id/decision', adminMutationLimi
   requireRole(req.auth!.role, new Set(['SUPER_ADMIN']));
   const input = z.object({ decision: z.enum(['VERIFY', 'REJECT']), reason: z.string().trim().min(8).max(500), paymentReference: z.string().trim().min(6).max(200).optional(), receivedAmountPaise: z.number().int().positive().optional(), receivedVpa: z.string().trim().max(100).optional(), receiverConfirmed: z.literal(true).optional() }).strict().parse(req.body);
   const db = databaseRequired();
-  const result = await db.$transaction((tx) => decideRewardFundFundingRequest(tx, { requestId: req.params.id, verifierUserId: req.auth!.userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  // The service locks the funding-request row before reading its status. Under
+  // READ COMMITTED, a concurrent verifier waits on that lock and then sees the
+  // committed VERIFIED state, returning an idempotent replay instead of an
+  // avoidable SERIALIZABLE retry failure.
+  const result = await db.$transaction((tx) => decideRewardFundFundingRequest(tx, { requestId: req.params.id, verifierUserId: req.auth!.userId, ...input }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   const record = result.record;
   res.json({ request: { id: result.request.id, amountPaise: Number(result.request.amountPaise), status: result.request.status, paymentReferenceMasked: result.request.paymentReferenceMasked, ledgerTransactionId: result.request.ledgerTransactionId }, fundingRecord: record ? { id: record.id, amountPaise: Number(record.amountPaise), sourceAccountLabel: record.sourceAccountLabel, evidenceReference: record.evidenceReference, statementDate: record.statementDate, reason: record.reason, ledgerTransactionId: record.ledgerTransactionId, fundingRequestId: record.fundingRequestId, createdAt: record.createdAt } : null, pendingRewardsProcessed: result.pendingRewardsProcessed, pendingRewardPaise: Number(result.pendingRewardPaise), replayed: result.replayed, message: input.decision === 'REJECT' ? 'Funding request rejected. No reserve or user wallet balance was changed.' : `Receiver-side receipt attested and booked. ${result.pendingRewardsProcessed} pending reward(s) were released only from verified reserve funds.` });
 }));

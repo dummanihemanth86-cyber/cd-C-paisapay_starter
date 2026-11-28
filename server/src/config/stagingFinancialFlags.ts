@@ -1,0 +1,27 @@
+/**
+ * Financial mutations are intentionally unavailable in the staging service.
+ * Keep this list aligned with the deployment's financial gate inventory.
+ */
+export const STAGING_FINANCIAL_FLAG_NAMES = [
+  'FINANCIAL_OPERATIONS_ENABLED',
+  'MANUAL_UPI_OPERATIONS_ENABLED',
+  'MANUAL_UPI_PRODUCTION_APPROVED',
+  'UPI_DEPOSIT_REWARD_ENABLED',
+  'P2P_ORDER_REWARD_ENABLED',
+  'P2P_ORDER_REWARD_PRODUCTION_APPROVED',
+  'P2P_ORDER_REWARD_EXTERNAL_RECONCILIATION_VERIFIED',
+  'REWARD_FUND_FUNDING_ENABLED',
+  'WALLET_ADJUSTMENTS_ENABLED',
+  'ADMIN_WALLET_FUNDING_ENABLED',
+  'ADMIN_WALLET_CREDITS_ENABLED',
+  'ADMIN_PHONEPE_CREDITS_ENABLED',
+  'ADMIN_PHONEPE_CREDITS_PRODUCTION_APPROVED',
+  'ADMIN_STAGING_DIRECT_CREDITS_ENABLED',
+  'ADMIN_WALLET_PRODUCTION_APPROVED',
+  'ADMIN_WALLET_EXTERNAL_RECONCILIATION_VERIFIED',
+  'WELCOME_BONUS_ENABLED',
+] as const;
+
+export function stagingFinancialFlagViolations(values: Readonly<Record<string, string | undefined>>) {
+  return STAGING_FINANCIAL_FLAG_NAMES.filter((name) => values[name] !== 'false');
+}

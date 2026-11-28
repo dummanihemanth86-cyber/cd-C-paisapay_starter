@@ -3,7 +3,9 @@ import { env } from '../../config/env.js';
 import { HttpError } from '../../lib/http.js';
 import { assertFinancialOrManualUpiOperationsEnabled } from '../../middleware/financialOperations.js';
 import { DEVELOPMENT_REWARD_FUND_ACCOUNT_ID } from '../users/welcomeBonus.js';
-import { queuePendingReward, releasePendingReward, REWARD_FUND_ACCOUNT_ID, REWARD_LIABILITY_ACCOUNT_ID } from './rewardWallet.js';
+import { queuePendingReward, releasePendingReward, REWARD_LIABILITY_ACCOUNT_ID } from './rewardWallet.js';
+import { inspectRewardReserve } from './rewardReserve.js';
+import { assertP2pReviewerIsNotParty } from './rewardSafety.js';
 
 export const VERIFIED_DEPOSIT_REWARD_PERCENT_BPS = env.upiDepositRewardPercentBps;
 export const P2P_ORDER_REWARD_PERCENT_BPS = env.p2pOrderRewardPercentBps;
@@ -18,7 +20,7 @@ type VerifiedDepositRewardInput = {
 };
 
 export type P2pRewardResult = {
-  status: 'DISABLED' | 'PENDING_FUNDING' | 'CREDITED' | 'LEGACY_RECORDED';
+  status: 'DISABLED' | 'BLOCKED' | 'PENDING_FUNDING' | 'CREDITED' | 'LEGACY_RECORDED';
   rewardPaise: bigint;
   pendingPaise: bigint;
   percentageBps: number;
@@ -52,21 +54,25 @@ function rewardMetadata(amountPaise: bigint, orderAmountPaise: bigint, percentag
 async function postFundedReward(
   tx: Prisma.TransactionClient,
   input: { userId: string; orderId: string; orderAmountPaise: bigint; rewardPaise: bigint; percentageBps: number; actorUserId: string },
-): Promise<boolean> {
-  const fundId = env.p2pOrderRewardFundAccountId || REWARD_FUND_ACCOUNT_ID;
+): Promise<'CREDITED' | 'INSUFFICIENT' | 'BLOCKED'> {
+  if (!env.rewardFundFundingEnabled || !env.p2pOrderRewardEnabled || !env.p2pOrderRewardFundAccountId
+    || env.p2pOrderRewardFundingSource !== 'DEDICATED_REWARD_FUND') return 'BLOCKED';
+  const fundId = env.p2pOrderRewardFundAccountId;
   const [fund, liability] = await Promise.all([
-    tx.ledgerAccount.upsert({ where: { id: fundId }, create: { id: fundId, type: 'REWARD_FUND', currency: 'INR' }, update: {} }),
+    tx.ledgerAccount.findUnique({ where: { id: fundId }, select: { id: true, type: true, currency: true } }),
     tx.ledgerAccount.upsert({ where: { id: REWARD_LIABILITY_ACCOUNT_ID }, create: { id: REWARD_LIABILITY_ACCOUNT_ID, type: 'REWARD_LIABILITY', currency: 'INR' }, update: {} }),
   ]);
-  if (fund.type !== 'REWARD_FUND' || fund.currency !== 'INR' || liability.type !== 'REWARD_LIABILITY' || liability.currency !== 'INR') return false;
+  if (!fund || fund.type !== 'REWARD_FUND' || fund.currency !== 'INR' || liability.type !== 'REWARD_LIABILITY' || liability.currency !== 'INR') return 'BLOCKED';
 
   await tx.$queryRaw`SELECT id FROM ledger_accounts WHERE id IN (${fund.id}::uuid, ${liability.id}::uuid) ORDER BY id FOR UPDATE`;
+  const reserve = await inspectRewardReserve(tx);
+  if (!reserve.reconciled) return 'BLOCKED';
   const keys = rewardKeys(input.orderId);
   const idempotencyKey = keys.credited;
   const prior = await tx.ledgerTransaction.findUnique({ where: { idempotencyKey }, select: { id: true, metadata: true } });
   if (prior) {
     const priorCredit = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey }, select: { id: true } });
-    if (priorCredit) return true;
+    if (priorCredit) return 'CREDITED';
     const metadata = prior.metadata as Record<string, unknown>;
     const amount = BigInt(String(metadata.amountPaise ?? input.rewardPaise));
     const pending = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: keys.pending }, select: { id: true } });
@@ -78,18 +84,18 @@ async function postFundedReward(
         metadata: rewardMetadata(amount, input.orderAmountPaise, Number(metadata.percentageBps ?? input.percentageBps), fund.id, true),
       });
     }
-    await releasePendingReward(tx, {
+    const released = await releasePendingReward(tx, {
       userId: input.userId, referenceType: 'P2P_DEPOSIT_ORDER', referenceId: input.orderId,
       pendingIdempotencyKey: keys.pending, idempotencyKey, eventType: 'P2P_ORDER_REWARD',
-      metadata: rewardMetadata(amount, input.orderAmountPaise, Number(metadata.percentageBps ?? input.percentageBps), fund.id, false),
+      metadata: rewardMetadata(amount, input.orderAmountPaise, Number(metadata.percentageBps ?? input.percentageBps), fund.id, false), reserveJournalTransactionId: prior.id,
     });
-    return true;
+    return released === amount ? 'CREDITED' : 'BLOCKED';
   }
 
   const [balance] = await tx.$queryRaw<Array<{ balance: bigint }>>`
     SELECT COALESCE(SUM(credit_paise - debit_paise), 0)::bigint AS balance
     FROM ledger_entries WHERE account_id = ${fund.id}::uuid`;
-  if (!balance || balance.balance < input.rewardPaise) return false;
+  if (!balance || balance.balance < input.rewardPaise) return 'INSUFFICIENT';
 
   const metadata = rewardMetadata(input.rewardPaise, input.orderAmountPaise, input.percentageBps, fund.id, false);
   // Lock ordering is reserve accounts first, then the user reward wallet. This
@@ -100,7 +106,7 @@ async function postFundedReward(
     idempotencyKey: rewardKeys(input.orderId).pending,
     metadata: rewardMetadata(input.rewardPaise, input.orderAmountPaise, input.percentageBps, fund.id, true),
   });
-  await tx.ledgerTransaction.create({ data: {
+  const reserveJournal = await tx.ledgerTransaction.create({ data: {
     eventType: 'P2P_ORDER_REWARD',
     referenceType: 'P2P_DEPOSIT_ORDER',
     referenceId: input.orderId,
@@ -114,7 +120,7 @@ async function postFundedReward(
   } });
   const released = await releasePendingReward(tx, {
     userId: input.userId, referenceType: 'P2P_DEPOSIT_ORDER', referenceId: input.orderId,
-    pendingIdempotencyKey: keys.pending, idempotencyKey, eventType: 'P2P_ORDER_REWARD', metadata,
+    pendingIdempotencyKey: keys.pending, idempotencyKey, eventType: 'P2P_ORDER_REWARD', metadata, reserveJournalTransactionId: reserveJournal.id,
   });
   if (released !== input.rewardPaise) throw new HttpError(409, 'REWARD_LEDGER_POSTING_MISMATCH', 'The reserve journal and reward wallet did not post the same amount. The transaction was rolled back.');
   await tx.auditLog.create({ data: {
@@ -124,14 +130,46 @@ async function postFundedReward(
     reason: 'The verified and settled P2P order reward was funded by the cleared reward reserve and posted to the separate reward wallet.',
     metadata: { amountPaise: String(input.rewardPaise), orderAmountPaise: String(input.orderAmountPaise), percentageBps: input.percentageBps, rewardFundAccountId: fund.id, rewardLiabilityAccountId: liability.id, customerCashTouched: false },
   } });
-  return true;
+  return 'CREDITED';
+}
+
+async function verifySettledP2pOrder(tx: Prisma.TransactionClient, input: { orderId: string; userId: string; amountPaise: bigint }) {
+  const order = await tx.p2pDepositOrder.findUnique({ where: { id: input.orderId }, select: { buyerUserId: true, sellerUserId: true, amountPaise: true, currency: true, status: true, providerReference: true } });
+  if (!order || order.status !== 'COMPLETED' || order.buyerUserId !== input.userId || order.currency !== 'INR') {
+    throw new HttpError(409, 'P2P_REWARD_ORDER_NOT_SETTLED', 'Only the buyer of a completed INR P2P order can receive a reward.');
+  }
+  if (order.amountPaise !== input.amountPaise) throw new HttpError(409, 'P2P_REWARD_AMOUNT_MISMATCH', 'Reward calculation must use the persisted completed order amount.');
+  const claim = await tx.p2pPaymentClaim.findFirst({
+    where: { orderId: input.orderId, status: 'APPROVED', userId: input.userId, receiverConfirmed: true, verifiedAmountPaise: order.amountPaise, verifiedCurrency: 'INR', reviewedByUserId: { not: null } },
+    orderBy: { reviewedAt: 'desc' },
+    select: { id: true, orderId: true, userId: true, transactionReference: true, reviewedByUserId: true, verifiedAmountPaise: true, verifiedCurrency: true, receiverConfirmed: true },
+  });
+  if (!claim?.reviewedByUserId || !order.providerReference || claim.transactionReference?.trim().toUpperCase() !== order.providerReference.trim().toUpperCase()) throw new HttpError(409, 'P2P_REWARD_APPROVED_CLAIM_REQUIRED', 'A manually approved payment claim, matching order reference, and receiver-side attestation are required before reward eligibility.');
+  assertP2pReviewerIsNotParty(claim.reviewedByUserId, order.buyerUserId, order.sellerUserId);
+  const reviewer = await tx.adminUser.findUnique({ where: { userId: claim.reviewedByUserId }, select: { role: true, user: { select: { status: true } } } });
+  if (!reviewer || reviewer.user.status !== 'ACTIVE' || !['FINANCE', 'ADMIN', 'SUPER_ADMIN'].includes(reviewer.role)) {
+    throw new HttpError(409, 'P2P_REWARD_REVIEWER_NOT_AUTHORIZED', 'The approved claim has no active authorized Finance/Admin reviewer.');
+  }
+  const settlement = await tx.ledgerTransaction.findUnique({
+    where: { idempotencyKey: `P2P_PAYMENT_VERIFIED:${input.orderId}` },
+    include: { entries: { include: { account: { select: { userId: true, type: true, currency: true } } } } },
+  });
+  const entries = settlement?.entries ?? [];
+  const sellerDebit = entries.filter((entry) => entry.account.userId === order.sellerUserId && entry.account.type === 'RESERVED' && entry.account.currency === 'INR' && entry.debitPaise === order.amountPaise && entry.creditPaise === 0n);
+  const buyerCredit = entries.filter((entry) => entry.account.userId === order.buyerUserId && entry.account.type === 'AVAILABLE' && entry.account.currency === 'INR' && entry.creditPaise === order.amountPaise && entry.debitPaise === 0n);
+  if (!settlement || settlement.eventType !== 'P2P_PAYMENT_VERIFIED' || settlement.referenceType !== 'P2P_DEPOSIT_ORDER'
+    || settlement.referenceId !== input.orderId || entries.length !== 2 || sellerDebit.length !== 1 || buyerCredit.length !== 1) {
+    throw new HttpError(409, 'P2P_REWARD_PRINCIPAL_SETTLEMENT_REQUIRED', 'A balanced seller-reserve to buyer-cash principal settlement is required before reward eligibility.');
+  }
 }
 
 /** Process oldest pending rewards after a receiver-side verified funding post. */
 export async function processPendingRewardAccruals(tx: Prisma.TransactionClient, fundedByUserId: string, limit = MAX_PENDING_REWARD_BATCH) {
-  if (!env.p2pOrderRewardEnabled || !env.p2pOrderRewardFundAccountId || env.p2pOrderRewardFundingSource !== 'DEDICATED_REWARD_FUND') {
+  if (!env.rewardFundFundingEnabled || !env.p2pOrderRewardEnabled || !env.p2pOrderRewardFundAccountId || env.p2pOrderRewardFundingSource !== 'DEDICATED_REWARD_FUND') {
     return { processed: 0, creditedPaise: 0n };
   }
+  const reserve = await inspectRewardReserve(tx);
+  if (!reserve.reconciled) return { processed: 0, creditedPaise: 0n };
   const pendingRows = await tx.rewardLedgerEntry.findMany({
     where: { eventType: 'P2P_ORDER_REWARD_PENDING', pendingDeltaPaise: { gt: 0n } },
     include: { wallet: { select: { userId: true } } },
@@ -148,8 +186,12 @@ export async function processPendingRewardAccruals(tx: Prisma.TransactionClient,
     const rewardPaise = pending.amountPaise;
     const orderAmountPaise = BigInt(String(pendingMetadata.qualifyingAmountPaise ?? '0'));
     const percentageBps = Number(pendingMetadata.percentageBps ?? P2P_ORDER_REWARD_PERCENT_BPS);
+    if (percentageBps !== env.p2pOrderRewardPercentBps || orderAmountPaise <= 0n
+      || rewardPaise !== orderAmountPaise * BigInt(percentageBps) / 10_000n) continue;
+    try { await verifySettledP2pOrder(tx, { orderId: pending.referenceId, userId: pending.wallet.userId, amountPaise: orderAmountPaise }); }
+    catch { continue; }
     const didCredit = await postFundedReward(tx, { userId: pending.wallet.userId, orderId: pending.referenceId, orderAmountPaise, rewardPaise, percentageBps, actorUserId: fundedByUserId });
-    if (!didCredit) break;
+    if (didCredit !== 'CREDITED') break;
     processed += 1;
     creditedPaise += rewardPaise;
   }
@@ -167,21 +209,14 @@ export async function grantVerifiedP2pOrderRewardResult(
 ): Promise<P2pRewardResult> {
   assertFinancialOrManualUpiOperationsEnabled();
   const percentageBps = env.p2pOrderRewardPercentBps;
-  if (!env.p2pOrderRewardEnabled) return { status: 'DISABLED', rewardPaise: 0n, pendingPaise: 0n, percentageBps };
+  if (!env.rewardFundFundingEnabled || !env.p2pOrderRewardEnabled) return { status: 'DISABLED', rewardPaise: 0n, pendingPaise: 0n, percentageBps };
   if (!input.orderId.trim() || input.amountPaise <= 0n) throw new HttpError(400, 'REWARD_SOURCE_INVALID', 'A positive settled P2P amount and order reference are required.');
   if (!env.p2pOrderRewardFundAccountId || env.p2pOrderRewardFundingSource !== 'DEDICATED_REWARD_FUND') {
     throw new HttpError(503, 'REWARD_FUND_NOT_READY', 'P2P rewards require a mapped dedicated reward reserve. No reward was credited.');
   }
-  const settledOrder = await tx.p2pDepositOrder.findUnique({
-    where: { id: input.orderId },
-    select: { buyerUserId: true, amountPaise: true, status: true },
-  });
-  if (!settledOrder || settledOrder.status !== 'COMPLETED' || settledOrder.buyerUserId !== input.userId) {
-    throw new HttpError(409, 'P2P_REWARD_ORDER_NOT_SETTLED', 'Only the buyer of a completed, payment-verified P2P order can receive this reward.');
-  }
-  if (settledOrder.amountPaise !== input.amountPaise) {
-    throw new HttpError(409, 'P2P_REWARD_AMOUNT_MISMATCH', 'Reward calculation must use the persisted completed order amount. No reward was credited.');
-  }
+  await verifySettledP2pOrder(tx, input);
+  const reserve = await inspectRewardReserve(tx);
+  if (!reserve.reconciled) return { status: 'BLOCKED', rewardPaise: 0n, pendingPaise: 0n, percentageBps };
   const rewardPaise = input.amountPaise * BigInt(percentageBps) / 10_000n;
   if (rewardPaise <= 0n) return { status: 'DISABLED', rewardPaise: 0n, pendingPaise: 0n, percentageBps };
   const keys = rewardKeys(input.orderId);
@@ -198,12 +233,14 @@ export async function grantVerifiedP2pOrderRewardResult(
   if (existingLedger) {
     const amount = BigInt(String((existingLedger.metadata as Record<string, unknown>).amountPaise ?? rewardPaise));
     const didRepair = await postFundedReward(tx, { userId: input.userId, orderId: input.orderId, orderAmountPaise: input.amountPaise, rewardPaise: amount, percentageBps, actorUserId: input.actorUserId });
-    return didRepair
+    return didRepair === 'CREDITED'
       ? { status: 'CREDITED', rewardPaise: amount, pendingPaise: 0n, percentageBps }
-      : { status: 'PENDING_FUNDING', rewardPaise: 0n, pendingPaise: amount, percentageBps };
+      : didRepair === 'INSUFFICIENT' ? { status: 'PENDING_FUNDING', rewardPaise: 0n, pendingPaise: amount, percentageBps }
+        : { status: 'BLOCKED', rewardPaise: 0n, pendingPaise: 0n, percentageBps };
   }
   const didCredit = await postFundedReward(tx, { userId: input.userId, orderId: input.orderId, orderAmountPaise: input.amountPaise, rewardPaise, percentageBps, actorUserId: input.actorUserId });
-  if (didCredit) return { status: 'CREDITED', rewardPaise, pendingPaise: 0n, percentageBps };
+  if (didCredit === 'CREDITED') return { status: 'CREDITED', rewardPaise, pendingPaise: 0n, percentageBps };
+  if (didCredit === 'BLOCKED') return { status: 'BLOCKED', rewardPaise: 0n, pendingPaise: 0n, percentageBps };
   await queuePendingReward(tx, {
     userId: input.userId, eventType: 'P2P_ORDER_REWARD_PENDING', amountPaise: rewardPaise,
     referenceType: 'P2P_DEPOSIT_ORDER', referenceId: input.orderId,
@@ -230,6 +267,7 @@ export async function grantVerifiedP2pOrderReward(
  */
 export async function grantVerifiedDepositReward(tx: Prisma.TransactionClient, input: VerifiedDepositRewardInput): Promise<bigint> {
   assertFinancialOrManualUpiOperationsEnabled();
+  if (!env.rewardFundFundingEnabled) return 0n;
   if (input.source === 'P2P_ORDER') {
     return grantVerifiedP2pOrderReward(tx, { orderId: input.referenceId, userId: input.userId, actorUserId: input.actorUserId, amountPaise: input.amountPaise });
   }

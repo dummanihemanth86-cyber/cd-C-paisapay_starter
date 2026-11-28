@@ -78,7 +78,7 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
       await tx.ledgerEntry.deleteMany({ where: { transaction: { referenceType: 'P2P_TEST_FUNDING', referenceId: sellerId } } });
       await tx.ledgerTransaction.deleteMany({ where: { referenceType: 'P2P_TEST_FUNDING', referenceId: sellerId } });
       await tx.session.deleteMany({ where: { userId: { in: [sellerId, buyerId, adminId] } } });
-      await tx.adminUser.deleteMany({ where: { userId: adminId } });
+      await tx.adminUser.deleteMany({ where: { userId: { in: [sellerId, buyerId, adminId] } } });
       await tx.ledgerEntry.deleteMany({ where: { account: { userId: { in: [sellerId, buyerId, adminId] } } } });
       await tx.ledgerAccount.deleteMany({ where: { userId: { in: [sellerId, buyerId, adminId] } } });
       await tx.user.deleteMany({ where: { id: { in: [sellerId, buyerId, adminId] } } });
@@ -161,11 +161,19 @@ integration('P2P withdrawal offers and quick deposit matching (PostgreSQL integr
     expect(adminClaims.body.claims.find((row: { id: string }) => row.id === claimId)).toMatchObject({ claimedAmountPaise: 50000, evidenceAttached: true, order: { id: order.id, withdrawalOffer: { id: offer.id }, timestamps: { matchedAt: expect.any(String), expiresAt: expect.any(String) } } });
 
     const reviewPath = `/api/v1/admin/p2p/claims/${claimId}/review`;
-    const evidence = { decision: 'APPROVE', reason: 'Verified seller receipt in authorized bank records.', evidenceReference: `P2P-BANK-REVIEW-${randomUUID()}`, verifiedTransactionReference: financeReference, verifiedAmountPaise: 50000, verifiedCurrency: 'INR', verifiedPayeeVpa: 'other@testbank', receiverConfirmed: true };
+    const evidence = { decision: 'APPROVE', reason: 'Manually checked receiver-side test records.', evidenceReference: `P2P-MANUAL-REVIEW-${randomUUID()}`, verifiedTransactionReference: financeReference, verifiedAmountPaise: 50000, verifiedCurrency: 'INR', verifiedPayeeVpa: 'other@testbank', receiverConfirmed: true };
+    const unauthorizedReviewer = await request(app).post(reviewPath).set(buyerAuth).send(evidence).expect(403);
+    expect(unauthorizedReviewer.body.error.code).toMatch(/ADMIN|ROLE|AUTH/i);
     await request(app).post(reviewPath).set(adminAuth).send(evidence).expect(409);
     const validEvidence = { ...evidence, verifiedPayeeVpa: 'seller@testbank' };
+    await db.adminUser.createMany({ data: [{ userId: buyerId, role: 'ADMIN' }, { userId: sellerId, role: 'SUPER_ADMIN' }] });
+    const buyerConflict = await request(app).post(reviewPath).set(buyerAuth).send(validEvidence).expect(403);
+    expect(buyerConflict.body.error.code).toBe('P2P_REVIEW_CONFLICT_OF_INTEREST');
+    const sellerConflict = await request(app).post(reviewPath).set(sellerAuth).send(validEvidence).expect(403);
+    expect(sellerConflict.body.error.code).toBe('P2P_REVIEW_CONFLICT_OF_INTEREST');
+    await db.adminUser.deleteMany({ where: { userId: { in: [buyerId, sellerId] } } });
     await request(app).post(`/api/v1/deposits/orders/${order.id}/seller-received`).set(buyerAuth).send({ transactionReference: financeReference }).expect(404);
-    // Finance can settle directly from its independent receiver-side checks;
+    // Finance can settle after its documented manual receiver-side check;
     // no seller-side acknowledgement is required.
     const approved = await request(app).post(reviewPath).set(adminAuth).send(validEvidence).expect(200);
     expect(approved.body.orderStatus).toBe('COMPLETED');

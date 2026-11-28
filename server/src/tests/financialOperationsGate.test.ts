@@ -10,6 +10,7 @@ import { createWithdrawalOffer, releaseOfferFunds, reserveOfferFunds } from '../
 import { grantVerifiedP2pOrderReward, grantVerifiedUpiDepositReward, P2P_ORDER_REWARD_PERCENT_BPS } from '../modules/payments/depositReward.js';
 import { expireUnpaidUpiDeposits } from '../modules/payments/depositExpiry.js';
 import { recordVerifiedReferralCommission } from '../modules/users/referralCommission.js';
+import { STAGING_FINANCIAL_FLAG_NAMES } from '../config/stagingFinancialFlags.js';
 
 describe('financial operations safety gate policy', () => {
   it('sets the P2P order reward rate to 6.2 percent', () => {
@@ -36,6 +37,7 @@ describe('financial operations safety gate policy', () => {
       PAYMENT_PROVIDER: 'disabled',
       FINANCIAL_OPERATIONS_ENABLED: 'false',
       ADMIN_STAGING_DIRECT_CREDITS_ENABLED: 'false',
+      ...Object.fromEntries(STAGING_FINANCIAL_FLAG_NAMES.map((name) => [name, 'false'])),
       DOTENV_CONFIG_PATH: '.financial-gate-test-no-env-file',
       ...overrides,
     };
@@ -117,14 +119,15 @@ describe('financial operations safety gate policy', () => {
     }
   });
 
-  it('allows financial operations in production mode only for explicitly identified Render staging', () => {
+  it('rejects explicit Render staging when any financial gate is enabled', () => {
     const result = runProductionConfig({
       PAISAPAY_DEPLOYMENT_ENV: 'staging',
       RENDER: 'true',
       RENDER_SERVICE_NAME: 'paisapay-api-staging',
       FINANCIAL_OPERATIONS_ENABLED: 'true',
     });
-    expect(result.status).toBe(0);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Staging requires every financial gate to be explicitly false');
   });
 
   it('allows the explicitly identified Render staging service to start with financial operations disabled', () => {
@@ -137,7 +140,7 @@ describe('financial operations safety gate policy', () => {
     expect(result.status).toBe(0);
   });
 
-  it('allows the explicit staging manual UPI gate while the provider financial gate stays off', () => {
+  it('rejects explicit Render staging when manual UPI is enabled', () => {
     const result = runProductionConfig({
       PAISAPAY_DEPLOYMENT_ENV: 'staging',
       RENDER: 'true',
@@ -145,7 +148,8 @@ describe('financial operations safety gate policy', () => {
       FINANCIAL_OPERATIONS_ENABLED: 'false',
       MANUAL_UPI_OPERATIONS_ENABLED: 'true',
     });
-    expect(result.status).toBe(0);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Staging requires every financial gate to be explicitly false');
   });
 
   it('rejects production manual UPI enablement without an explicit production approval flag', () => {

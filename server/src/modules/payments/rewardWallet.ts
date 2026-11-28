@@ -1,5 +1,6 @@
 import type { Prisma } from '../../generated/prisma/client.js';
 import { HttpError } from '../../lib/http.js';
+import { env } from '../../config/env.js';
 
 type Tx = Prisma.TransactionClient;
 
@@ -64,6 +65,13 @@ export async function grantReward(
   tx: Tx,
   input: { userId: string; eventType: string; amountPaise: bigint; referenceType: string; referenceId: string; idempotencyKey: string; metadata: Prisma.InputJsonObject },
 ) {
+  if (!env.rewardFundFundingEnabled) {
+    throw new HttpError(503, 'REWARD_FUNDING_DISABLED', 'Reward funding is disabled. No reward was credited.');
+  }
+  if (input.referenceType === 'P2P_DEPOSIT_ORDER' || input.eventType.startsWith('P2P_ORDER_REWARD')) {
+    if (!env.p2pOrderRewardEnabled) throw new HttpError(503, 'P2P_REWARD_DISABLED', 'P2P order rewards are disabled. No reward was credited.');
+    throw new HttpError(403, 'P2P_REWARD_SERVICE_REQUIRED', 'P2P rewards must use the verified settlement and funded reserve workflow.');
+  }
   if (input.amountPaise <= 0n) return false;
   const wallet = await lockRewardWallet(tx, input.userId);
   const existing = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: input.idempotencyKey }, select: { id: true } });
@@ -81,6 +89,18 @@ export async function queuePendingReward(
   tx: Tx,
   input: { userId: string; eventType: string; amountPaise: bigint; referenceType: string; referenceId: string; idempotencyKey: string; metadata: Prisma.InputJsonObject },
 ) {
+  if (!env.rewardFundFundingEnabled) {
+    throw new HttpError(503, 'REWARD_FUNDING_DISABLED', 'Reward funding is disabled. No pending reward was recorded.');
+  }
+  if (input.referenceType === 'P2P_DEPOSIT_ORDER' || input.eventType.startsWith('P2P_ORDER_REWARD')) {
+    if (!env.p2pOrderRewardEnabled) {
+      throw new HttpError(503, 'P2P_REWARD_DISABLED', 'Reward funding or P2P reward posting is disabled. No pending reward was recorded.');
+    }
+    if (input.eventType !== 'P2P_ORDER_REWARD_PENDING' || input.referenceType !== 'P2P_DEPOSIT_ORDER'
+      || input.metadata.fundingSource !== 'DEDICATED_REWARD_FUND' || input.metadata.cashEquivalent !== false) {
+      throw new HttpError(403, 'P2P_REWARD_SERVICE_REQUIRED', 'P2P reward entries must be created by the verified funded reward workflow.');
+    }
+  }
   if (input.amountPaise <= 0n) return false;
   const wallet = await lockRewardWallet(tx, input.userId);
   const existing = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: input.idempotencyKey }, select: { id: true } });
@@ -93,14 +113,55 @@ export async function queuePendingReward(
 /** Move a pending reward to available only after the reserve debit commits. */
 export async function releasePendingReward(
   tx: Tx,
-  input: { userId: string; referenceType: string; referenceId: string; pendingIdempotencyKey: string; idempotencyKey: string; eventType: string; metadata: Prisma.InputJsonObject },
+  input: { userId: string; referenceType: string; referenceId: string; pendingIdempotencyKey: string; idempotencyKey: string; eventType: string; metadata: Prisma.InputJsonObject; reserveJournalTransactionId?: string },
 ) {
-  const wallet = await lockRewardWallet(tx, input.userId);
+  if (!env.rewardFundFundingEnabled) {
+    throw new HttpError(503, 'REWARD_FUNDING_DISABLED', 'Reward funding is disabled. No pending reward was released.');
+  }
+  const isP2pIntent = input.referenceType === 'P2P_DEPOSIT_ORDER' || input.eventType.startsWith('P2P_ORDER_REWARD');
+  if (isP2pIntent && !env.p2pOrderRewardEnabled) {
+    throw new HttpError(503, 'P2P_REWARD_DISABLED', 'P2P order rewards are disabled. No pending reward was released.');
+  }
   const existing = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: input.idempotencyKey }, select: { id: true } });
   if (existing) return 0n;
-  const pending = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: input.pendingIdempotencyKey }, select: { amountPaise: true } });
+  const pending = await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: input.pendingIdempotencyKey }, select: { amountPaise: true, eventType: true, referenceType: true, referenceId: true, metadata: true } });
   if (!pending) return 0n;
   const amountPaise = pending.amountPaise;
+  const isP2pPending = pending.referenceType === 'P2P_DEPOSIT_ORDER' || pending.eventType.startsWith('P2P_ORDER_REWARD');
+  if (isP2pIntent || isP2pPending) {
+    const pendingMetadata = pending.metadata as Record<string, unknown>;
+    const qualifyingAmount = BigInt(String(pendingMetadata.qualifyingAmountPaise ?? '0'));
+    const percentageBps = Number(pendingMetadata.percentageBps ?? 0);
+    if (pending.eventType !== 'P2P_ORDER_REWARD_PENDING' || pending.referenceType !== 'P2P_DEPOSIT_ORDER'
+      || pending.referenceId !== input.referenceId || !env.p2pOrderRewardFundAccountId
+      || input.referenceType !== 'P2P_DEPOSIT_ORDER' || input.eventType !== 'P2P_ORDER_REWARD'
+      || input.reserveJournalTransactionId === undefined || input.idempotencyKey !== `P2P_ORDER_REWARD:${input.referenceId}`
+      || input.pendingIdempotencyKey !== `P2P_ORDER_REWARD_PENDING:${input.referenceId}`
+      || pendingMetadata.fundingSource !== 'DEDICATED_REWARD_FUND' || pendingMetadata.cashEquivalent !== false
+      || pendingMetadata.status !== 'PENDING_FUNDING' || pendingMetadata.amountPaise !== amountPaise.toString()
+      || !Number.isInteger(percentageBps) || percentageBps <= 0 || qualifyingAmount <= 0n
+      || amountPaise !== qualifyingAmount * BigInt(percentageBps) / 10_000n
+      || env.p2pOrderRewardFundingSource !== 'DEDICATED_REWARD_FUND') {
+      throw new HttpError(409, 'P2P_REWARD_RESERVE_JOURNAL_REQUIRED', 'A matching reserve debit and reward-liability journal is required before a P2P pending reward can be released.');
+    }
+    const [proof] = await tx.$queryRaw<Array<{ valid: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM ledger_transactions t
+        WHERE t.id = ${input.reserveJournalTransactionId}::uuid
+          AND t.idempotency_key = ${input.idempotencyKey}
+          AND t.event_type = 'P2P_ORDER_REWARD'
+          AND t.reference_type = 'P2P_DEPOSIT_ORDER'
+          AND t.reference_id = ${input.referenceId}
+          AND (SELECT COALESCE(SUM(e.debit_paise - e.credit_paise), 0) FROM ledger_entries e WHERE e.transaction_id = t.id AND e.account_id = ${env.p2pOrderRewardFundAccountId}::uuid) = ${amountPaise}
+          AND (SELECT COALESCE(SUM(e.credit_paise - e.debit_paise), 0) FROM ledger_entries e WHERE e.transaction_id = t.id AND e.account_id = ${REWARD_LIABILITY_ACCOUNT_ID}::uuid) = ${amountPaise}
+      ) AS valid
+    `;
+    if (!proof?.valid) throw new HttpError(409, 'P2P_REWARD_RESERVE_JOURNAL_REQUIRED', 'The reserve debit and reward-liability journal does not match this pending reward.');
+  } else if (pending.eventType !== input.eventType || pending.referenceType !== input.referenceType || pending.referenceId !== input.referenceId) {
+    throw new HttpError(409, 'REWARD_PENDING_REFERENCE_MISMATCH', 'The pending reward does not match the requested release reference.');
+  }
+  const wallet = await lockRewardWallet(tx, input.userId);
+  if (await tx.rewardLedgerEntry.findUnique({ where: { idempotencyKey: input.idempotencyKey }, select: { id: true } })) return 0n;
   if (wallet.pendingPaise < amountPaise) throw new HttpError(409, 'REWARD_PENDING_BALANCE_MISMATCH', 'Pending reward ledger does not reconcile to its reward wallet. No reward was released.');
   await tx.rewardWallet.update({ where: { id: wallet.id }, data: {
     availablePaise: { increment: amountPaise },

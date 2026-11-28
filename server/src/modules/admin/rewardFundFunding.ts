@@ -6,6 +6,8 @@ import { requireActiveSuperAdmin, hashExternalReference, ADMIN_SETTLEMENT_CASH_I
 import { lockPaymentReference } from '../payments/paymentReferenceLock.js';
 import { REWARD_FUND_ACCOUNT_ID } from '../payments/rewardWallet.js';
 import { processPendingRewardAccruals } from '../payments/depositReward.js';
+import { assertIndependentFundingVerifier } from '../payments/rewardSafety.js';
+import { inspectRewardReserve } from '../payments/rewardReserve.js';
 
 export { REWARD_FUND_ACCOUNT_ID };
 const MAX_REWARD_FUNDING_PAISE = 100_000_000_000;
@@ -21,56 +23,37 @@ export type RecordRewardFundFundingInput = {
   reason: string;
   idempotencyKey: string;
   clearedFundsVerified: boolean;
-  fundingRequestId?: string;
+  fundingRequestId: string;
+  makerUserId: string;
 };
 
 export async function readRewardFundReadiness(db: PrismaClient) {
-  const accountId = env.p2pOrderRewardFundAccountId || REWARD_FUND_ACCOUNT_ID;
-  const rows = await db.$queryRaw<Array<{ id: string | null; type: string | null; currency: string | null; balance: bigint | null }>>`
-    SELECT a.id::text AS id, a.type::text AS type, a.currency,
-           COALESCE(SUM(e.credit_paise - e.debit_paise), 0)::bigint AS balance
-      FROM (SELECT ${accountId}::uuid AS id) expected
-      LEFT JOIN ledger_accounts a ON a.id = expected.id
-      LEFT JOIN ledger_entries e ON e.account_id = a.id
-     GROUP BY a.id, a.type, a.currency`;
-  const account = rows[0];
-  const balancePaise = account?.balance ?? 0n;
-  const accountStatus = !account?.id ? 'MISSING' : account.type !== 'REWARD_FUND' || account.currency !== 'INR' ? 'INVALID' : 'PROVISIONED';
+  const reserve = await inspectRewardReserve(db);
+  const accountId = reserve.configuredAccountId || REWARD_FUND_ACCOUNT_ID;
+  const balancePaise = reserve.balancePaise;
   const [fundingCount, totalFunded, rewardTotals, rewardLedger] = await Promise.all([
     db.rewardFundFundingRecord.count(),
     db.rewardFundFundingRecord.aggregate({ _sum: { amountPaise: true } }),
     db.rewardWallet.aggregate({ _sum: { pendingPaise: true, totalEarnedPaise: true } }),
     db.rewardLedgerEntry.aggregate({ where: { eventType: 'P2P_ORDER_REWARD' }, _sum: { amountPaise: true }, _count: { _all: true } }),
   ]);
-  const [reconciliation] = await db.$queryRaw<Array<{ debits: bigint; credits: bigint }>>`
-    SELECT
-      COALESCE(SUM(CASE WHEN e.account_id = ${accountId}::uuid THEN e.debit_paise ELSE 0 END), 0)::bigint AS debits,
-      COALESCE(SUM(CASE WHEN e.account_id = ${accountId}::uuid THEN e.credit_paise ELSE 0 END), 0)::bigint AS credits
-    FROM ledger_entries e
-    WHERE e.account_id = ${accountId}::uuid`;
-  const ledgerBalancePaise = (reconciliation?.credits ?? 0n) - (reconciliation?.debits ?? 0n);
   const recordedFundingPaise = totalFunded._sum.amountPaise ?? 0n;
   const totalRewardsCreditedPaise = rewardLedger._sum.amountPaise ?? 0n;
-  const rewardFundingLedgerDebit = await db.$queryRaw<Array<{ amount: bigint }>>`
-    SELECT COALESCE(SUM(e.debit_paise), 0)::bigint AS amount
-    FROM ledger_entries e
-    JOIN ledger_transactions t ON t.id = e.transaction_id
-    WHERE e.account_id = ${accountId}::uuid AND t.event_type = 'P2P_ORDER_REWARD'`;
-  const reconciled = ledgerBalancePaise === recordedFundingPaise - (rewardFundingLedgerDebit[0]?.amount ?? 0n);
-  const blockers = [
-    ...(accountStatus !== 'PROVISIONED' ? [`Reward reserve account is ${accountStatus.toLowerCase()}.`] : []),
-    ...(balancePaise <= 0n ? ['Reward reserve has no positive posted balance.'] : []),
-    ...(env.p2pOrderRewardFundAccountId !== accountId ? ['P2P_ORDER_REWARD_FUND_ACCOUNT_ID is not explicitly mapped to the reserve account.'] : []),
-    ...(!reconciled ? ['Reward reserve ledger does not reconcile to verified funding and reward allocations.'] : []),
-    ...(!env.rewardFundReceiverVpa ? ['REWARD_FUND_RECEIVER_VPA is not configured; no UPI funding intent can be created.'] : []),
+  const fundingIntakeBlockers = [
     ...(!env.rewardFundFundingEnabled ? ['REWARD_FUND_FUNDING_ENABLED is false.'] : []),
+    ...(!env.rewardFundReceiverVpa ? ['REWARD_FUND_RECEIVER_VPA is not configured; no UPI funding intent can be created.'] : []),
+  ];
+  const rewardBlockers = [
+    ...reserve.blockers,
+    ...(!env.rewardFundFundingEnabled ? ['REWARD_FUND_FUNDING_ENABLED is false; reward credit and release are blocked.'] : []),
     ...(!env.p2pOrderRewardEnabled ? ['P2P_ORDER_REWARD_ENABLED is false.'] : []),
+    ...(balancePaise <= 0n ? ['Reward reserve has no positive posted balance.'] : []),
     ...(env.nodeEnv === 'production' && !env.isExplicitRenderStaging && !env.p2pOrderRewardProductionApproved ? ['Production reward approval is not recorded.'] : []),
     ...(env.nodeEnv === 'production' && !env.isExplicitRenderStaging && !env.p2pOrderRewardExternalReconciliationVerified ? ['External reward-fund reconciliation is not attested.'] : []),
   ];
   return {
     accountId,
-    accountStatus,
+    accountStatus: reserve.accountStatus,
     currency: 'INR',
     balancePaise: balancePaise.toString(),
     fundingRecords: fundingCount,
@@ -79,15 +62,18 @@ export async function readRewardFundReadiness(db: PrismaClient) {
     totalRewardsCreditedPaise: totalRewardsCreditedPaise.toString(),
     pendingRewardsPaise: (rewardTotals._sum.pendingPaise ?? 0n).toString(),
     rewardedOrders: rewardLedger._count._all,
-    ledgerReconciled: reconciled,
-    ledgerDiscrepancyPaise: (ledgerBalancePaise - (recordedFundingPaise - (rewardFundingLedgerDebit[0]?.amount ?? 0n))).toString(),
+    ledgerReconciled: reserve.reconciled,
+    ledgerDiscrepancyPaise: (balancePaise - (recordedFundingPaise - reserve.rewardFundDebitPaise)).toString(),
+    reserveIntegrity: { status: reserve.reconciled ? 'RECONCILED' : 'BLOCKED', blockers: reserve.blockers, fundingJournalMismatchCount: reserve.fundingJournalMismatchCount, rewardJournalMismatchCount: reserve.rewardJournalMismatchCount },
+    fundingIntake: { status: fundingIntakeBlockers.length ? 'BLOCKED' : 'READY', enabled: env.rewardFundFundingEnabled, canStart: fundingIntakeBlockers.length === 0, blockers: fundingIntakeBlockers },
+    rewardPosting: { status: rewardBlockers.length ? 'BLOCKED' : 'READY', enabled: env.p2pOrderRewardEnabled && env.rewardFundFundingEnabled, blockers: rewardBlockers },
     fundingWorkflowEnabled: env.rewardFundFundingEnabled,
-    fundingCanStart: env.rewardFundFundingEnabled && Boolean(env.rewardFundReceiverVpa),
+    fundingCanStart: fundingIntakeBlockers.length === 0,
     receiverVpa: env.rewardFundReceiverVpa ?? null,
     rewardEnabled: env.p2pOrderRewardEnabled,
     rewardRateBps: env.p2pOrderRewardPercentBps,
-    activationReady: blockers.length === 0,
-    blockers,
+    activationReady: rewardBlockers.length === 0,
+    blockers: [...fundingIntakeBlockers, ...rewardBlockers],
   };
 }
 
@@ -98,6 +84,9 @@ export async function readRewardFundReadiness(db: PrismaClient) {
  */
 export async function recordRewardFundFunding(tx: Prisma.TransactionClient, input: RecordRewardFundFundingInput) {
   if (!env.rewardFundFundingEnabled) throw new HttpError(503, 'REWARD_FUNDING_DISABLED', 'Reward reserve funding is disabled on this server. No ledger entry was created.');
+  if (!env.p2pOrderRewardFundAccountId || env.p2pOrderRewardFundingSource !== 'DEDICATED_REWARD_FUND') throw new HttpError(503, 'REWARD_FUND_MAPPING_REQUIRED', 'Map the dedicated reward reserve account and funding source before recording reserve funding.');
+  if (!input.fundingRequestId || !input.makerUserId) throw new HttpError(409, 'REWARD_FUNDING_REQUEST_REQUIRED', 'Reserve funding must be verified against an existing maker request.');
+  assertIndependentFundingVerifier(input.makerUserId, input.verifiedByUserId);
   await requireActiveSuperAdmin(tx, input.verifiedByUserId);
   if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise <= 0 || input.amountPaise > MAX_REWARD_FUNDING_PAISE) {
     throw new HttpError(400, 'REWARD_FUNDING_AMOUNT_INVALID', 'Funding amount must be positive and within the supported limit.');
@@ -120,7 +109,8 @@ export async function recordRewardFundFunding(tx: Prisma.TransactionClient, inpu
       && existing.evidenceReference === input.evidenceReference.trim()
       && existing.evidenceSha256 === evidenceSha256
       && existing.statementDate.getTime() === input.statementDate.getTime()
-      && existing.reason === input.reason.trim();
+      && existing.reason === input.reason.trim()
+      && existing.fundingRequestId === input.fundingRequestId;
     if (!same) throw new HttpError(409, 'IDEMPOTENCY_KEY_REUSED', 'This idempotency key belongs to different reserve funding evidence.');
     const ledgerTransaction = await tx.ledgerTransaction.findUnique({
       where: { id: existing.ledgerTransactionId },
@@ -146,7 +136,7 @@ export async function recordRewardFundFunding(tx: Prisma.TransactionClient, inpu
     throw new HttpError(409, 'REWARD_FUNDING_REFERENCE_ALREADY_USED', 'This external transaction reference is already recorded for another payment or funding entry.');
   }
 
-  const rewardFundAccountId = env.p2pOrderRewardFundAccountId || REWARD_FUND_ACCOUNT_ID;
+  const rewardFundAccountId = env.p2pOrderRewardFundAccountId;
   const [cash, rewardFund] = await Promise.all([
     tx.ledgerAccount.upsert({ where: { id: ADMIN_SETTLEMENT_CASH_ID }, create: { id: ADMIN_SETTLEMENT_CASH_ID, type: 'SETTLEMENT_CASH', currency: 'INR' }, update: {} }),
     tx.ledgerAccount.upsert({ where: { id: rewardFundAccountId }, create: { id: rewardFundAccountId, type: 'REWARD_FUND', currency: 'INR' }, update: {} }),
@@ -155,6 +145,8 @@ export async function recordRewardFundFunding(tx: Prisma.TransactionClient, inpu
     throw new HttpError(503, 'REWARD_FUND_ACCOUNTS_INVALID', 'The configured INR cash or reward reserve ledger account is invalid. No funding was posted.');
   }
   await tx.$queryRaw`SELECT id FROM ledger_accounts WHERE id IN (${cash.id}::uuid, ${rewardFund.id}::uuid) ORDER BY id FOR UPDATE`;
+  const reserveState = await inspectRewardReserve(tx);
+  if (!reserveState.reconciled) throw new HttpError(503, 'REWARD_FUND_RECONCILIATION_BLOCKED', 'The existing reward reserve does not reconcile. No additional funding was posted; resolve the ledger discrepancy first.');
 
   const recordId = randomUUID();
   const ledger = await tx.ledgerTransaction.create({ data: {
@@ -171,10 +163,12 @@ export async function recordRewardFundFunding(tx: Prisma.TransactionClient, inpu
       evidenceReference: input.evidenceReference.trim(),
       evidenceSha256,
       statementDate: input.statementDate.toISOString().slice(0, 10),
-      verifiedByUserId: input.verifiedByUserId,
-      clearedFundsVerified: true,
+      makerUserId: input.makerUserId,
+      verifierUserId: input.verifiedByUserId,
+      clearedFundsManuallyVerified: true,
+      externalProviderVerification: false,
       rewardFundAccountId: rewardFund.id,
-      fundingRequestId: input.fundingRequestId ?? null,
+      fundingRequestId: input.fundingRequestId,
     },
     entries: { create: [
       { accountId: cash.id, debitPaise: BigInt(input.amountPaise) },
@@ -201,7 +195,7 @@ export async function recordRewardFundFunding(tx: Prisma.TransactionClient, inpu
     action: 'REWARD_FUNDING_RECONCILED',
     target: `REWARD_FUND_FUNDING_RECORD:${record.id}`,
     reason: input.reason.trim(),
-    metadata: { amountPaise: String(input.amountPaise), currency: 'INR', externalReferenceHash, evidenceReference: input.evidenceReference.trim(), evidenceSha256, statementDate: input.statementDate.toISOString().slice(0, 10), ledgerTransactionId: ledger.id, rewardFundAccountId: rewardFund.id, fundingRequestId: input.fundingRequestId ?? null },
+    metadata: { makerUserId: input.makerUserId, verifierUserId: input.verifiedByUserId, amountPaise: String(input.amountPaise), currency: 'INR', externalReferenceHash, evidenceReference: input.evidenceReference.trim(), evidenceSha256, statementDate: input.statementDate.toISOString().slice(0, 10), ledgerTransactionId: ledger.id, rewardFundAccountId: rewardFund.id, fundingRequestId: input.fundingRequestId, verificationMethod: 'MANUAL_RECEIVER_SIDE_HISTORY', externalProviderVerification: false },
   } });
   return { record, ledgerTransaction: ledger, replayed: false };
 }
@@ -313,12 +307,13 @@ export async function decideRewardFundFundingRequest(tx: Prisma.TransactionClien
   await tx.$queryRaw`SELECT id FROM reward_fund_funding_requests WHERE id = ${input.requestId}::uuid FOR UPDATE`;
   const request = await tx.rewardFundFundingRequest.findUnique({ where: { id: input.requestId }, include: { fundingRecord: true } });
   if (!request) throw new HttpError(404, 'REWARD_FUNDING_REQUEST_NOT_FOUND', 'Reward funding request was not found.');
+  assertIndependentFundingVerifier(request.makerUserId, input.verifierUserId);
   if (request.status === 'VERIFIED' && input.decision === 'VERIFY') return { request, record: request.fundingRecord, replayed: true, pendingRewardsProcessed: 0, pendingRewardPaise: 0n };
   if (request.status === 'REJECTED' && input.decision === 'REJECT') return { request, record: null, replayed: true, pendingRewardsProcessed: 0, pendingRewardPaise: 0n };
   if (!['PENDING_PAYMENT', 'PENDING_VERIFICATION'].includes(request.status)) throw new HttpError(409, 'REWARD_FUNDING_REQUEST_ALREADY_DECIDED', 'This reward-funding request has already been decided.');
   if (input.decision === 'REJECT') {
     const updated = await tx.rewardFundFundingRequest.update({ where: { id: request.id }, data: { status: 'REJECTED', verifiedByUserId: input.verifierUserId, decisionReason: input.reason.trim(), decidedAt: new Date() } });
-    await tx.auditLog.create({ data: { actorId: input.verifierUserId, action: 'REWARD_FUNDING_REJECTED', target: `REWARD_FUND_FUNDING_REQUEST:${request.id}`, reason: input.reason.trim(), metadata: { amountPaise: String(request.amountPaise), paymentReferenceHash: request.paymentReferenceHash, ledgerTransactionId: null } } });
+    await tx.auditLog.create({ data: { actorId: input.verifierUserId, action: 'REWARD_FUNDING_REJECTED', target: `REWARD_FUND_FUNDING_REQUEST:${request.id}`, reason: input.reason.trim(), metadata: { makerUserId: request.makerUserId, verifierUserId: input.verifierUserId, amountPaise: String(request.amountPaise), paymentReferenceHash: request.paymentReferenceHash, ledgerTransactionId: null } } });
     return { request: updated, record: null, replayed: false, pendingRewardsProcessed: 0, pendingRewardPaise: 0n };
   }
   if (request.status !== 'PENDING_VERIFICATION' || !request.paymentReferenceHash || !input.paymentReference) {
@@ -342,24 +337,42 @@ export async function decideRewardFundFundingRequest(tx: Prisma.TransactionClien
     idempotencyKey: request.id,
     clearedFundsVerified: true,
     fundingRequestId: request.id,
+    makerUserId: request.makerUserId,
   });
   const updated = await tx.rewardFundFundingRequest.update({ where: { id: request.id }, data: { status: 'VERIFIED', verifiedByUserId: input.verifierUserId, decisionReason: input.reason.trim(), ledgerTransactionId: result.ledgerTransaction.id, decidedAt: new Date() } });
-  await tx.auditLog.create({ data: { actorId: input.verifierUserId, action: 'REWARD_FUNDING_VERIFIED', target: `REWARD_FUND_FUNDING_REQUEST:${request.id}`, reason: input.reason.trim(), metadata: { amountPaise: String(request.amountPaise), paymentReferenceHash: request.paymentReferenceHash, paymentReferenceMasked: request.paymentReferenceMasked, recipientVpa: request.recipientVpa, verificationMethod: 'MANUAL_RECEIVER_SIDE_HISTORY', ledgerTransactionId: result.ledgerTransaction.id, fundingRecordId: result.record.id } } });
+  await tx.auditLog.create({ data: { actorId: input.verifierUserId, action: 'REWARD_FUNDING_VERIFIED', target: `REWARD_FUND_FUNDING_REQUEST:${request.id}`, reason: input.reason.trim(), metadata: { makerUserId: request.makerUserId, verifierUserId: input.verifierUserId, amountPaise: String(request.amountPaise), paymentReferenceHash: request.paymentReferenceHash, paymentReferenceMasked: request.paymentReferenceMasked, recipientVpa: request.recipientVpa, verificationMethod: 'MANUAL_RECEIVER_SIDE_HISTORY', externalProviderVerification: false, ledgerTransactionId: result.ledgerTransaction.id, fundingRecordId: result.record.id } } });
   const pending = await processPendingRewardAccruals(tx, input.verifierUserId);
   return { request: updated, record: result.record, replayed: result.replayed, pendingRewardsProcessed: pending.processed, pendingRewardPaise: pending.creditedPaise };
 }
 
-export async function readRewardFundDashboard(db: PrismaClient) {
+export async function readRewardFundDashboard(db: PrismaClient, viewerUserId?: string) {
   const readiness = await readRewardFundReadiness(db);
-  const [requests, fundings, rewards] = await Promise.all([
+  const [requests, fundings, rewards, reserveLedger] = await Promise.all([
     db.rewardFundFundingRequest.findMany({ orderBy: { createdAt: 'desc' }, take: 50, include: { maker: { select: { publicId: true, displayName: true } }, verifiedBy: { select: { publicId: true, displayName: true } } } }),
     db.rewardFundFundingRecord.findMany({ orderBy: { createdAt: 'desc' }, take: 50, include: { verifiedBy: { select: { publicId: true, displayName: true } }, ledgerTransaction: { select: { id: true, createdAt: true } } } }),
     db.rewardLedgerEntry.findMany({ where: { referenceType: 'P2P_DEPOSIT_ORDER' }, orderBy: { createdAt: 'desc' }, take: 100, include: { wallet: { include: { user: { select: { publicId: true, displayName: true } } } } } }),
+    db.ledgerTransaction.findMany({
+      where: { eventType: { in: ['REWARD_FUNDING', 'P2P_ORDER_REWARD'] } },
+      orderBy: { createdAt: 'desc' }, take: 100,
+      select: { id: true, eventType: true, referenceType: true, referenceId: true, createdAt: true, entries: { select: { creditPaise: true, debitPaise: true, account: { select: { type: true, currency: true } } } } },
+    }),
   ]);
+  const orderIds = [...new Set(rewards.map((row) => row.referenceId))];
+  const orders = orderIds.length ? await db.p2pDepositOrder.findMany({ where: { id: { in: orderIds } }, select: { id: true, status: true } }) : [];
+  const principalStatusByOrder = new Map(orders.map((order) => [order.id, order.status]));
   return {
     readiness,
-    requests: requests.map(({ paymentReferenceHash: _hash, ...row }) => ({ ...row, amountPaise: Number(row.amountPaise), maker: { publicId: row.maker.publicId, displayName: row.maker.displayName }, verifiedBy: row.verifiedBy ? { publicId: row.verifiedBy.publicId, displayName: row.verifiedBy.displayName } : null })),
-    fundings: fundings.map(({ externalReferenceHash: _hash, evidenceSha256: _sha, ...row }) => ({ ...row, amountPaise: Number(row.amountPaise), verifiedBy: { publicId: row.verifiedBy.publicId, displayName: row.verifiedBy.displayName } })),
-    rewards: rewards.map((row) => ({ id: row.id, source: row.eventType, referenceId: row.referenceId, amountPaise: Number(row.amountPaise), status: row.eventType.includes('PENDING') ? 'PENDING_FUNDING' : row.eventType.includes('REVERSED') ? 'REVERSED' : 'CREDITED', user: { publicId: row.wallet.user.publicId, displayName: row.wallet.user.displayName }, createdAt: row.createdAt })),
+    requests: requests.map(({ paymentReferenceHash: _hash, makerUserId, verifiedByUserId: _verifierId, ...row }) => ({ ...row, amountPaise: Number(row.amountPaise), isMaker: viewerUserId === makerUserId, maker: { publicId: row.maker.publicId, displayName: row.maker.displayName }, verifiedBy: row.verifiedBy ? { publicId: row.verifiedBy.publicId, displayName: row.verifiedBy.displayName } : null })),
+    fundings: fundings.map(({ externalReferenceHash: _hash, evidenceSha256: _sha, verifiedByUserId: _verifierId, ...row }) => ({ ...row, amountPaise: Number(row.amountPaise), verifiedBy: { publicId: row.verifiedBy.publicId, displayName: row.verifiedBy.displayName } })),
+    reserveLedger: reserveLedger.map((transaction) => {
+      const deltaPaise = transaction.entries.reduce((total, entry) => entry.account.type === 'REWARD_FUND' && entry.account.currency === 'INR'
+        ? total + entry.creditPaise - entry.debitPaise : total, 0n);
+      return {
+        id: transaction.id, eventType: transaction.eventType, referenceType: transaction.referenceType,
+        referenceId: transaction.referenceId, amountPaise: Number(deltaPaise < 0n ? -deltaPaise : deltaPaise),
+        direction: deltaPaise > 0n ? 'FUNDING' : 'REWARD_ALLOCATION', createdAt: transaction.createdAt,
+      };
+    }),
+    rewards: rewards.map((row) => ({ id: row.id, source: row.eventType, referenceId: row.referenceId, amountPaise: Number(row.amountPaise), principalStatus: principalStatusByOrder.get(row.referenceId) ?? 'UNKNOWN', status: row.eventType.includes('PENDING') ? 'PENDING_FUNDING' : row.eventType.includes('REVERSED') ? 'REVERSED' : 'CREDITED', user: { publicId: row.wallet.user.publicId, displayName: row.wallet.user.displayName }, createdAt: row.createdAt })),
   };
 }

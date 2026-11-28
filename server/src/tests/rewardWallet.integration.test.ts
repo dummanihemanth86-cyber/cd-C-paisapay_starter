@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { env } from '../config/env.js';
 import { prisma } from '../lib/db.js';
 import { grantReward } from '../modules/payments/rewardWallet.js';
 
@@ -8,6 +9,7 @@ const integration = describe.skipIf(!prisma);
 integration('reward wallet PostgreSQL atomicity (isolated integration database)', () => {
   const db = prisma!;
   const testUsers: string[] = [];
+  let previousRewardFundingEnabled = false;
 
   async function createTestUser() {
     const suffix = randomUUID().replace(/\D/g, '').slice(0, 9).padEnd(9, '4');
@@ -29,6 +31,13 @@ integration('reward wallet PostgreSQL atomicity (isolated integration database)'
   }
 
   beforeAll(async () => { await db.$connect(); });
+  beforeEach(() => {
+    previousRewardFundingEnabled = env.rewardFundFundingEnabled;
+    // This is an in-memory test fixture only. The test process keeps all
+    // external feature flags false and never changes any deployed config.
+    env.rewardFundFundingEnabled = true;
+  });
+  afterEach(() => { env.rewardFundFundingEnabled = previousRewardFundingEnabled; });
   afterAll(async () => {
     for (const userId of [...testUsers]) await removeTestUser(userId);
     await db.$disconnect();
@@ -36,14 +45,15 @@ integration('reward wallet PostgreSQL atomicity (isolated integration database)'
 
   it('rolls back both the reward wallet and reward ledger when its enclosing settlement transaction fails', async () => {
     const userId = await createTestUser();
-    const idempotencyKey = `P2P_ORDER_REWARD:rollback-test:${randomUUID()}`;
+    const idempotencyKey = `INTEGRATION_TEST_REWARD:rollback-test:${randomUUID()}`;
+    const cashEntriesBefore = await db.ledgerEntry.count({ where: { account: { userId } } });
 
     await expect(db.$transaction(async (tx) => {
       await grantReward(tx, {
         userId,
-        eventType: 'P2P_ORDER_REWARD',
+        eventType: 'INTEGRATION_TEST_REWARD',
         amountPaise: 620n,
-        referenceType: 'P2P_DEPOSIT_ORDER',
+        referenceType: 'INTEGRATION_TEST',
         referenceId: randomUUID(),
         idempotencyKey,
         metadata: { percentBps: 620, testFixture: true },
@@ -53,17 +63,18 @@ integration('reward wallet PostgreSQL atomicity (isolated integration database)'
 
     expect(await db.rewardWallet.findUnique({ where: { userId } })).toBeNull();
     expect(await db.rewardLedgerEntry.findUnique({ where: { idempotencyKey } })).toBeNull();
+    expect(await db.ledgerEntry.count({ where: { account: { userId } } })).toBe(cashEntriesBefore);
     await removeTestUser(userId);
   });
 
   it('serializes concurrent duplicate reward grants to one ledger entry and one balance increment', async () => {
     const userId = await createTestUser();
-    const idempotencyKey = `P2P_ORDER_REWARD:concurrency-test:${randomUUID()}`;
+    const idempotencyKey = `INTEGRATION_TEST_REWARD:concurrency-test:${randomUUID()}`;
     const reward = {
       userId,
-      eventType: 'P2P_ORDER_REWARD',
+      eventType: 'INTEGRATION_TEST_REWARD',
       amountPaise: 620n,
-      referenceType: 'P2P_DEPOSIT_ORDER',
+      referenceType: 'INTEGRATION_TEST',
       referenceId: randomUUID(),
       idempotencyKey,
       metadata: { percentBps: 620, testFixture: true },

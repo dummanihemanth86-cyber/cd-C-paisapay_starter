@@ -9,6 +9,7 @@ import { requireAdmin, requireAuth } from '../../middleware/auth.js';
 import { assertManualUpiOperationsEnabled, manualUpiOperationsGate } from '../../middleware/financialOperations.js';
 import { env } from '../../config/env.js';
 import { grantVerifiedP2pOrderRewardResult, P2P_ORDER_REWARD_PERCENT_BPS } from '../payments/depositReward.js';
+import { assertP2pReviewerIsNotParty } from '../payments/rewardSafety.js';
 import { lockPaymentReference } from '../payments/paymentReferenceLock.js';
 import { grantVerifiedReferralCommission } from '../users/referralCommission.js';
 import { committedP2pAmount, createWithdrawalOffer, deriveP2pOfferStatus, ensureOpenP2pOffersReserved, expireP2pOffers, expireUnconfirmedP2pMatches, p2pPaymentHandoffUnresolved, P2P_ACTIVE_ORDER_STATUSES, P2P_COMMITTED_ORDER_STATUSES, P2P_HELD_ORDER_STATUSES, P2P_MATCH_CONFIRM_TTL_MS, releaseOfferFunds, reserveOfferFunds, validateP2pEvidence } from './service.js';
@@ -39,8 +40,8 @@ const quickDepositAmount = rupeeAmount.max(1_000_000, 'Quick deposit cannot exce
 const transactionReference = z.string().trim().min(4).max(120).regex(/^[A-Za-z0-9._/-]+$/).transform((value) => value.toUpperCase());
 // Proof claims can outlive the payment window. Older app/server versions left
 // those orders in a held/expired state even though the claim is still pending.
-// A pending claim remains reviewable, but rejection still requires Finance to
-// confirm non-receipt and approval still requires independent receipt checks.
+// A pending claim remains reviewable, but a reviewer must document manual
+// receiver-side checks; the service does not independently query a bank.
 const P2P_CLAIM_REVIEWABLE_ORDER_STATUSES = ['MATCHED', 'PAYMENT_PENDING', 'PAYMENT_EXPIRED_REVIEW', 'CANCELLED_PAYMENT_HOLD', 'PAYMENT_PROCESSING', 'DISPUTED'];
 
 function p2pOrderTimestamps(order: { createdAt: Date; expiresAt: Date | null; paymentDetailsShownAt: Date | null; paymentHandoffStartedAt: Date | null; cancellationRequestedAt?: Date | null }, events: Array<{ action: string; createdAt: Date }>) {
@@ -123,7 +124,7 @@ p2pRouter.get('/withdrawals/marketplace', p2pLimit, asyncRoute(async (req, res) 
     const status = deriveP2pOfferStatus(row.status, row.amountPaise, row.orders);
     return { ...offer, status, amountPaise: Number(row.amountPaise), matchedAmountPaise: Number(matchedAmountPaise), remainingAmountPaise: Number(remainingAmountPaise) };
   }).filter((row) => row.remainingAmountPaise > 0);
-  res.json({ currency: 'INR', offers: availableOffers, paymentVerificationAvailable: false, message: 'Buyers can match smaller amounts against the remaining offer balance; payment claims require independent Finance review.' });
+  res.json({ currency: 'INR', offers: availableOffers, paymentVerificationAvailable: false, message: 'Buyers can match smaller amounts against the remaining offer balance; payment claims require manual review by an authorized Finance/Admin reviewer.' });
 }));
 
 p2pRouter.post('/withdrawals/offers/:id/cancel', p2pLimit, asyncRoute(async (req, res) => {
@@ -246,7 +247,7 @@ p2pRouter.post('/deposits/orders/:id/confirm', p2pLimit, asyncRoute(async (req, 
     return order;
   });
   const shownAt = result.status === 'MATCHED' ? new Date() : result.paymentDetailsShownAt;
-  res.json({ serverTime: new Date(), order: { id: result.id, referenceId: result.referenceId, amountPaise: Number(result.amountPaise), currency: 'INR', status: 'PAYMENT_PENDING', expiresAt: result.expiresAt, paymentDetailsShownAt: shownAt }, paymentDetails: { method: 'UPI', payeeVpa: result.withdrawalOffer.payeeVpa, payeeName: result.withdrawalOffer.payeeName, ownershipStatus: 'UNVERIFIED_USER_PROVIDED' }, message: 'Five-minute payment window is running from the time of match. Seller-provided UPI name and ID are unverified. No wallet credit occurs until Finance independently confirms receipt.' });
+  res.json({ serverTime: new Date(), order: { id: result.id, referenceId: result.referenceId, amountPaise: Number(result.amountPaise), currency: 'INR', status: 'PAYMENT_PENDING', expiresAt: result.expiresAt, paymentDetailsShownAt: shownAt }, paymentDetails: { method: 'UPI', payeeVpa: result.withdrawalOffer.payeeVpa, payeeName: result.withdrawalOffer.payeeName, ownershipStatus: 'UNVERIFIED_USER_PROVIDED' }, message: 'Five-minute payment window is running from the time of match. Seller-provided UPI name and ID are unverified. No wallet credit occurs until an authorized reviewer manually checks receiver-side records.' });
 }));
 
 // Records the device's handoff attempt; a launch result is never payment evidence.
@@ -329,7 +330,7 @@ p2pRouter.post('/deposits/orders/:id/payment-reference', p2pLimit, asyncRoute(as
 }));
 
 /** Seller receipt confirmation is an acknowledgement only. Finance still has
- * to independently verify recipient-side records before ledger settlement. */
+ * to manually review receiver-side records before ledger settlement. */
 p2pRouter.post('/deposits/orders/:id/seller-received', p2pLimit, asyncRoute(async (req, res) => {
   const input = z.object({ transactionReference }).strict().parse(req.body);
   const db = databaseRequired();
@@ -377,7 +378,7 @@ p2pRouter.post('/deposits/orders/:id/seller-received', p2pLimit, asyncRoute(asyn
     confirmation: { orderId: result.order.id, confirmedAt: result.confirmation.confirmedAt, status: 'SELLER_ACKNOWLEDGED' },
     paymentVerified: false,
     ledgerSettled: false,
-    message: 'Seller receipt acknowledgement saved. Finance must independently verify the exact UPI receipt before any wallet ledger settlement.',
+    message: 'Seller receipt acknowledgement saved. An authorized Finance/Admin reviewer must manually check receiver-side records before wallet ledger settlement. This API does not independently verify bank receipt.',
   });
 }));
 
@@ -603,9 +604,10 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     if (!initial) throw new HttpError(404, 'P2P_CLAIM_NOT_FOUND', 'P2P payment claim was not found.');
     await tx.$queryRaw`SELECT id FROM p2p_deposit_orders WHERE id = ${initial.orderId}::uuid FOR UPDATE`;
     const claim = await tx.p2pPaymentClaim.findUniqueOrThrow({ where: { id: req.params.id }, include: { order: { include: { withdrawalOffer: true } } } });
+    assertP2pReviewerIsNotParty(req.auth!.userId, claim.order.buyerUserId, claim.order.sellerUserId);
     if (claim.status !== 'PENDING_REVIEW') throw new HttpError(409, 'P2P_CLAIM_ALREADY_REVIEWED', 'This payment claim has already been reviewed.');
     if (input.decision === 'REJECT') {
-      if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting independent payment review.');
+      if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting manual payment review.');
       if (await tx.p2pSellerPaymentConfirmation.findUnique({ where: { orderId: claim.orderId }, select: { id: true } })) {
         throw new HttpError(409, 'SELLER_CONFIRMED_RECEIPT', 'The seller has acknowledged receipt. Do not reject or release these funds; resolve the discrepancy through Finance review.');
       }
@@ -635,11 +637,11 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
     }
     await lockPaymentReference(tx, input.verifiedTransactionReference);
     const evidenceError = validateP2pEvidence({ claimedReference: claim.transactionReference, verifiedReference: input.verifiedTransactionReference!, expectedAmountPaise: claim.order.amountPaise, verifiedAmountPaise: BigInt(input.verifiedAmountPaise!), currency: input.verifiedCurrency!, receiverConfirmed: input.receiverConfirmed! });
-    if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires independently verified exact transaction reference, INR amount, and recipient receipt.');
+    if (evidenceError) throw new HttpError(409, evidenceError, 'Approval requires a manual receiver-side record check of the submitted reference, exact INR amount, and recipient. A UTR or screenshot by itself is only a payment claim, not independent bank verification.');
     if (input.verifiedPayeeVpa !== claim.order.withdrawalOffer.payeeVpa) throw new HttpError(409, 'PAYEE_MISMATCH', 'Verified recipient UPI ID does not match the payee on this matched offer.');
-    // The Admin's independent receiver-side verification is the settlement
-    // authority. Seller acknowledgement remains optional and must not block it.
-    if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status) || !['MATCHED', 'PARTIALLY_MATCHED', 'CANCELLED'].includes(claim.order.withdrawalOffer.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting independent payment review.');
+    // The authorized reviewer's documented manual receiver-side check is the
+    // settlement authority. The API does not independently query a bank/provider.
+    if (!P2P_CLAIM_REVIEWABLE_ORDER_STATUSES.includes(claim.order.status) || !['MATCHED', 'PARTIALLY_MATCHED', 'CANCELLED'].includes(claim.order.withdrawalOffer.status)) throw new HttpError(409, 'P2P_ORDER_NOT_REVIEWABLE', 'This matched order is not awaiting manual payment review.');
     const [usedDeposit, usedP2pOrder, usedManualClaim, usedP2pClaim, usedOtherSellerReceipt] = await Promise.all([
       tx.deposit.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' } }, select: { id: true } }),
       tx.p2pDepositOrder.findFirst({ where: { providerReference: { equals: input.verifiedTransactionReference!, mode: 'insensitive' }, id: { not: claim.orderId } }, select: { id: true } }),
@@ -674,15 +676,15 @@ p2pRouter.post('/admin/p2p/claims/:id/review', requireAdmin, asyncRoute(async (r
       await expireP2pOffers(tx);
     }
     await tx.reconciliationRecord.create({ data: { provider: 'MANUAL_P2P_UPI', providerReference: input.verifiedTransactionReference!, internalReference: claim.order.referenceId, amountPaise: claim.order.amountPaise, currency: 'INR', status: 'APPROVED' } });
-    await tx.auditLog.create({ data: { actorId: req.auth!.userId, action: 'P2P_PAYMENT_CLAIM_APPROVED', target: `P2P_DEPOSIT_ORDER:${claim.orderId}`, reason: input.reason, metadata: { claimId: claim.id, evidenceReference: input.evidenceReference, amountPaise: claim.order.amountPaise.toString(), currency: 'INR', receiverConfirmed: true, ledgerTransactionId: ledger.id } } });
+    await tx.auditLog.create({ data: { actorId: req.auth!.userId, action: 'P2P_PAYMENT_CLAIM_APPROVED', target: `P2P_DEPOSIT_ORDER:${claim.orderId}`, reason: input.reason, metadata: { claimId: claim.id, reviewerUserId: req.auth!.userId, evidenceReference: input.evidenceReference, amountPaise: claim.order.amountPaise.toString(), currency: 'INR', receiverConfirmed: true, verificationMethod: 'MANUAL_RECEIVER_SIDE_RECORD_CHECK', externalProviderVerification: false, ledgerTransactionId: ledger.id, principalStatus: 'SETTLED' } } });
     await tx.notification.createMany({ data: [
-      { userId: claim.order.buyerUserId, title: 'P2P payment verified', body: `Order ${claim.order.referenceId}: ₹${(Number(claim.order.amountPaise) / 100).toFixed(2)} cash principal was credited. ${reward.status === 'CREDITED' ? `A separate non-cash reward of ₹${(Number(reward.rewardPaise) / 100).toFixed(2)} was added to the reward wallet.` : reward.status === 'PENDING_FUNDING' ? `Reward ₹${(Number(reward.pendingPaise) / 100).toFixed(2)} is pending verified reward-pool funds and is not spendable.` : reward.status === 'LEGACY_RECORDED' ? 'An older reward record exists; no additional reward was issued.' : 'The reward program is disabled.'} View your receipt and reward wallet in the app.` },
+      { userId: claim.order.buyerUserId, title: 'P2P payment verified', body: `Order ${claim.order.referenceId}: ₹${(Number(claim.order.amountPaise) / 100).toFixed(2)} cash principal was credited. ${reward.status === 'CREDITED' ? `A separate non-cash reward of ₹${(Number(reward.rewardPaise) / 100).toFixed(2)} was added to the reward wallet.` : reward.status === 'PENDING_FUNDING' ? `Reward ₹${(Number(reward.pendingPaise) / 100).toFixed(2)} is pending verified reward-pool funds and is not spendable.` : reward.status === 'BLOCKED' ? 'Reward credit is blocked because a reward gate or reserve reconciliation check is not ready.' : reward.status === 'LEGACY_RECORDED' ? 'An older reward record exists; no additional reward was issued.' : 'The reward program is disabled.'} View your receipt and reward wallet in the app.` },
       { userId: claim.order.sellerUserId, title: offerStatus === 'SETTLED' ? 'P2P withdrawal settled' : 'P2P payment verified', body: offerStatus === 'SETTLED' ? `Offer ${claim.order.withdrawalOffer.referenceId} was fully settled after Finance verified receipt.` : offerStatus === 'CANCELLED' || offerStatus === 'EXPIRED' ? `A matched order for offer ${claim.order.withdrawalOffer.referenceId} was verified and settled. The offer remains ${offerStatus.toLowerCase()}; its unmatched amount is not available to new buyers.` : `A partial payment was verified for offer ${claim.order.withdrawalOffer.referenceId}. Other buyers may still match its remaining amount.` },
     ] });
     return { claim: updatedClaim, orderStatus: 'COMPLETED', offerStatus, credited: true, reward, referralCommission };
   }, { isolationLevel: 'Serializable' });
   const reward = result.reward;
-  res.json({ claim: { id: result.claim.id, status: result.claim.status }, orderStatus: result.orderStatus, offerStatus: result.offerStatus, rematchableAmountPaise: result.rematchableAmountPaise === undefined ? undefined : Number(result.rematchableAmountPaise), credited: result.credited, rewardStatus: reward?.status ?? 'NONE', rewardPaise: Number(reward?.rewardPaise ?? 0n), rewardPendingPaise: Number(reward?.pendingPaise ?? 0n), rewardRateBps: reward?.percentageBps ?? P2P_ORDER_REWARD_PERCENT_BPS, rewardCashEquivalent: false, rewardWithdrawalEnabled: false, referralCommissionPaise: Number(result.referralCommission?.amountPaise ?? 0n), referralCommissionStatus: result.referralCommission?.status ?? 'NONE', message: result.credited ? `Finance verified the exact receipt. The buyer cash principal was credited once. ${reward?.status === 'CREDITED' ? `Separate funded reward ₹${(Number(reward.rewardPaise) / 100).toFixed(2)} was added to the reward wallet.` : reward?.status === 'PENDING_FUNDING' ? `Reward ₹${(Number(reward.pendingPaise) / 100).toFixed(2)} remains pending verified reserve funding.` : reward?.status === 'LEGACY_RECORDED' ? 'An older reward record exists; no additional reward was issued.' : 'The reward program is disabled.'} Offer status is ${result.offerStatus}.` : 'Claim rejected, buyer order cancelled and its amount released for another match. No wallet credit was made.' });
+  res.json({ claim: { id: result.claim.id, status: result.claim.status }, orderStatus: result.orderStatus, principalStatus: result.credited ? 'SETTLED' : 'NOT_SETTLED', offerStatus: result.offerStatus, rematchableAmountPaise: result.rematchableAmountPaise === undefined ? undefined : Number(result.rematchableAmountPaise), credited: result.credited, rewardStatus: reward?.status ?? 'NONE', rewardPaise: Number(reward?.rewardPaise ?? 0n), rewardPendingPaise: Number(reward?.pendingPaise ?? 0n), rewardRateBps: reward?.percentageBps ?? P2P_ORDER_REWARD_PERCENT_BPS, rewardCashEquivalent: false, rewardWithdrawalEnabled: false, referralCommissionPaise: Number(result.referralCommission?.amountPaise ?? 0n), referralCommissionStatus: result.referralCommission?.status ?? 'NONE', message: result.credited ? `The authorized reviewer manually checked the receiver-side receipt. The buyer cash principal was credited once. ${reward?.status === 'CREDITED' ? `Separate funded reward ₹${(Number(reward.rewardPaise) / 100).toFixed(2)} was added to the reward wallet.` : reward?.status === 'PENDING_FUNDING' ? `Reward ₹${(Number(reward.pendingPaise) / 100).toFixed(2)} remains pending verified reserve funding.` : reward?.status === 'BLOCKED' ? 'Reward credit is blocked because reserve integrity or a required feature gate is not ready.' : reward?.status === 'LEGACY_RECORDED' ? 'An older reward record exists; no additional reward was issued.' : 'The reward program is disabled.'} Offer status is ${result.offerStatus}.` : 'Claim rejected, buyer order cancelled and its amount released for another match. No wallet credit was made.' });
 }));
 
 async function getLedgerAccount(tx: import('../../generated/prisma/client.js').Prisma.TransactionClient, userId: string, type: 'AVAILABLE' | 'RESERVED') {

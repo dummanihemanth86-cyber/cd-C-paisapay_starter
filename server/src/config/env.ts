@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { stagingFinancialFlagViolations } from './stagingFinancialFlags.js';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -104,6 +105,12 @@ const isExplicitRenderStaging = values.NODE_ENV === 'production'
   && values.PAISAPAY_DEPLOYMENT_ENV === 'staging'
   && process.env.RENDER === 'true'
   && process.env.RENDER_SERVICE_NAME === 'paisapay-api-staging';
+if (isExplicitRenderStaging) {
+  const invalidFlags = stagingFinancialFlagViolations(process.env);
+  if (invalidFlags.length) {
+    throw new Error(`Staging requires every financial gate to be explicitly false; missing, true, or unknown: ${invalidFlags.join(', ')}.`);
+  }
+}
 if (values.MANUAL_UPI_PRODUCTION_APPROVED && !values.MANUAL_UPI_OPERATIONS_ENABLED) {
   throw new Error('MANUAL_UPI_PRODUCTION_APPROVED requires MANUAL_UPI_OPERATIONS_ENABLED=true.');
 }

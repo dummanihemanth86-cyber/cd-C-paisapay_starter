@@ -3,7 +3,7 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "prisma.config.ts", "prisma/seed.ts"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "prisma.config.ts", "prisma/seed.ts"],
   "exclude": [
     "node_modules",
     "dist",
